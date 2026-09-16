@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
 	"os"
 	"sort"
 	"strconv"
@@ -94,6 +95,7 @@ func newJQ(ctx context.Context, step ir.Step) (executor.Executor, error) {
 
 	variables := make([]string, 0, len(jqCfg.Args))
 	values := make([]any, 0, len(jqCfg.Args))
+	seen := make(map[string]struct{}, len(jqCfg.Args))
 	for _, name := range sortedKeys(jqCfg.Args) {
 		value := jqCfg.Args[name]
 		if s, ok := value.(string); ok {
@@ -103,7 +105,12 @@ func newJQ(ctx context.Context, step ir.Step) (executor.Executor, error) {
 			}
 			value = resolved
 		}
-		variables = append(variables, "$"+strings.TrimPrefix(name, "$"))
+		variable := "$" + strings.TrimPrefix(name, "$")
+		if _, dup := seen[variable]; dup {
+			return nil, fmt.Errorf("jq: args %q duplicates variable %s", name, variable)
+		}
+		seen[variable] = struct{}{}
+		variables = append(variables, variable)
 		values = append(values, normalizeArgValue(value))
 	}
 
@@ -127,8 +134,8 @@ func sortedKeys(m map[string]any) []string {
 }
 
 // normalizeArgValue converts decoded YAML values into the value types gojq
-// accepts (nil, bool, int, float64, string, []any, map[string]any). YAML
-// decoders produce types like uint64 that gojq cannot handle.
+// accepts (nil, bool, int, float64, *big.Int, string, []any, map[string]any).
+// YAML decoders produce types like uint64 that gojq cannot handle.
 func normalizeArgValue(v any) any {
 	switch v := v.(type) {
 	case nil, bool, int, float64, string:
@@ -142,7 +149,10 @@ func normalizeArgValue(v any) any {
 	case int64:
 		return int(v)
 	case uint:
-		return int(v)
+		if v <= uint(math.MaxInt) {
+			return int(v)
+		}
+		return new(big.Int).SetUint64(uint64(v))
 	case uint8:
 		return int(v)
 	case uint16:
@@ -153,7 +163,7 @@ func normalizeArgValue(v any) any {
 		if v <= uint64(math.MaxInt) {
 			return int(v)
 		}
-		return float64(v)
+		return new(big.Int).SetUint64(v)
 	case float32:
 		return float64(v)
 	case []any:

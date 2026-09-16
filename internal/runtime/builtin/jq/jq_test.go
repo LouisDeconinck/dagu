@@ -6,6 +6,7 @@ package jq
 import (
 	"bytes"
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -738,6 +739,14 @@ func TestJQExecutor_Args(t *testing.T) {
 			expectedOutput: "nested\n",
 		},
 		{
+			name:           "LargeUint64VariableKeepsPrecision",
+			query:          `$big`,
+			script:         `{}`,
+			args:           map[string]any{"big": uint64(math.MaxUint64)},
+			raw:            true,
+			expectedOutput: "18446744073709551615\n",
+		},
+		{
 			name:      "UndeclaredVariableFails",
 			query:     `$missing`,
 			script:    `{}`,
@@ -779,4 +788,23 @@ func TestJQExecutor_Args(t *testing.T) {
 			assert.Equal(t, tt.expectedOutput, stdout.String())
 		})
 	}
+}
+
+func TestJQExecutor_ArgsDuplicateName(t *testing.T) {
+	t.Parallel()
+
+	step := ir.Step{
+		Commands: []ir.CommandEntry{{CmdWithArgs: "$name"}},
+		Script:   `{}`,
+		ExecutorConfig: ir.ExecutorConfig{
+			Type: "jq",
+			Config: map[string]any{
+				"args": map[string]any{"name": "a", "$name": "b"},
+			},
+		},
+	}
+
+	_, err := newJQ(context.Background(), step)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicates variable $name")
 }
