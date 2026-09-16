@@ -384,6 +384,8 @@ steps:
 
 Each child invocation receives the current item as `ITEM`.
 
+A completed `parallel` step publishes a JSON array of each successful child run's output variables on its step outputs channel, so a later step can read `${fan_out.outputs}` or `${fan_out.outputs[0].NAME}`.
+
 ## ssh.run / sftp.upload / sftp.download
 
 Remote command execution and file transfer over SSH.
