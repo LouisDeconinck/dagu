@@ -1221,6 +1221,12 @@ func mergedStepLogsBounded(dagStatus *ir.DAGRunStatus, limit int64) (string, err
 				_ = logFile.Close()
 				return "", fmt.Errorf("error reading %s: %w", stream.path, err)
 			}
+			// Directories stat successfully and report size 0 on Windows, so a
+			// zero-length copy would silently skip this check without it.
+			if info.IsDir() {
+				_ = logFile.Close()
+				return "", fmt.Errorf("error reading %s: is a directory", stream.path)
+			}
 			size := info.Size()
 			written, err := io.CopyN(&buf, logFile, min(size, remaining))
 			_ = logFile.Close()
