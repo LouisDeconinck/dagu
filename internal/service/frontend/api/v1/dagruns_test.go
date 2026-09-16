@@ -286,6 +286,131 @@ func TestGetDAGRunSpec(t *testing.T) {
 	).ExpectStatus(http.StatusNotFound).Send(t)
 }
 
+func TestDownloadDAGRunStepLogs(t *testing.T) {
+	server := test.SetupServer(t)
+	const dagName = "merged_step_logs_dag"
+
+	firstCommand := test.JoinShellCommands(
+		test.Output("out-first"),
+		test.Stderr("err-first"),
+	)
+	secondCommand := test.Output("out-second")
+	dagSpec := fmt.Sprintf(`steps:
+  - name: first
+    run: |
+%s
+  - name: second
+    depends: [first]
+    run: %q
+`, indentCommandBlock(firstCommand, 6), secondCommand)
+
+	_ = server.Client().Post("/api/v1/dags", api.CreateNewDAGJSONRequestBody{
+		Name: dagName,
+		Spec: &dagSpec,
+	}).ExpectStatus(http.StatusCreated).Send(t)
+
+	startResp := server.Client().Post("/api/v1/dags/"+dagName+"/start", api.ExecuteDAGJSONRequestBody{}).
+		ExpectStatus(http.StatusOK).Send(t)
+
+	var startBody api.ExecuteDAG200JSONResponse
+	startResp.Unmarshal(t, &startBody)
+	require.NotEmpty(t, startBody.DagRunId)
+
+	waitForStoredDAGRunStatus(t, server, dagName, startBody.DagRunId, 10*time.Second, func(status *ir.DAGRunStatus) bool {
+		return status.Status == ir.Succeeded
+	})
+
+	resp := server.Client().Get(
+		fmt.Sprintf("/api/v1/dag-runs/%s/%s/steps/log/download", dagName, startBody.DagRunId),
+	).ExpectStatus(http.StatusOK).Send(t)
+
+	disposition := resp.Response.Header().Get("Content-Disposition")
+	require.Contains(t, disposition, "attachment")
+	require.Contains(t, disposition, fmt.Sprintf("%s-%s-steps.log", dagName, startBody.DagRunId))
+
+	assert.Contains(t, resp.Body, "===== Step: first =====")
+	assert.Contains(t, resp.Body, "out-first")
+	assert.Contains(t, resp.Body, "err-first")
+	assert.Contains(t, resp.Body, "===== Step: second =====")
+	assert.Contains(t, resp.Body, "out-second")
+	assert.Less(t,
+		strings.Index(resp.Body, "===== Step: first ====="),
+		strings.Index(resp.Body, "===== Step: second ====="),
+	)
+
+	_ = server.Client().Get(
+		fmt.Sprintf("/api/v1/dag-runs/%s/%s/steps/log/download", dagName, "non_existent_run"),
+	).ExpectStatus(http.StatusNotFound).Send(t)
+	_ = server.Client().Get(
+		fmt.Sprintf("/api/v1/dag-runs/%s/%s/steps/log/download", "non_existent_dag", startBody.DagRunId),
+	).ExpectStatus(http.StatusNotFound).Send(t)
+}
+
+func TestDownloadSubDAGRunStepLogs(t *testing.T) {
+	server := test.SetupServer(t)
+	const dagName = "merged_step_logs_sub_dag"
+	childCommand := test.JoinShellCommands(
+		test.Output("sub-out"),
+		test.Stderr("sub-err"),
+	)
+
+	dagSpec := fmt.Sprintf(`steps:
+  - name: call_child
+    action: dag.run
+    with:
+      dag: child_dag
+
+---
+
+name: child_dag
+steps:
+  - name: child_step
+    run: |
+%s`, indentCommandBlock(childCommand, 6))
+
+	_ = server.Client().Post("/api/v1/dags", api.CreateNewDAGJSONRequestBody{
+		Name: dagName,
+		Spec: &dagSpec,
+	}).ExpectStatus(http.StatusCreated).Send(t)
+
+	startResp := server.Client().Post("/api/v1/dags/"+dagName+"/start", api.ExecuteDAGJSONRequestBody{}).
+		ExpectStatus(http.StatusOK).Send(t)
+
+	var startBody api.ExecuteDAG200JSONResponse
+	startResp.Unmarshal(t, &startBody)
+	require.NotEmpty(t, startBody.DagRunId)
+
+	status := waitForDAGRunStatus(t, server, dagName, startBody.DagRunId, 30*time.Second,
+		func(status *ir.DAGRunStatus) bool {
+			return status.Status == ir.Succeeded &&
+				len(status.Nodes) == 1 &&
+				len(status.Nodes[0].SubRuns) == 1
+		},
+	)
+	subDAGRunID := status.Nodes[0].SubRuns[0].DAGRunID
+
+	var resp *test.Response
+	require.Eventually(t, func() bool {
+		resp = server.Client().Get(
+			fmt.Sprintf("/api/v1/dag-runs/%s/%s/sub-dag-runs/%s/steps/log/download",
+				dagName, startBody.DagRunId, subDAGRunID),
+		).Send(t)
+		return resp.Response.StatusCode() == http.StatusOK &&
+			strings.Contains(resp.Body, "sub-out")
+	}, dagRunEventuallyTimeout(10*time.Second), 200*time.Millisecond)
+
+	disposition := resp.Response.Header().Get("Content-Disposition")
+	require.Contains(t, disposition, "attachment")
+	require.Contains(t, disposition, fmt.Sprintf("%s-%s-sub-%s-steps.log", dagName, startBody.DagRunId, subDAGRunID))
+	assert.Contains(t, resp.Body, "===== Step: child_step =====")
+	assert.Contains(t, resp.Body, "sub-err")
+
+	_ = server.Client().Get(
+		fmt.Sprintf("/api/v1/dag-runs/%s/%s/sub-dag-runs/%s/steps/log/download",
+			dagName, startBody.DagRunId, "non_existent_sub_run"),
+	).ExpectStatus(http.StatusNotFound).Send(t)
+}
+
 func TestGetDAGRunSpecInline(t *testing.T) {
 	server := test.SetupServer(t)
 

@@ -1360,3 +1360,62 @@ func TestAppendAgentAPIEventCapsHistory(t *testing.T) {
 	assert.Equal(t, int64(2), session.Events[0].Sequence)
 	assert.Equal(t, int64(maxAgentSessionAPIEvents+1), session.Events[len(session.Events)-1].Sequence)
 }
+
+func TestMergedStepLogs(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stdoutPath := filepath.Join(dir, "first.out")
+	stderrPath := filepath.Join(dir, "first.err")
+	require.NoError(t, os.WriteFile(stdoutPath, []byte("out-first\n"), 0o600))
+	require.NoError(t, os.WriteFile(stderrPath, []byte("err-first"), 0o600))
+
+	status := &ir.DAGRunStatus{
+		Nodes: []*ir.Node{
+			{Step: ir.Step{Name: "first"}, Stdout: stdoutPath, Stderr: stderrPath},
+			{Step: ir.Step{Name: "missing"}, Stdout: filepath.Join(dir, "absent.out")},
+			{Step: ir.Step{Name: "third"}},
+		},
+		OnExit: &ir.Node{Step: ir.Step{Name: "cleanup"}},
+	}
+
+	merged, err := mergedStepLogs(status)
+	require.NoError(t, err)
+
+	assert.Equal(t, `===== Step: first =====
+[stdout]
+out-first
+[stderr]
+err-first
+
+===== Step: missing =====
+[stdout]
+[stderr]
+
+===== Step: third =====
+[stdout]
+[stderr]
+
+===== Step: cleanup =====
+[stdout]
+[stderr]
+
+`, merged)
+}
+
+func TestMergedStepLogsReadError(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	dirAsFile := filepath.Join(dir, "not-a-file")
+	require.NoError(t, os.Mkdir(dirAsFile, 0o700))
+
+	status := &ir.DAGRunStatus{
+		Nodes: []*ir.Node{
+			{Step: ir.Step{Name: "first"}, Stdout: dirAsFile},
+		},
+	}
+
+	_, err := mergedStepLogs(status)
+	require.Error(t, err)
+}

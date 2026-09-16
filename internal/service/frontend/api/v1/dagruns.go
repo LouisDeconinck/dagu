@@ -1147,6 +1147,71 @@ func (a *API) DownloadDAGRunStepLog(ctx context.Context, request api.DownloadDAG
 	}, nil
 }
 
+func (a *API) DownloadDAGRunStepLogs(ctx context.Context, request api.DownloadDAGRunStepLogsRequestObject) (api.DownloadDAGRunStepLogsResponseObject, error) {
+	ref := ir.NewDAGRunRef(request.Name, request.DagRunId)
+	dagStatus, err := a.dagRunMgr.GetSavedStatus(ctx, ref)
+	if err != nil {
+		return api.DownloadDAGRunStepLogs404JSONResponse{
+			Code:    api.ErrorCodeNotFound,
+			Message: fmt.Sprintf("dag-run ID %s not found for DAG %s", request.DagRunId, request.Name),
+		}, nil
+	}
+	if err := a.requireDAGRunStatusVisible(ctx, dagStatus); err != nil {
+		return nil, err
+	}
+
+	merged, err := mergedStepLogs(dagStatus)
+	if err != nil {
+		return nil, err
+	}
+
+	filename := fmt.Sprintf("%s-%s-steps.log", sanitizeFilename(request.Name), sanitizeFilename(request.DagRunId))
+	return api.DownloadDAGRunStepLogs200TextResponse{
+		Body: merged,
+		Headers: api.DownloadDAGRunStepLogs200ResponseHeaders{
+			ContentDisposition: ptrOf(fmt.Sprintf("attachment; filename=\"%s\"", filename)),
+		},
+	}, nil
+}
+
+// mergedStepLogs concatenates the stdout and stderr logs of every node in run
+// order into one document, with a header attributing each section to its step.
+// Missing log files (e.g., skipped steps) produce an empty section.
+func mergedStepLogs(dagStatus *ir.DAGRunStatus) (string, error) {
+	var buf bytes.Buffer
+	for _, node := range dagStatus.NodesInRunOrder() {
+		if node == nil {
+			continue
+		}
+		fmt.Fprintf(&buf, "===== Step: %s =====\n", node.Step.Name)
+		for _, stream := range []struct {
+			name string
+			path string
+		}{
+			{"stdout", node.Stdout},
+			{"stderr", node.Stderr},
+		} {
+			fmt.Fprintf(&buf, "[%s]\n", stream.name)
+			if stream.path == "" {
+				continue
+			}
+			content, err := os.ReadFile(filepath.Clean(stream.path))
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue
+				}
+				return "", fmt.Errorf("error reading %s: %w", stream.path, err)
+			}
+			buf.Write(content)
+			if len(content) > 0 && !bytes.HasSuffix(content, []byte("\n")) {
+				buf.WriteByte('\n')
+			}
+		}
+		buf.WriteByte('\n')
+	}
+	return buf.String(), nil
+}
+
 func (a *API) UpdateDAGRunStepStatus(ctx context.Context, request api.UpdateDAGRunStepStatusRequestObject) (api.UpdateDAGRunStepStatusResponseObject, error) {
 	if err := a.isAllowed(config.PermissionRunDAGs); err != nil {
 		return nil, err
@@ -2657,6 +2722,33 @@ func (a *API) DownloadSubDAGRunStepLog(ctx context.Context, request api.Download
 	return &api.DownloadSubDAGRunStepLog200TextResponse{
 		Body: string(content),
 		Headers: api.DownloadSubDAGRunStepLog200ResponseHeaders{
+			ContentDisposition: ptrOf(fmt.Sprintf("attachment; filename=\"%s\"", filename)),
+		},
+	}, nil
+}
+
+func (a *API) DownloadSubDAGRunStepLogs(ctx context.Context, request api.DownloadSubDAGRunStepLogsRequestObject) (api.DownloadSubDAGRunStepLogsResponseObject, error) {
+	root := ir.NewDAGRunRef(request.Name, request.DagRunId)
+	dagStatus, err := a.getReferencedDAGRunStatus(ctx, root, request.SubDAGRunId, "")
+	if err != nil {
+		return &api.DownloadSubDAGRunStepLogs404JSONResponse{
+			Code:    api.ErrorCodeNotFound,
+			Message: fmt.Sprintf("sub dag-run ID %s not found for DAG %s", request.SubDAGRunId, request.Name),
+		}, nil
+	}
+	if err := a.requireDAGRunStatusVisible(ctx, dagStatus); err != nil {
+		return nil, err
+	}
+
+	merged, err := mergedStepLogs(dagStatus)
+	if err != nil {
+		return nil, err
+	}
+
+	filename := fmt.Sprintf("%s-%s-sub-%s-steps.log", sanitizeFilename(request.Name), sanitizeFilename(request.DagRunId), sanitizeFilename(request.SubDAGRunId))
+	return api.DownloadSubDAGRunStepLogs200TextResponse{
+		Body: merged,
+		Headers: api.DownloadSubDAGRunStepLogs200ResponseHeaders{
 			ContentDisposition: ptrOf(fmt.Sprintf("attachment; filename=\"%s\"", filename)),
 		},
 	}, nil

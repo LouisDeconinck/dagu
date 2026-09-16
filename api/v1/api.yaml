@@ -3067,6 +3067,42 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /dag-runs/{name}/{dagRunId}/steps/log/download:
+    get:
+      summary: "Download merged step logs of a DAG-run"
+      description: "Downloads the logs of all steps in a DAG-run merged into a single file"
+      operationId: "downloadDAGRunStepLogs"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGName"
+        - $ref: "#/components/parameters/DAGRunId"
+      responses:
+        "200":
+          description: "Merged log file content"
+          headers:
+            Content-Disposition:
+              schema:
+                type: "string"
+              description: "Attachment filename"
+          content:
+            text/plain:
+              schema:
+                type: "string"
+        "404":
+          description: "DAG-run not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /dag-runs/{name}/{dagRunId}/steps/{stepName}/messages:
     get:
       summary: "Retrieve chat messages for a step"
@@ -3737,6 +3773,48 @@ paths:
                 type: "string"
         "404":
           description: "Log file not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/log/download:
+    get:
+      summary: "Download merged step logs of a sub DAG-run"
+      description: "Downloads the logs of all steps in a sub DAG-run merged into a single file"
+      operationId: "downloadSubDAGRunStepLogs"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGName"
+        - $ref: "#/components/parameters/DAGRunId"
+        - name: "subDAGRunId"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+          description: "ID of the sub DAG-run to download the step logs for"
+      responses:
+        "200":
+          description: "Merged log file content"
+          headers:
+            Content-Disposition:
+              schema:
+                type: "string"
+              description: "Attachment filename"
+          content:
+            text/plain:
+              schema:
+                type: "string"
+        "404":
+          description: "Sub DAG-run not found"
           content:
             application/json:
               schema:

@@ -7,7 +7,7 @@
  * @module features/dags/components/dag-execution
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Download } from 'lucide-react';
+import { Download, Files } from 'lucide-react';
 import { components, Status } from '../../../../api/v1/schema';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -295,6 +295,24 @@ function ExecutionLog({ name, dagRunId, dagRun }: Props) {
     }
   }, [config.apiURL, name, dagRunId, dagRun, isSubDAGRun, remoteNode]);
 
+  const handleDownloadStepLogs = useCallback(async () => {
+    const endpoint = isSubDAGRun
+      ? `${config.apiURL}/dag-runs/${dagRun?.rootDAGRunName}/${dagRun?.rootDAGRunId}/sub-dag-runs/${dagRun?.dagRunId}/steps/log/download`
+      : `${config.apiURL}/dag-runs/${name}/${dagRunId}/steps/log/download`;
+
+    const url = new URL(endpoint, window.location.origin);
+    url.searchParams.set('remoteNode', remoteNode);
+
+    try {
+      await downloadFromUrl(
+        url.toString(),
+        `${name}-${dagRunId}-steps.log`
+      );
+    } catch (err) {
+      console.error('Download failed:', err);
+    }
+  }, [config.apiURL, name, dagRunId, dagRun, isSubDAGRun, remoteNode]);
+
   // Show loading indicator only on initial load
   if (isLoading && !cachedData && isInitialLoad.current) {
     return <LoadingIndicator />;
@@ -464,6 +482,19 @@ function ExecutionLog({ name, dagRunId, dagRun }: Props) {
                 title="Download full log"
               >
                 <Download className="h-4 w-4" />
+              </Button>
+            </I18nProps>
+
+            {/* Download merged step logs button */}
+            <I18nProps>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={handleDownloadStepLogs}
+                disabled={isNavigating}
+                title="Download merged step logs"
+              >
+                <Files className="h-4 w-4" />
               </Button>
             </I18nProps>
 
