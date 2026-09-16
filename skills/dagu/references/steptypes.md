@@ -30,6 +30,7 @@ steps:
 Fields:
 
 - `run` - command string or multi-line shell script
+- `input` - optional file path piped to the command's standard input, for example `input: ${fetch.stdout}`
 - `with.shell` - shell interpreter, for example `/bin/bash`
 - `with.shell_args` - shell interpreter arguments
 - `with.shell_packages` - optional packages to install before execution
@@ -42,6 +43,7 @@ Notes:
 - Dagu sends pipes, redirects, `&&`, and `;` to the selected shell. It does not split that shell syntax into separate Dagu commands.
 - DAG-level `shell` and `shell_args` provide defaults for inherited `run` steps. Use `with.shell` and `with.shell_args` when one step needs a different shell invocation.
 - Dagu resolves `${...}` references before the shell runs. For large or arbitrary text, prefer `printenv VAR_NAME`, reading `${step_id.stdout}` as a file, or `action: template.render`.
+- `input` resolves `${...}` references before the command runs; `${step_id.stdout}` gives the path to that step's captured stdout file. Relative `input` paths resolve against the step working directory.
 - Use scoped Dagu references for named values: `${consts.NAME}`, `${params.NAME}`, and `${env.NAME}`. Use shell `$NAME` only when the target shell should read the variable at execution time.
 - When large command output should become an artifact, write it to stdout/stderr and attach the stream directly instead of redirecting inside shell:
 

@@ -92,6 +92,12 @@ func withStdout(stdout string) stepOption {
 	}
 }
 
+func withInput(input string) stepOption {
+	return func(step *ir.Step) {
+		step.Input = input
+	}
+}
+
 func withEnvVars(envs ...string) stepOption {
 	return func(step *ir.Step) {
 		step.Env = append(step.Env, envs...)

@@ -57,6 +57,8 @@ type step struct {
 	Stdout any `yaml:"stdout,omitempty"`
 	// Stderr is the file to write the stderr.
 	Stderr any `yaml:"stderr,omitempty"`
+	// Input is the file whose contents are piped to the command's standard input.
+	Input string `yaml:"input,omitempty"`
 	// LogOutput specifies how stdout and stderr are handled in log files for this step.
 	// Overrides the DAG-level logOutput setting.
 	// Can be "separate" (default) for separate .out and .err files,
@@ -430,6 +432,7 @@ var stepLogOutputStage = stepTransformStage{
 			out.Stderr = v.filePath
 			out.StderrArtifact = v.artifactPath
 		}),
+	stepField("input", buildStepInput, func(out *ir.Step, v string) { out.Input = v }),
 	stepField("log_output", buildStepLogOutput, func(out *ir.Step, v ir.LogOutputMode) { out.LogOutput = v }),
 }
 
@@ -559,6 +562,7 @@ var stepCommandValidationStage = stepValidationStage{
 	{"command", validateMultipleCommands},
 	{"script", validateScript},
 	{"shell", validateShell},
+	{"input", validateInput},
 }
 
 var stepExecutionValidationStage = stepValidationStage{
@@ -667,6 +671,10 @@ func buildStepShellPackages(_ stepBuildContext, s *step) ([]string, error) {
 
 func buildStepScript(_ stepBuildContext, s *step) (string, error) {
 	return strings.TrimSpace(s.Script), nil
+}
+
+func buildStepInput(_ stepBuildContext, s *step) (string, error) {
+	return strings.TrimSpace(s.Input), nil
 }
 
 type stepOutputRedirect struct {
@@ -1944,6 +1952,21 @@ func validateShell(result *ir.Step) error {
 			"shell",
 			result.Shell,
 			fmt.Errorf("action %q does not support shell configuration", result.ExecutorConfig.Type),
+		)
+	}
+	return nil
+}
+
+// validateInput checks if the executor type supports the input field.
+func validateInput(result *ir.Step) error {
+	if result.Input == "" {
+		return nil
+	}
+	if !registry.ExecutorCapabilitiesFor(result.ExecutorConfig.Type).Input {
+		return ir.NewValidationError(
+			"input",
+			result.Input,
+			fmt.Errorf("action %q does not support input field", result.ExecutorConfig.Type),
 		)
 	}
 	return nil

@@ -243,6 +243,13 @@ func (d *Data) SetScript(script string) {
 	d.inner.Step.Script = script
 }
 
+func (d *Data) SetInput(input string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.inner.Step.Input = input
+}
+
 func (s *Data) SetStep(step ir.Step) {
 	// TODO: refactor to avoid modifying the step
 	s.mu.Lock()

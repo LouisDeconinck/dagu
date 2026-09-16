@@ -62,6 +62,22 @@ func (e *commandExecutor) Run(ctx context.Context) error {
 			_ = fileutil.Remove(scriptFile)
 		}()
 	}
+	// Open the input file, if configured, so its contents are piped to the
+	// command's standard input.
+	if e.config.InputPath != "" {
+		inputPath := e.config.InputPath
+		if dir := e.config.Dir; dir != "" && !filepath.IsAbs(inputPath) {
+			inputPath = filepath.Join(dir, inputPath)
+		}
+		input, err := os.Open(inputPath)
+		if err != nil {
+			e.mu.Unlock()
+			return fmt.Errorf("failed to open input file %q: %w", inputPath, err)
+		}
+		defer func() { _ = input.Close() }()
+		e.config.Stdin = input
+	}
+
 	// Wrap stderr with a tailing writer so we can include recent
 	// stderr output (rolling, up to limit) in error messages.
 	// Use encoding from DAGContext to properly decode non-UTF-8 output.
@@ -179,16 +195,19 @@ func (e *commandExecutor) annotateStderrTail(tail string) string {
 }
 
 type commandConfig struct {
-	Ctx                context.Context
-	Dir                string
-	Command            string
-	Args               []string
-	Script             string
-	Shell              []string // Shell command and arguments, e.g., ["/bin/sh", "-e"]
-	ShellCommandArgs   string   // The command string to execute via shell -c
-	ShellPackages      []string // Packages for nix-shell
-	Stdout             io.Writer
-	Stderr             io.Writer
+	Ctx              context.Context
+	Dir              string
+	Command          string
+	Args             []string
+	Script           string
+	Shell            []string // Shell command and arguments, e.g., ["/bin/sh", "-e"]
+	ShellCommandArgs string   // The command string to execute via shell -c
+	ShellPackages    []string // Packages for nix-shell
+	Stdout           io.Writer
+	Stderr           io.Writer
+	// InputPath is the resolved path of the file piped to the command's stdin.
+	InputPath          string
+	Stdin              io.Reader
 	UserSpecifiedShell bool
 }
 
@@ -283,6 +302,7 @@ func (cfg *commandConfig) newCmd(ctx context.Context, scriptFile string) (*exec.
 
 	cmd.Env = append(cmd.Env, runtime.AllEnvs(ctx)...)
 	cmd.Dir = cfg.Dir
+	cmd.Stdin = cfg.Stdin
 	cmd.Stdout = cfg.Stdout
 	cmd.Stderr = cfg.Stderr
 	cmdutil.SetupCommand(cmd)
@@ -359,6 +379,7 @@ func NewCommandConfig(ctx context.Context, step ir.Step) (*commandConfig, error)
 		Shell:              env.Shell(ctx),
 		ShellCommandArgs:   shellCmdArgs,
 		ShellPackages:      step.ShellPackages,
+		InputPath:          step.Input,
 		UserSpecifiedShell: step.Shell != "",
 	}, nil
 }
@@ -371,6 +392,7 @@ func init() {
 		MultipleCommands: true,
 		Script:           true,
 		Shell:            true,
+		Input:            true,
 		CommandContext: func(ctx context.Context, step ir.Step) cmnvalue.CommandContext {
 			shell := commandContextShell(ctx, step)
 			return cmnvalue.CommandContext{

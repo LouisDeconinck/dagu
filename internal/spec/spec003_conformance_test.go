@@ -355,7 +355,7 @@ func registerSpec003ExecutorCapabilities() {
 	registerSpec003ExecutorCapabilitiesOnce.Do(func() {
 		for _, typ := range []string{"", "shell", "command"} {
 			registry.RegisterExecutorCapabilities(typ, registry.ExecutorCapabilities{
-				Command: true, MultipleCommands: true, Script: true, Shell: true,
+				Command: true, MultipleCommands: true, Script: true, Shell: true, Input: true,
 			})
 		}
 		for _, typ := range []string{"docker", "container"} {

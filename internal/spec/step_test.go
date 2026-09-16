@@ -23,10 +23,10 @@ func TestMain(m *testing.M) {
 	// Register executor capabilities for testing.
 	// In production, this is done by runtime/builtin init functions.
 
-	// Command executors: support command, multiple commands, script, shell
+	// Command executors: support command, multiple commands, script, shell, input
 	for _, t := range []string{"", "shell", "command"} {
 		registry.RegisterExecutorCapabilities(t, registry.ExecutorCapabilities{
-			Command: true, MultipleCommands: true, Script: true, Shell: true,
+			Command: true, MultipleCommands: true, Script: true, Shell: true, Input: true,
 		})
 	}
 	// Docker: supports command, multiple commands, and container
@@ -2434,6 +2434,84 @@ func TestValidateShell(t *testing.T) {
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), "does not support shell configuration")
+				assert.Contains(t, err.Error(), tt.executorType)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidateInput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		executorType string
+		input        string
+		wantErr      bool
+	}{
+		// Executors that support input
+		{
+			name:         "InputWithDefaultExecutor",
+			executorType: "",
+			input:        "data.txt",
+			wantErr:      false,
+		},
+		{
+			name:         "InputWithCommandExecutor",
+			executorType: "command",
+			input:        "data.txt",
+			wantErr:      false,
+		},
+		{
+			name:         "InputWithShellExecutor",
+			executorType: "shell",
+			input:        "data.txt",
+			wantErr:      false,
+		},
+		// Executors that do not support input
+		{
+			name:         "InputWithDockerExecutor",
+			executorType: "docker",
+			input:        "data.txt",
+			wantErr:      true,
+		},
+		{
+			name:         "InputWithSSHExecutor",
+			executorType: "ssh",
+			input:        "data.txt",
+			wantErr:      true,
+		},
+		{
+			name:         "InputWithHTTPExecutor",
+			executorType: "http",
+			input:        "data.txt",
+			wantErr:      true,
+		},
+		// Empty input - should always pass
+		{
+			name:         "EmptyInputWithSSHExecutor",
+			executorType: "ssh",
+			input:        "",
+			wantErr:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := &ir.Step{
+				Input: tt.input,
+				ExecutorConfig: ir.ExecutorConfig{
+					Type: tt.executorType,
+				},
+			}
+			err := validateInput(result)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "does not support input field")
 				assert.Contains(t, err.Error(), tt.executorType)
 			} else {
 				assert.NoError(t, err)

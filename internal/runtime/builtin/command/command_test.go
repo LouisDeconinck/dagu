@@ -639,6 +639,100 @@ func TestCommandExecutor_SimpleCommand(t *testing.T) {
 	}
 }
 
+// TestCommandExecutor_Input tests that the step input field pipes a file to stdin
+func TestCommandExecutor_Input(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("Skipping Unix-specific test on Windows")
+	}
+
+	t.Run("InputFilePipedToStdin", func(t *testing.T) {
+		ctx := setupTestContext(t, nil, ir.Step{})
+
+		inputFile := filepath.Join(t.TempDir(), "input.txt")
+		require.NoError(t, os.WriteFile(inputFile, []byte("piped content\n"), 0600))
+
+		step := ir.Step{
+			Name:     "test",
+			Commands: []ir.CommandEntry{{Command: "cat", CmdWithArgs: "cat"}},
+			Input:    inputFile,
+		}
+		exec, err := NewCommand(ctx, step)
+		require.NoError(t, err)
+
+		var stdout, stderr strings.Builder
+		exec.SetStdout(&stdout)
+		exec.SetStderr(&stderr)
+
+		require.NoError(t, exec.Run(ctx))
+		assert.Equal(t, "piped content\n", stdout.String())
+	})
+
+	t.Run("RelativeInputPathResolvedFromWorkingDir", func(t *testing.T) {
+		workDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(workDir, "data.txt"), []byte("relative\n"), 0600))
+
+		step := ir.Step{
+			Name:     "test",
+			Commands: []ir.CommandEntry{{Command: "cat", CmdWithArgs: "cat"}},
+			Input:    "data.txt",
+		}
+		ctx := context.Background()
+		ctx = runtime.NewContext(ctx, &ir.DAG{Name: "test-dag"}, "test-run", "")
+		env := runtime.NewEnv(ctx, step)
+		env.WorkingDir = workDir
+		ctx = runtime.WithEnv(ctx, env)
+
+		exec, err := NewCommand(ctx, step)
+		require.NoError(t, err)
+
+		var stdout strings.Builder
+		exec.SetStdout(&stdout)
+
+		require.NoError(t, exec.Run(ctx))
+		assert.Equal(t, "relative\n", stdout.String())
+	})
+
+	t.Run("MissingInputFileFails", func(t *testing.T) {
+		ctx := setupTestContext(t, nil, ir.Step{})
+
+		step := ir.Step{
+			Name:     "test",
+			Commands: []ir.CommandEntry{{Command: "cat", CmdWithArgs: "cat"}},
+			Input:    filepath.Join(t.TempDir(), "missing.txt"),
+		}
+		exec, err := NewCommand(ctx, step)
+		require.NoError(t, err)
+
+		err = exec.Run(ctx)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to open input file")
+	})
+
+	t.Run("EachCommandReceivesInput", func(t *testing.T) {
+		ctx := setupTestContext(t, nil, ir.Step{})
+
+		inputFile := filepath.Join(t.TempDir(), "input.txt")
+		require.NoError(t, os.WriteFile(inputFile, []byte("shared input\n"), 0600))
+
+		step := ir.Step{
+			Name: "test",
+			Commands: []ir.CommandEntry{
+				{Command: "cat", CmdWithArgs: "cat"},
+				{Command: "cat", CmdWithArgs: "cat"},
+			},
+			Input: inputFile,
+		}
+		exec, err := NewCommand(ctx, step)
+		require.NoError(t, err)
+
+		var stdout strings.Builder
+		exec.SetStdout(&stdout)
+
+		require.NoError(t, exec.Run(ctx))
+		assert.Equal(t, "shared input\nshared input\n", stdout.String())
+	})
+}
+
 // TestCommandExecutor_ScriptExecution tests script execution
 func TestCommandExecutor_ScriptExecution(t *testing.T) {
 	if goruntime.GOOS == "windows" {

@@ -1463,6 +1463,52 @@ func TestRunner(t *testing.T) {
 		assert.Contains(t, string(content), "downstream")
 	})
 
+	t.Run("InputPipesStepStdoutFileToStdin", func(t *testing.T) {
+		if windowsShellTest() {
+			t.Skip("uses cat to read stdin")
+		}
+		r := setupRunner(t)
+
+		plan := r.newPlan(t,
+			newStep("first",
+				withID("first"),
+				withCommand("echo upstream-data"),
+			),
+			newStep("second",
+				withDepends("first"),
+				withInput("${first.stdout}"),
+				withCommand("cat"),
+				withOutput("OUT"),
+			),
+		)
+
+		result := plan.assertRun(t, ir.Succeeded)
+		result.assertNodeStatus(t, "first", ir.NodeSucceeded)
+		result.assertNodeStatus(t, "second", ir.NodeSucceeded)
+
+		node := result.nodeByName(t, "second")
+		output, ok := node.NodeData().State.OutputVariables.Load("OUT")
+		require.True(t, ok, "output variable not found")
+		assert.Equal(t, "OUT=upstream-data", output)
+	})
+
+	t.Run("InputMissingFileFailsStep", func(t *testing.T) {
+		if windowsShellTest() {
+			t.Skip("uses cat to read stdin")
+		}
+		r := setupRunner(t)
+
+		plan := r.newPlan(t,
+			newStep("reader",
+				withInput("does-not-exist.txt"),
+				withCommand("cat"),
+			),
+		)
+
+		result := plan.assertRun(t, ir.Failed)
+		result.assertNodeStatus(t, "reader", ir.NodeFailed)
+	})
+
 	t.Run("DAGRunStatusNotAvailableToMainSteps", func(t *testing.T) {
 		r := setupRunner(t)
 

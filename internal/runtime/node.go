@@ -865,6 +865,15 @@ func (n *Node) setupExecutor(ctx context.Context) (context.Context, executor.Exe
 		n.SetScript(script)
 	}
 
+	// Evaluate input if set
+	if input := n.Step().Input; input != "" {
+		resolved, err := resolveRuntimeString(ctx, input, cmnvalue.WorkflowField("input"))
+		if err != nil {
+			return ctx, nil, fmt.Errorf("failed to eval input: %w", err)
+		}
+		n.SetInput(resolved)
+	}
+
 	// Create the executor
 	cmd, err := executor.NewExecutor(ctx, n.Step())
 	if err != nil {
