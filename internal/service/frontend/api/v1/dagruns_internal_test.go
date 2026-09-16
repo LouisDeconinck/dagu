@@ -1419,3 +1419,35 @@ func TestMergedStepLogsReadError(t *testing.T) {
 	_, err := mergedStepLogs(status)
 	require.Error(t, err)
 }
+
+func TestMergedStepLogsTruncatesAtLimit(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stdoutPath := filepath.Join(dir, "first.out")
+	stderrPath := filepath.Join(dir, "first.err")
+	require.NoError(t, os.WriteFile(stdoutPath, []byte("0123456789"), 0o600))
+	require.NoError(t, os.WriteFile(stderrPath, []byte("stderr-data"), 0o600))
+
+	status := &ir.DAGRunStatus{
+		Nodes: []*ir.Node{
+			{Step: ir.Step{Name: "first"}, Stdout: stdoutPath, Stderr: stderrPath},
+			{Step: ir.Step{Name: "second"}, Stdout: stdoutPath},
+		},
+	}
+
+	merged, err := mergedStepLogsBounded(status, 4)
+	require.NoError(t, err)
+
+	assert.Equal(t, `===== Step: first =====
+[stdout]
+0123
+[stderr]
+
+===== Step: second =====
+[stdout]
+[stderr]
+
+[merged log truncated at 4 bytes]
+`, merged)
+}

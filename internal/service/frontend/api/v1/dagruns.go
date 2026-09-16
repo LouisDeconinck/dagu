@@ -1151,10 +1151,13 @@ func (a *API) DownloadDAGRunStepLogs(ctx context.Context, request api.DownloadDA
 	ref := ir.NewDAGRunRef(request.Name, request.DagRunId)
 	dagStatus, err := a.dagRunMgr.GetSavedStatus(ctx, ref)
 	if err != nil {
-		return api.DownloadDAGRunStepLogs404JSONResponse{
-			Code:    api.ErrorCodeNotFound,
-			Message: fmt.Sprintf("dag-run ID %s not found for DAG %s", request.DagRunId, request.Name),
-		}, nil
+		if isDAGRunLookupNotFound(err) {
+			return api.DownloadDAGRunStepLogs404JSONResponse{
+				Code:    api.ErrorCodeNotFound,
+				Message: fmt.Sprintf("dag-run ID %s not found for DAG %s", request.DagRunId, request.Name),
+			}, nil
+		}
+		return nil, err
 	}
 	if err := a.requireDAGRunStatusVisible(ctx, dagStatus); err != nil {
 		return nil, err
@@ -1174,11 +1177,22 @@ func (a *API) DownloadDAGRunStepLogs(ctx context.Context, request api.DownloadDA
 	}, nil
 }
 
+// mergedStepLogsLimit bounds the log bytes copied into a merged download so a
+// run with large or numerous logs cannot exhaust server memory. Content beyond
+// the limit is dropped and a truncation notice is appended instead.
+const mergedStepLogsLimit = 64 << 20 // 64 MiB
+
 // mergedStepLogs concatenates the stdout and stderr logs of every node in run
 // order into one document, with a header attributing each section to its step.
 // Missing log files (e.g., skipped steps) produce an empty section.
 func mergedStepLogs(dagStatus *ir.DAGRunStatus) (string, error) {
+	return mergedStepLogsBounded(dagStatus, mergedStepLogsLimit)
+}
+
+func mergedStepLogsBounded(dagStatus *ir.DAGRunStatus, limit int64) (string, error) {
 	var buf bytes.Buffer
+	remaining := limit
+	truncated := false
 	for _, node := range dagStatus.NodesInRunOrder() {
 		if node == nil {
 			continue
@@ -1195,19 +1209,36 @@ func mergedStepLogs(dagStatus *ir.DAGRunStatus) (string, error) {
 			if stream.path == "" {
 				continue
 			}
-			content, err := os.ReadFile(filepath.Clean(stream.path))
+			logFile, err := os.Open(filepath.Clean(stream.path))
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
 					continue
 				}
 				return "", fmt.Errorf("error reading %s: %w", stream.path, err)
 			}
-			buf.Write(content)
-			if len(content) > 0 && !bytes.HasSuffix(content, []byte("\n")) {
+			info, err := logFile.Stat()
+			if err != nil {
+				_ = logFile.Close()
+				return "", fmt.Errorf("error reading %s: %w", stream.path, err)
+			}
+			size := info.Size()
+			written, err := io.CopyN(&buf, logFile, min(size, remaining))
+			_ = logFile.Close()
+			if err != nil && !errors.Is(err, io.EOF) {
+				return "", fmt.Errorf("error reading %s: %w", stream.path, err)
+			}
+			remaining -= written
+			if size > written {
+				truncated = true
+			}
+			if written > 0 && buf.Bytes()[buf.Len()-1] != '\n' {
 				buf.WriteByte('\n')
 			}
 		}
 		buf.WriteByte('\n')
+	}
+	if truncated {
+		fmt.Fprintf(&buf, "[merged log truncated at %d bytes]\n", limit)
 	}
 	return buf.String(), nil
 }
@@ -2731,10 +2762,13 @@ func (a *API) DownloadSubDAGRunStepLogs(ctx context.Context, request api.Downloa
 	root := ir.NewDAGRunRef(request.Name, request.DagRunId)
 	dagStatus, err := a.getReferencedDAGRunStatus(ctx, root, request.SubDAGRunId, "")
 	if err != nil {
-		return &api.DownloadSubDAGRunStepLogs404JSONResponse{
-			Code:    api.ErrorCodeNotFound,
-			Message: fmt.Sprintf("sub dag-run ID %s not found for DAG %s", request.SubDAGRunId, request.Name),
-		}, nil
+		if isDAGRunLookupNotFound(err) {
+			return &api.DownloadSubDAGRunStepLogs404JSONResponse{
+				Code:    api.ErrorCodeNotFound,
+				Message: fmt.Sprintf("sub dag-run ID %s not found for DAG %s", request.SubDAGRunId, request.Name),
+			}, nil
+		}
+		return nil, err
 	}
 	if err := a.requireDAGRunStatusVisible(ctx, dagStatus); err != nil {
 		return nil, err
@@ -3821,6 +3855,9 @@ func (a *API) getReferencedDAGRunStatusWithRef(ctx context.Context, parentRef ir
 	ref := ir.NewDAGRunRef(dagName, subRunID)
 	status, err = a.dagRunMgr.GetSavedStatus(ctx, ref)
 	if err != nil {
+		if !isDAGRunLookupNotFound(err) {
+			return ir.DAGRunRef{}, nil, err
+		}
 		return ir.DAGRunRef{}, nil, subErr
 	}
 	return ref, status, nil
