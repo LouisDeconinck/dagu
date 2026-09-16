@@ -64,6 +64,25 @@ func indentCommandBlock(command string, spaces int) string {
 	return prefix + strings.Join(lines, "\n"+prefix)
 }
 
+// envReportScript returns a portable command that prints labelled env values,
+// one per line, preserving empty values.
+func envReportScript(names ...string) string {
+	if runtime.GOOS == "windows" {
+		lines := make([]string, 0, len(names))
+		for _, name := range names {
+			lines = append(lines, fmt.Sprintf(`Write-Output "%s=$($env:%s)"`, name, name))
+		}
+		return strings.Join(lines, "\n")
+	}
+	format := make([]string, 0, len(names))
+	args := make([]string, 0, len(names))
+	for _, name := range names {
+		format = append(format, name+"=%s")
+		args = append(args, fmt.Sprintf(`"${%s:-}"`, name))
+	}
+	return fmt.Sprintf("printf '%s\\n' %s", strings.Join(format, "\\n"), strings.Join(args, " "))
+}
+
 func TestInlineSubDAG(t *testing.T) {
 	t.Run("SimpleExecution", func(t *testing.T) {
 		th := test.Setup(t)
@@ -938,5 +957,158 @@ steps:
 		variables := successStep.OutputVariables.Variables()
 		require.Contains(t, variables, "STEP_OUTPUT")
 		require.Contains(t, variables["STEP_OUTPUT"], "output_first_attempt_success")
+	})
+}
+
+func TestSubDAG_InheritEnv(t *testing.T) {
+	readChildResult := func(t *testing.T, th test.Command, parentName, dagRunID string) string {
+		t.Helper()
+		ctx := context.Background()
+		ref := ir.NewDAGRunRef(parentName, dagRunID)
+		parentAttempt, err := th.DAGRunRepository.FindAttempt(ctx, ref)
+		require.NoError(t, err)
+		parentStatus, err := parentAttempt.ReadStatus(ctx)
+		require.NoError(t, err)
+		require.Equal(t, ir.Succeeded, parentStatus.Status)
+		subNode := parentStatus.Nodes[0]
+		require.Len(t, subNode.SubRuns, 1)
+		subAttempt, err := th.DAGRunRepository.FindSubAttempt(ctx, ref, subNode.SubRuns[0].DAGRunID)
+		require.NoError(t, err)
+		subStatus, err := subAttempt.ReadStatus(ctx)
+		require.NoError(t, err)
+		require.Equal(t, ir.Succeeded, subStatus.Status)
+		require.NotNil(t, subStatus.Nodes[0].OutputVariables)
+		return subStatus.Nodes[0].OutputVariables.Variables()["RESULT"]
+	}
+
+	t.Run("Selective", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		t.Setenv("GH_USER", "octocat")
+
+		th.CreateDAGFile(t, "parent_inherit_selective.yaml", `
+env:
+  - TODAY: "2026-03-05"
+  - NOT_LISTED: secret-value
+steps:
+  - name: call_sub
+    action: dag.run
+    with:
+      dag: sub_inherit_env
+    inherit_env: [TODAY, GH_USER]
+`)
+
+		th.CreateDAGFile(t, "sub_inherit_env.yaml", fmt.Sprintf(`
+steps:
+  - name: report
+    run: |
+%s
+    output: RESULT
+`, indentCommandBlock(envReportScript("TODAY", "GH_USER", "NOT_LISTED"), 6)))
+
+		dagRunID := uuid.Must(uuid.NewV7()).String()
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args:        []string{"start", "--run-id", dagRunID, "parent_inherit_selective"},
+			ExpectedOut: []string{"DAG run finished"},
+		})
+
+		// TODAY comes from the parent env, GH_USER from the process environment.
+		// NOT_LISTED stays unset because it is not in inherit_env.
+		require.Equal(t, "TODAY=2026-03-05\nGH_USER=octocat\nNOT_LISTED=secret-value", readChildResult(t, th, "parent_inherit_selective", dagRunID))
+	})
+
+	t.Run("All", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		t.Setenv("GH_USER", "octocat")
+
+		th.CreateDAGFile(t, "parent_inherit_all.yaml", `
+env:
+  - TODAY: "2026-03-05"
+  - NOT_LISTED: secret-value
+steps:
+  - name: call_sub
+    action: dag.run
+    with:
+      dag: sub_inherit_env
+    inherit_env: true
+`)
+
+		th.CreateDAGFile(t, "sub_inherit_env.yaml", fmt.Sprintf(`
+steps:
+  - name: report
+    run: |
+%s
+    output: RESULT
+`, indentCommandBlock(envReportScript("TODAY", "GH_USER", "NOT_LISTED"), 6)))
+
+		dagRunID := uuid.Must(uuid.NewV7()).String()
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args:        []string{"start", "--run-id", dagRunID, "parent_inherit_all"},
+			ExpectedOut: []string{"DAG run finished"},
+		})
+
+		// GH_USER is not part of the parent run environment, so inherit_env: true
+		// does not forward it; only the list form reaches process env vars.
+		require.Equal(t, "TODAY=2026-03-05\nGH_USER=\nNOT_LISTED=secret-value", readChildResult(t, th, "parent_inherit_all", dagRunID))
+	})
+
+	t.Run("Parallel", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		t.Setenv("GH_USER", "octocat")
+
+		th.CreateDAGFile(t, "parent_inherit_parallel.yaml", `
+env:
+  - TODAY: "2026-03-05"
+steps:
+  - name: call_sub
+    action: dag.run
+    with:
+      dag: sub_inherit_env_parallel
+      params: "ITEM_ID=${ITEM.id}"
+    inherit_env: [TODAY, GH_USER]
+    parallel:
+      items:
+        - id: a
+        - id: b
+
+---
+
+name: sub_inherit_env_parallel
+params:
+  - ITEM_ID
+steps:
+  - name: report
+    run: |
+      echo "${ITEM_ID}:${TODAY}:${GH_USER}"
+    output: RESULT
+`)
+
+		dagRunID := uuid.Must(uuid.NewV7()).String()
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args:        []string{"start", "--run-id", dagRunID, "parent_inherit_parallel"},
+			ExpectedOut: []string{"DAG run finished"},
+		})
+
+		ctx := context.Background()
+		ref := ir.NewDAGRunRef("parent_inherit_parallel", dagRunID)
+		parentAttempt, err := th.DAGRunRepository.FindAttempt(ctx, ref)
+		require.NoError(t, err)
+		parentStatus, err := parentAttempt.ReadStatus(ctx)
+		require.NoError(t, err)
+		require.Equal(t, ir.Succeeded, parentStatus.Status)
+		require.Len(t, parentStatus.Nodes[0].SubRuns, 2)
+
+		results := map[string]string{}
+		for _, sub := range parentStatus.Nodes[0].SubRuns {
+			subAttempt, err := th.DAGRunRepository.FindSubAttempt(ctx, ref, sub.DAGRunID)
+			require.NoError(t, err)
+			subStatus, err := subAttempt.ReadStatus(ctx)
+			require.NoError(t, err)
+			require.Equal(t, ir.Succeeded, subStatus.Status)
+			require.NotNil(t, subStatus.Nodes[0].OutputVariables)
+			result := subStatus.Nodes[0].OutputVariables.Variables()["RESULT"]
+			results[strings.Split(result, ":")[0]] = result
+		}
+		require.Equal(t, "a:2026-03-05:octocat", results["a"])
+		require.Equal(t, "b:2026-03-05:octocat", results["b"])
 	})
 }

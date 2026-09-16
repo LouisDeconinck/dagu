@@ -169,6 +169,9 @@ message Task {
   optional string base_config_workspace = 39;
   // When true, steps selected by a targeted retry skip their preconditions.
   bool bypass_preconditions = 40;
+  // Resolved "KEY=value" pairs the parent opted to share with the child run via
+  // the step's inherit_env field.
+  repeated string inherited_envs = 41;
 }
 
 enum Operation {

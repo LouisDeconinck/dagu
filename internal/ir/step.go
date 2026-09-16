@@ -229,6 +229,18 @@ func (s *Step) String() string {
 type SubDAG struct {
 	Name   string `json:"name,omitempty"`
 	Params string `json:"params,omitempty"`
+	// InheritEnv is the opt-in parent environment inheritance config.
+	// Nil preserves the default of no explicitly requested inheritance.
+	InheritEnv *SubDAGEnvInheritance `json:"inheritEnv,omitempty"`
+}
+
+// SubDAGEnvInheritance describes which parent environment variables a sub DAG
+// run receives.
+type SubDAGEnvInheritance struct {
+	// All inherits the whole parent run environment.
+	All bool `json:"all,omitempty"`
+	// Names lists the parent environment variables to inherit.
+	Names []string `json:"names,omitempty"`
 }
 
 // CommandEntry represents a single command in a multi-command step.

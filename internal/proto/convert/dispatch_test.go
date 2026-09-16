@@ -175,3 +175,21 @@ func TestProtoToDispatchTaskValidatesOwnerPort(t *testing.T) {
 		})
 	}
 }
+
+func TestDispatchTaskInheritedEnvRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	task := &dispatch.DispatchTask{
+		InheritedEnv: []string{"TODAY=2026-01-01", "GH_USER=octocat"},
+	}
+
+	protoTask, err := convert.DispatchTaskToProto(task)
+	require.NoError(t, err)
+	require.NotNil(t, protoTask)
+	assert.Equal(t, []string{"TODAY=2026-01-01", "GH_USER=octocat"}, protoTask.InheritedEnvs)
+
+	got, err := convert.ProtoToDispatchTask(protoTask)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, []string{"TODAY=2026-01-01", "GH_USER=octocat"}, got.InheritedEnv)
+}

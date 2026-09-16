@@ -676,6 +676,8 @@ func inProcessLoadOptions(
 
 func inProcessExtraEnvs(rCtx runctx.Context, req executor.SubWorkflowRequest) []string {
 	envs := inheritedEnvForLocalRunner(rCtx.InheritedEnvs())
+	// Explicitly inherited values win over the implicit inherited set.
+	envs = append(envs, req.InheritedEnv...)
 	if req.ParallelItem != "" {
 		envs = append(envs, ir.ParallelItemVariable+"="+req.ParallelItem)
 	}

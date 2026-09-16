@@ -277,6 +277,44 @@ Allowed references:
 - Container `env` follows the same rule as the root or step that owns the container.
 - Entries in a container `env` declaration may reference earlier entries from the same container `env` declaration.
 
+### Sub-DAG Environment Inheritance
+
+A step that runs a child DAG (`call`, or `action: dag.run`) may request parent
+environment values through the step field `inherit_env`.
+
+Forms:
+
+- `inherit_env: true` inherits the parent run environment scope as it exists
+  when the step starts the child run.
+- `inherit_env: [NAME, ...]` inherits only the listed environment names.
+- Omitting `inherit_env`, or setting it to `false`, requests no additional
+  inheritance.
+
+Rules:
+
+- `inherit_env` requires a child DAG call. It is not supported for
+  `dag.enqueue` because queued child runs cannot carry transient parent
+  environment values through queue persistence.
+- `inherit_env` is evaluated when the child run is created. Every represented
+  child run of a `parallel` step receives the same requested configuration.
+- Each list entry must match `^[A-Za-z_][A-Za-z0-9_]*$` after trimming.
+  Duplicate names collapse to one.
+- Names beginning with `_DAGU_` (any case) are reserved for Dagu internal
+  transport and are rejected.
+- A listed name resolves first against the environment scope visible to the
+  calling step, then against the parent process environment. A name that
+  resolves in neither produces a warning and contributes no value.
+- `inherit_env: true` never carries names reserved for Dagu internal
+  transport (`_DAGU_*`) or host-local tool environment values managed by the
+  `tools` feature (`PATH`, `AQUA_*`, `DAGU_TOOLS_MANIFEST`) when the parent run
+  installed tools.
+- Inherited values enter the child run environment scope as execution-scoped
+  values. They sit above inherited process environment and DAG `env`
+  declarations, and below protected Dagu-managed run environment values and
+  secrets.
+- Inherited values are runtime values for the child run; they are not child
+  runtime params and do not relax child param declaration rules.
+
 ### Environment References
 
 Forms:

@@ -120,6 +120,9 @@ type RunParams struct {
 	ParallelItem   string
 	DAGName        string
 	WorkerSelector map[string]string
+	// InheritedEnv holds resolved "KEY=value" pairs the parent opted to share
+	// with the child run via the step's inherit_env field.
+	InheritedEnv []string
 }
 
 // ChatMessageHandler is an interface for executors that handle chat session messages.

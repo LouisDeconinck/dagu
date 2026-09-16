@@ -283,6 +283,11 @@ Rules:
 - Parent step retry retries the fan-out step. This spec does not define
   per-item retry of only failed items.
 
+- The step-level `inherit_env` field applies to every represented child run.
+  Each child run receives the same requested inheritance, evaluated once when
+  the child run parameters are resolved. See Spec 006, "Sub-DAG Environment
+  Inheritance".
+
 #### `dag.enqueue` Semantics
 
 When `parallel` is used with `action: dag.enqueue`, the parent step creates or
@@ -299,6 +304,9 @@ Rules:
 
 - `max_concurrent` does not control later queue processing. Queue processing is
   owned by the queue configuration.
+
+- `inherit_env` is not supported for `dag.enqueue`; queued child runs cannot
+  carry transient parent environment values through queue persistence.
 
 #### Aggregate Outputs
 
@@ -611,6 +619,7 @@ Validation must fail when:
 - a static array item is a nested mapping.
 - a static mapping item contains a value that is not a string, number, or
   boolean.
+- `inherit_env` appears on a `dag.enqueue` step (with or without `parallel`).
 
 Runtime execution must fail when:
 

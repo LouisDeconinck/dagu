@@ -40,15 +40,18 @@ type DispatchTask struct {
 	ParentDAGRunName string
 	ParentDAGRunID   string
 
-	Operation      DispatchOperation
-	DAGRunID       string
-	Target         string
-	Definition     string
-	AttemptID      string
-	AttemptKey     string
-	Step           string
-	Params         string
-	ParallelItem   string
+	Operation    DispatchOperation
+	DAGRunID     string
+	Target       string
+	Definition   string
+	AttemptID    string
+	AttemptKey   string
+	Step         string
+	Params       string
+	ParallelItem string
+	// InheritedEnv carries resolved "KEY=value" pairs the parent opted to share
+	// with the child run via the step's inherit_env field.
+	InheritedEnv   []string
 	QueueName      string
 	WorkerID       string
 	TargetWorkerID string

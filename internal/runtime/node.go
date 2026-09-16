@@ -36,6 +36,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/executor/registry"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/runtime/executor"
+	dagutools "github.com/dagucloud/dagu/v2/internal/tools"
 	"github.com/goccy/go-yaml"
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -1364,6 +1365,7 @@ func (n *Node) BuildSubDAGRuns(ctx context.Context, subDAG *ir.SubDAG) ([]SubDAG
 }
 
 func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]executor.RunParams, error) {
+	inheritedEnv := resolveSubDAGInheritedEnv(ctx, subDAG.InheritEnv)
 	parallel := n.Step().Parallel
 
 	// Single sub DAG execution (non-parallel)
@@ -1391,6 +1393,7 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 			Params:         params,
 			DAGName:        dagName,
 			WorkerSelector: workerSelector,
+			InheritedEnv:   inheritedEnv,
 		}}, nil
 	}
 
@@ -1516,6 +1519,7 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 			ParallelItem:   parallelItem,
 			DAGName:        dagName,
 			WorkerSelector: workerSelector,
+			InheritedEnv:   inheritedEnv,
 		}
 	}
 
@@ -1525,6 +1529,55 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 	}
 
 	return runParams, nil
+}
+
+// resolveSubDAGInheritedEnv resolves the "KEY=value" pairs a child run receives
+// through the step's opt-in inherit_env field. All inherits the parent's run
+// environment (the same set an in-process child receives implicitly); a name
+// list resolves each entry against the environment scope visible to the calling
+// step and then falls back to the parent process environment.
+func resolveSubDAGInheritedEnv(ctx context.Context, inherit *ir.SubDAGEnvInheritance) []string {
+	if inherit == nil {
+		return nil
+	}
+	if inherit.All {
+		all := GetDAGContext(ctx).InheritedEnvs()
+		toolsActive := false
+		for _, env := range all {
+			key, _, ok := strings.Cut(env, "=")
+			if ok && strings.EqualFold(key, dagutools.EnvManifest) {
+				toolsActive = true
+				break
+			}
+		}
+		envs := make([]string, 0, len(all))
+		for _, env := range all {
+			key, _, _ := strings.Cut(env, "=")
+			// Reserved internal transport and host-local tool environment
+			// values are never inherited.
+			if strings.HasPrefix(strings.ToUpper(key), "_DAGU_") ||
+				(toolsActive && dagutools.IsManagedEnvKey(key)) {
+				continue
+			}
+			envs = append(envs, env)
+		}
+		return envs
+	}
+	scope := GetEnv(ctx).Scope
+	var envs []string
+	for _, name := range inherit.Names {
+		if value, ok := scope.Get(name); ok {
+			envs = append(envs, name+"="+value)
+			continue
+		}
+		if value, ok := os.LookupEnv(name); ok {
+			envs = append(envs, name+"="+value)
+			continue
+		}
+		logger.Warn(ctx, "inherit_env variable not found in the parent environment",
+			tag.String("env", name))
+	}
+	return envs
 }
 
 func resolveWorkerSelector(

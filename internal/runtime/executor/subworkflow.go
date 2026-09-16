@@ -60,6 +60,9 @@ type SubWorkflowRequest struct {
 	Reuse             bool
 	RetryPath         dagrun.RetryPath
 	Workspace         *SubWorkflowWorkspace
+	// InheritedEnv holds resolved "KEY=value" pairs the parent opted to share
+	// with the child run via the step's inherit_env field.
+	InheritedEnv []string
 }
 
 // SubWorkflowRetryRequest describes a child workflow step retry.

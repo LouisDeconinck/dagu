@@ -511,8 +511,11 @@ type Task struct {
 	BaseConfigWorkspace *string `protobuf:"bytes,39,opt,name=base_config_workspace,json=baseConfigWorkspace,proto3,oneof" json:"base_config_workspace,omitempty"`
 	// When true, steps selected by a targeted retry skip their preconditions.
 	BypassPreconditions bool `protobuf:"varint,40,opt,name=bypass_preconditions,json=bypassPreconditions,proto3" json:"bypass_preconditions,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Resolved "KEY=value" pairs the parent opted to share with the child run via
+	// the step's inherit_env field.
+	InheritedEnvs []string `protobuf:"bytes,41,rep,name=inherited_envs,json=inheritedEnvs,proto3" json:"inherited_envs,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Task) Reset() {
@@ -813,6 +816,13 @@ func (x *Task) GetBypassPreconditions() bool {
 	return false
 }
 
+func (x *Task) GetInheritedEnvs() []string {
+	if x != nil {
+		return x.InheritedEnvs
+	}
+	return nil
+}
+
 func (x *Task) SetOperation(v Operation) {
 	x.Operation = v
 }
@@ -969,6 +979,10 @@ func (x *Task) SetBypassPreconditions(v bool) {
 	x.BypassPreconditions = v
 }
 
+func (x *Task) SetInheritedEnvs(v []string) {
+	x.InheritedEnvs = v
+}
+
 func (x *Task) HasPreviousStatus() bool {
 	if x == nil {
 		return false
@@ -1055,6 +1069,9 @@ type Task_builder struct {
 	BaseConfigWorkspace *string
 	// When true, steps selected by a targeted retry skip their preconditions.
 	BypassPreconditions bool
+	// Resolved "KEY=value" pairs the parent opted to share with the child run via
+	// the step's inherit_env field.
+	InheritedEnvs []string
 }
 
 func (b0 Task_builder) Build() *Task {
@@ -1100,6 +1117,7 @@ func (b0 Task_builder) Build() *Task {
 	x.IncludeDownstream = b.IncludeDownstream
 	x.BaseConfigWorkspace = b.BaseConfigWorkspace
 	x.BypassPreconditions = b.BypassPreconditions
+	x.InheritedEnvs = b.InheritedEnvs
 	return m0
 }
 
@@ -6004,7 +6022,7 @@ const file_proto_coordinator_v1_coordinator_proto_rawDesc = "" +
 	"\x0fDispatchRequest\x12(\n" +
 	"\x04task\x18\x01 \x01(\v2\x14.coordinator.v1.TaskR\x04task\x12>\n" +
 	"\x1badmission_reservation_token\x18\x02 \x01(\tR\x19admissionReservationToken\"\x12\n" +
-	"\x10DispatchResponse\"\xf6\r\n" +
+	"\x10DispatchResponse\"\x9d\x0e\n" +
 	"\x04Task\x127\n" +
 	"\toperation\x18\x06 \x01(\x0e2\x19.coordinator.v1.OperationR\toperation\x12)\n" +
 	"\x11root_dag_run_name\x18\x01 \x01(\tR\x0erootDagRunName\x12%\n" +
@@ -6055,7 +6073,8 @@ const file_proto_coordinator_v1_coordinator_proto_rawDesc = "" +
 	"\x10target_worker_id\x18% \x01(\tR\x0etargetWorkerId\x12-\n" +
 	"\x12include_downstream\x18& \x01(\bR\x11includeDownstream\x127\n" +
 	"\x15base_config_workspace\x18' \x01(\tH\x00R\x13baseConfigWorkspace\x88\x01\x01\x121\n" +
-	"\x14bypass_preconditions\x18( \x01(\bR\x13bypassPreconditions\x1aA\n" +
+	"\x14bypass_preconditions\x18( \x01(\bR\x13bypassPreconditions\x12%\n" +
+	"\x0einherited_envs\x18) \x03(\tR\rinheritedEnvs\x1aA\n" +
 	"\x13WorkerSelectorEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01B\x18\n" +
