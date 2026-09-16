@@ -1401,4 +1401,20 @@ steps:
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "inherit_env is not supported for dag.enqueue")
 	})
+
+	t.Run("EnqueueRejectedDisabled", func(t *testing.T) {
+		t.Parallel()
+		for _, value := range []string{"false", "[]"} {
+			_, err := LoadYAML(context.Background(), []byte(`
+steps:
+  - id: fanout
+    action: dag.enqueue
+    with:
+      dag: child
+    inherit_env: `+value+`
+`))
+			require.Error(t, err, "inherit_env: %s", value)
+			assert.Contains(t, err.Error(), "inherit_env is not supported for dag.enqueue")
+		}
+	})
 }

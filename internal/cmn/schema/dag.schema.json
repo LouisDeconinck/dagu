@@ -1965,7 +1965,7 @@
               "type": "array",
               "items": {
                 "type": "string",
-                "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+                "pattern": "^\\s*[A-Za-z_][A-Za-z0-9_]*\\s*$"
               },
               "description": "Names of parent environment variables to inherit in the sub dag-run."
             }

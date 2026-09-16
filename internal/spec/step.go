@@ -2913,6 +2913,13 @@ var envVarNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // buildSubDAGEnvInheritance parses the optional inherit_env field into its IR
 // representation. Returns nil when inheritance is disabled.
 func buildSubDAGEnvInheritance(s *step) (*ir.SubDAGEnvInheritance, error) {
+	// Queued child runs read their own DAG environment when dequeued; inherited
+	// values cannot be carried through queue persistence. Reject any explicit
+	// inherit_env value on dag.enqueue, including a disabling one.
+	if s.Type == ir.ExecutorTypeDAGEnqueue && !s.InheritEnv.IsZero() {
+		return nil, ir.NewValidationError("inherit_env", s.InheritEnv.Value(),
+			fmt.Errorf("inherit_env is not supported for dag.enqueue"))
+	}
 	if !s.InheritEnv.Enabled() {
 		return nil, nil
 	}

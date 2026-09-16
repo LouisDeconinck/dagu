@@ -1014,7 +1014,9 @@ steps:
 		})
 
 		// TODAY comes from the parent env, GH_USER from the process environment.
-		// NOT_LISTED stays unset because it is not in inherit_env.
+		// An in-process child also sees unlisted parent values like NOT_LISTED
+		// through the implicit local env scope; inherit_env only controls the
+		// explicit set forwarded to remote workers.
 		require.Equal(t, "TODAY=2026-03-05\nGH_USER=octocat\nNOT_LISTED=secret-value", readChildResult(t, th, "parent_inherit_selective", dagRunID))
 	})
 
