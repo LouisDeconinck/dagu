@@ -473,6 +473,19 @@ steps:
 
 Use `with.data` for inline JSON or `with.input` for a JSON file path. Do not set both.
 
+`with.args` binds named variables available as `$<key>` in the filter. Values keep their YAML type and may use `${...}` references.
+
+```yaml
+steps:
+  - id: filter
+    action: jq.filter
+    with:
+      filter: '.items[] | select(.price > $max_price)'
+      input: ${fetch_json.stdout}
+      args:
+        max_price: ${MAX_PRICE}
+```
+
 ## template.render
 
 Render text using Go `text/template`.

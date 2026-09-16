@@ -3928,6 +3928,10 @@
         "input": {
           "type": "string",
           "description": "File path to read JSON input from. Mutually exclusive with script."
+        },
+        "args": {
+          "type": "object",
+          "description": "Variables to bind in the jq filter. Each key is available as $<key>; values keep their YAML type and may use ${...} references."
         }
       },
       "description": "Configuration for JQ JSON query executor."
@@ -6672,6 +6676,10 @@
         "input": {
           "type": "string",
           "description": "File path to read JSON input from."
+        },
+        "args": {
+          "type": "object",
+          "description": "Variables to bind in the jq filter. Each key is available as $<key>; values keep their YAML type and may use ${...} references."
         }
       },
       "description": "Configuration for action: jq.filter."

@@ -4,6 +4,7 @@
 package intg_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/dagucloud/dagu/v2/internal/ir"
@@ -468,6 +469,94 @@ steps:
 		dag.AssertLatestStatus(t, ir.Succeeded)
 		dag.AssertOutputs(t, map[string]any{
 			"RESULT": "hello\nworld\ttab",
+		})
+	})
+}
+
+func TestJQExecutorArgs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ParamsAndLiteralsAsVariables", func(t *testing.T) {
+		t.Parallel()
+
+		th := test.Setup(t)
+		dag := th.DAG(t, `params:
+  - WHO: "World"
+steps:
+  - name: greet
+    action: jq.filter
+    with:
+      filter: '$greeting + ", " + $who + "!"'
+      data: '{}'
+      raw: true
+      args:
+        greeting: "Hello"
+        who: ${WHO}
+    output: RESULT
+`)
+		agent := dag.Agent()
+
+		agent.RunSuccess(t)
+
+		dag.AssertLatestStatus(t, ir.Succeeded)
+		dag.AssertOutputs(t, map[string]any{
+			"RESULT": "Hello, World!",
+		})
+	})
+
+	t.Run("StepOutputAsVariable", func(t *testing.T) {
+		t.Parallel()
+
+		th := test.Setup(t)
+		dag := th.DAG(t, fmt.Sprintf(`steps:
+  - id: producer
+    run: %q
+    output: PRODUCED
+
+  - name: consume
+    depends: [producer]
+    action: jq.filter
+    with:
+      filter: '.items[] | select(. > ($min | tonumber))'
+      data: '{"items": [1, 5, 40, 50]}'
+      raw: true
+      args:
+        min: ${producer.output}
+    output: RESULT
+`, test.Output("42")))
+		agent := dag.Agent()
+
+		agent.RunSuccess(t)
+
+		dag.AssertLatestStatus(t, ir.Succeeded)
+		dag.AssertOutputs(t, map[string]any{
+			"RESULT": "50",
+		})
+	})
+
+	t.Run("TypedArgValues", func(t *testing.T) {
+		t.Parallel()
+
+		th := test.Setup(t)
+		dag := th.DAG(t, `steps:
+  - name: typed
+    action: jq.filter
+    with:
+      filter: 'if $enabled then .items[] | select(. > $threshold) else empty end'
+      data: '{"items": [1, 5, 10]}'
+      raw: true
+      args:
+        enabled: true
+        threshold: 4
+    output: RESULT
+`)
+		agent := dag.Agent()
+
+		agent.RunSuccess(t)
+
+		dag.AssertLatestStatus(t, ir.Succeeded)
+		dag.AssertOutputs(t, map[string]any{
+			"RESULT": "5\n10",
 		})
 	})
 }
