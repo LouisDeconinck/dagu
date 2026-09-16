@@ -29,6 +29,7 @@ type Context struct {
 	RootDAGRun           ir.DAGRunRef
 	RetryPath            dagrun.RetryPath
 	IncludeDownstream    bool
+	BypassPreconditions  bool
 	AttemptID            string
 	WorkerID             string
 	TriggerType          ir.TriggerType
@@ -160,6 +161,14 @@ func WithRetryPath(path dagrun.RetryPath) ContextOption {
 func WithIncludeDownstream(enabled bool) ContextOption {
 	return func(o *contextOptions) {
 		o.IncludeDownstream = enabled
+	}
+}
+
+// WithBypassPreconditions records that steps reset by a targeted step retry
+// skip step precondition evaluation.
+func WithBypassPreconditions(enabled bool) ContextOption {
+	return func(o *contextOptions) {
+		o.BypassPreconditions = enabled
 	}
 }
 

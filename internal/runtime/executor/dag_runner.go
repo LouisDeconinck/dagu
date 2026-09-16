@@ -264,9 +264,10 @@ func (e *SubDAGExecutor) Retry(ctx context.Context, runParams RunParams, stepNam
 		return nil, err
 	}
 	return e.subWorkflowRunner.Retry(runCtx, SubWorkflowRetryRequest{
-		SubWorkflowRequest: req,
-		StepName:           stepName,
-		IncludeDownstream:  runctx.GetContext(ctx).IncludeDownstream,
+		SubWorkflowRequest:  req,
+		StepName:            stepName,
+		IncludeDownstream:   runctx.GetContext(ctx).IncludeDownstream,
+		BypassPreconditions: runctx.GetContext(ctx).BypassPreconditions,
 	})
 }
 

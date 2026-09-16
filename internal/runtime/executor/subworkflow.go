@@ -65,8 +65,9 @@ type SubWorkflowRequest struct {
 // SubWorkflowRetryRequest describes a child workflow step retry.
 type SubWorkflowRetryRequest struct {
 	SubWorkflowRequest
-	StepName          string
-	IncludeDownstream bool
+	StepName            string
+	IncludeDownstream   bool
+	BypassPreconditions bool
 }
 
 // SubWorkflowCancelMode describes how a child workflow should be stopped.
