@@ -978,7 +978,9 @@ func TestSubDAG_InheritEnv(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, ir.Succeeded, subStatus.Status)
 		require.NotNil(t, subStatus.Nodes[0].OutputVariables)
-		return subStatus.Nodes[0].OutputVariables.Variables()["RESULT"]
+		// Windows PowerShell output keeps CRLF line endings in captured output.
+		return strings.ReplaceAll(
+			subStatus.Nodes[0].OutputVariables.Variables()["RESULT"], "\r\n", "\n")
 	}
 
 	t.Run("Selective", func(t *testing.T) {
