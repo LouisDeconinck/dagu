@@ -1,10 +1,10 @@
 // Copyright (C) 2026 Yota Hamada
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import dayjs from 'dayjs';
 import { Layers, List, Search } from 'lucide-react';
 import React from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import dayjs from '@/lib/dayjs';
 import { Status, ViewSpecType } from '../../api/v1/schema';
 import { Button } from '@/components/ui/button';
 import { DateRangePicker } from '@/components/ui/date-range-picker';
@@ -243,10 +243,11 @@ function DAGRuns() {
     const dateWithSeconds =
       dateString.split(':').length < 3 ? `${dateString}:00` : dateString;
 
-    // Apply timezone offset and convert to unix timestamp (seconds)
+    // Interpret the wall clock in the configured timezone, never in the
+    // browser's, then convert to the Unix timestamp.
     if (config.tzOffsetInSec !== undefined) {
       return dayjs(dateWithSeconds)
-        .utcOffset(config.tzOffsetInSec / 60)
+        .utcOffset(config.tzOffsetInSec / 60, true)
         .unix();
     } else {
       return dayjs(dateWithSeconds).unix();
