@@ -75,7 +75,10 @@ vi.mock('../DAGAttributes', () => ({ default: () => null }));
 vi.mock('../AgentSpecOverview', () => ({
   AgentSpecOverview: () => <div>Agent overview</div>,
 }));
-vi.mock('../ExternalChangeDialog', () => ({ default: () => null }));
+vi.mock('../ExternalChangeDialog', () => ({
+  default: ({ visible }: { visible: boolean }) =>
+    visible ? <div role="dialog">External Changes Detected</div> : null,
+}));
 vi.mock('../../dag-details', () => ({ DAGStepTable: () => null }));
 vi.mock('../../value-reference-notices', () => ({
   ValueReferenceNoticesButton: () => null,
@@ -159,6 +162,7 @@ beforeEach(() => {
   mocks.post.mockResolvedValue({
     data: { valid: true, errors: [], dag: undefined },
   });
+  mocks.put.mockResolvedValue({ data: { errors: [] } });
 });
 
 afterEach(() => {
@@ -167,6 +171,169 @@ afterEach(() => {
 });
 
 describe('DAGSpec live validation', () => {
+  it('shows saved warnings separately from errors', () => {
+    mocks.useQuery.mockReturnValue(
+      specData({
+        warnings: ['Harness step review has no explicit working_dir'],
+      })
+    );
+    renderSpec();
+
+    expect(screen.getByRole('status')).toHaveTextContent('Warnings');
+    expect(screen.getByRole('status')).toHaveTextContent('working_dir');
+    expect(screen.getByTestId('preview-graph')).toHaveTextContent('extract');
+  });
+
+  it('allows saving a warning-only spec and clears corrected warnings', async () => {
+    vi.useFakeTimers();
+    mocks.post.mockResolvedValueOnce({
+      data: {
+        valid: true,
+        errors: [],
+        warnings: ['Harness step review has no explicit working_dir'],
+      },
+    });
+    renderSpec();
+    const editor = screen.getByLabelText('DAG spec');
+    fireEvent.change(editor, { target: { value: savedSpec + '# edited' } });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+
+    expect(screen.getByText('Valid with warnings')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('working_dir');
+    expect(mocks.editorProps.current.markers).toEqual([]);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    });
+    expect(mocks.put).toHaveBeenCalledOnce();
+    expect(mocks.showError).not.toHaveBeenCalled();
+    expect(mocks.showToast).toHaveBeenCalledWith('Changes saved successfully');
+
+    mocks.post.mockResolvedValue({
+      data: { valid: true, errors: [], warnings: [] },
+    });
+    fireEvent.change(editor, {
+      target: { value: 'working_dir: ./repo\n' + savedSpec },
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(screen.queryByText('Valid with warnings')).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('hides stale warnings while the edited buffer awaits validation', async () => {
+    vi.useFakeTimers();
+    const warning = 'Harness step review has no explicit working_dir';
+    mocks.useQuery.mockReturnValue(specData({ warnings: [warning] }));
+    mocks.post.mockResolvedValueOnce({
+      data: { valid: true, errors: [], warnings: [warning] },
+    });
+    renderSpec();
+    const editor = screen.getByLabelText('DAG spec');
+    expect(screen.getByRole('status')).toHaveTextContent(warning);
+
+    fireEvent.change(editor, { target: { value: savedSpec + '# edited' } });
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(screen.getByRole('status')).toHaveTextContent(warning);
+
+    mocks.post.mockResolvedValueOnce({ error: { message: 'unavailable' } });
+    fireEvent.change(editor, {
+      target: { value: 'working_dir: ./repo\n' + savedSpec },
+    });
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(600);
+    });
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+
+    fireEvent.change(editor, { target: { value: savedSpec } });
+    expect(screen.getByRole('status')).toHaveTextContent(warning);
+  });
+
+  it('prevents overlapping saves without losing newer edits', async () => {
+    vi.useFakeTimers();
+    let finishSave!: (value: { data: { errors: string[] } }) => void;
+    mocks.put.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishSave = resolve;
+      })
+    );
+    renderSpec();
+    const editor = screen.getByLabelText('DAG spec');
+    const submitted = savedSpec + '# saved';
+    const newerEdit = submitted + '\n# still editing';
+    fireEvent.change(editor, { target: { value: submitted } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    fireEvent.change(editor, { target: { value: submitted + '\n# next' } });
+    const saveButton = screen.getByRole('button', { name: /save/i });
+    expect(saveButton).toBeDisabled();
+    fireEvent.click(saveButton);
+    fireEvent.keyDown(document, { key: 's', ctrlKey: true });
+    expect(mocks.put).toHaveBeenCalledOnce();
+
+    mocks.useQuery.mockReturnValue(specData({ spec: submitted }));
+    fireEvent.change(editor, { target: { value: newerEdit } });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+    await act(async () => {
+      finishSave({ data: { errors: [] } });
+    });
+    expect(editor).toHaveValue(newerEdit);
+    expect(screen.getByRole('button', { name: /save/i })).toBeEnabled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['request failure', { error: { message: 'unavailable' } }],
+    ['validation rejection', { data: { errors: ['invalid spec'] } }],
+  ])('detects external changes after a save %s', async (_name, response) => {
+    vi.useFakeTimers();
+    mocks.put.mockResolvedValueOnce(response);
+    renderSpec();
+    const editor = screen.getByLabelText('DAG spec');
+    const submitted = savedSpec + '# submitted';
+    fireEvent.change(editor, { target: { value: submitted } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    });
+    expect(mocks.showError).toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: /save/i })).toBeEnabled();
+
+    mocks.useQuery.mockReturnValue(specData({ spec: submitted }));
+    fireEvent.change(editor, {
+      target: { value: submitted + '\n# still editing' },
+    });
+    expect(screen.getByRole('dialog')).toHaveTextContent('External Changes');
+  });
+
+  it('allows retrying a save after a network exception', async () => {
+    vi.useFakeTimers();
+    mocks.put.mockRejectedValueOnce(new Error('network unavailable'));
+    renderSpec();
+    fireEvent.change(screen.getByLabelText('DAG spec'), {
+      target: { value: savedSpec + '# edited' },
+    });
+    const saveButton = screen.getByRole('button', { name: /save/i });
+    await act(async () => {
+      fireEvent.click(saveButton);
+    });
+    expect(mocks.showError).toHaveBeenCalledWith(
+      'Failed to save spec',
+      'Please try again.'
+    );
+    expect(saveButton).toBeEnabled();
+    await act(async () => {
+      fireEvent.click(saveButton);
+    });
+    expect(mocks.showToast).toHaveBeenCalledWith('Changes saved successfully');
+    expect(saveButton).toBeDisabled();
+  });
+
   it('validates the edited buffer once per idle window', async () => {
     vi.useFakeTimers();
     renderSpec();
