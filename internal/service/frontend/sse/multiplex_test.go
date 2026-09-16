@@ -510,14 +510,14 @@ func TestStreamSessionOversizedMessageKeepsSessionOpen(t *testing.T) {
 	require.NoError(t, topic.sendSnapshot(context.Background(), result.session))
 	assert.False(t, result.session.isClosed())
 
-	msg := result.session.popNext()
-	require.NotNil(t, msg)
-	assert.Equal(t, "dag:test.yaml", msg.topic)
-
 	// The session keeps serving updates for the topic afterwards.
 	require.NoError(t, topic.sendSnapshot(context.Background(), result.session))
 	assert.False(t, result.session.isClosed())
-	require.NotNil(t, result.session.popNext())
+
+	msg := result.session.popNext()
+	require.NotNil(t, msg)
+	assert.Equal(t, "dag:test.yaml", msg.topic)
+	assert.Nil(t, result.session.popNext())
 }
 
 func TestStreamSessionOversizedMessageStillBounded(t *testing.T) {
