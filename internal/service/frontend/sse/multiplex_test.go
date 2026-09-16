@@ -484,6 +484,75 @@ func TestMultiplexTopicSendSnapshotDropsRemovedTopics(t *testing.T) {
 	assert.Nil(t, session.popNext())
 }
 
+func TestStreamSessionOversizedMessageKeepsSessionOpen(t *testing.T) {
+	mux := NewMultiplexer(StreamConfig{WriteBufferSize: 256}, nil)
+	t.Cleanup(mux.Shutdown)
+
+	mux.RegisterFetcher(TopicTypeDAG, func(_ context.Context, identifier string) (any, error) {
+		return map[string]string{"id": identifier, "blob": strings.Repeat("x", 1024)}, nil
+	})
+
+	result, err := mux.createSession(
+		context.Background(),
+		httptest.NewRecorder(),
+		[]string{"dag:test.yaml"},
+		0,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result.session)
+	defer mux.removeSession(result.session)
+
+	topic := mux.topics["dag:test.yaml"]
+	require.NotNil(t, topic)
+
+	// A payload larger than the write buffer must not close the multiplexed
+	// session: the write buffer bounds queued backlog, not a single message.
+	require.NoError(t, topic.sendSnapshot(context.Background(), result.session))
+	assert.False(t, result.session.isClosed())
+
+	msg := result.session.popNext()
+	require.NotNil(t, msg)
+	assert.Equal(t, "dag:test.yaml", msg.topic)
+
+	// The session keeps serving updates for the topic afterwards.
+	require.NoError(t, topic.sendSnapshot(context.Background(), result.session))
+	assert.False(t, result.session.isClosed())
+	require.NotNil(t, result.session.popNext())
+}
+
+func TestStreamSessionOversizedMessageStillBounded(t *testing.T) {
+	mux := NewMultiplexer(StreamConfig{WriteBufferSize: 256}, nil)
+	t.Cleanup(mux.Shutdown)
+
+	mux.RegisterFetcher(TopicTypeDAG, func(_ context.Context, identifier string) (any, error) {
+		return map[string]string{"id": identifier}, nil
+	})
+
+	result, err := mux.createSession(
+		context.Background(),
+		httptest.NewRecorder(),
+		[]string{"dag:a.yaml", "dag:b.yaml"},
+		0,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result.session)
+	defer mux.removeSession(result.session)
+
+	session := result.session
+
+	// Only the latest queued message may exceed the buffer on its own: the next
+	// enqueue still evicts it instead of letting backlog accumulate unbounded.
+	oversized := []byte(strings.Repeat("x", 1024))
+	require.True(t, session.enqueueMessage("dag:a.yaml", 1, oversized))
+	require.True(t, session.enqueueMessage("dag:b.yaml", 2, []byte(`{"id":"b.yaml"}`)))
+
+	msg := session.popNext()
+	require.NotNil(t, msg)
+	assert.Equal(t, "dag:b.yaml", msg.topic)
+	assert.Nil(t, session.popNext())
+	assert.False(t, session.isClosed())
+}
+
 func TestMultiplexerSharesTopicRegistryAcrossSessions(t *testing.T) {
 	mux := NewMultiplexer(StreamConfig{}, nil)
 	t.Cleanup(mux.Shutdown)
