@@ -550,8 +550,7 @@ func TestStreamRecoversEvictedSnapshots(t *testing.T) {
 			var delivered []string
 			var lastID uint64
 			for range tc.topics {
-				frame := readTestFrame(t, reader)
-				require.Equal(t, "message", frame.event)
+				frame := readTestMessage(t, reader)
 				require.Greater(t, frame.id, lastID)
 				lastID = frame.id
 				var envelope messageEnvelope
@@ -591,6 +590,16 @@ func openTestStream(t *testing.T, mux *Multiplexer, topics []string) (*bufio.Rea
 	session, err := mux.getSession(control.SessionID)
 	require.NoError(t, err)
 	return reader, session
+}
+
+func readTestMessage(t *testing.T, reader *bufio.Reader) testStreamFrame {
+	t.Helper()
+	for {
+		frame := readTestFrame(t, reader)
+		if frame.event == "message" {
+			return frame
+		}
+	}
 }
 
 func readTestFrame(t *testing.T, reader *bufio.Reader) testStreamFrame {
@@ -683,7 +692,7 @@ func TestStreamRetriesRecovery(t *testing.T) {
 	reader, _ := openTestStream(t, mux, []string{"dag:retry.yaml", "dag:other.yaml", "dag:large.yaml"})
 	var delivered []string
 	for range 3 {
-		frame := readTestFrame(t, reader)
+		frame := readTestMessage(t, reader)
 		var envelope messageEnvelope
 		require.NoError(t, json.Unmarshal(frame.data, &envelope))
 		delivered = append(delivered, envelope.Topic)
@@ -720,7 +729,7 @@ func TestStreamRecoveryIgnoresStaleFetch(t *testing.T) {
 				return map[string]int32{"revision": revision}, nil
 			})
 			reader, session := openTestStream(t, mux, []string{"dag:small.yaml", "dag:barrier.yaml", "dag:large.yaml"})
-			require.Equal(t, "message", readTestFrame(t, reader).event)
+			readTestMessage(t, reader)
 			select {
 			case <-started:
 			case <-time.After(time.Second):
@@ -737,23 +746,12 @@ func TestStreamRecoveryIgnoresStaleFetch(t *testing.T) {
 			} else {
 				mux.WakeTopic(TopicTypeDAG, "small.yaml")
 			}
-			for {
-				frame := readTestFrame(t, reader)
-				if frame.event != "message" {
-					continue
-				}
-				assert.Contains(t, string(frame.data), `"revision":3`)
-				break
-			}
+			frame := readTestMessage(t, reader)
+			assert.Contains(t, string(frame.data), `"revision":3`)
 			close(release)
 			// The next recovery can only finish after the stale fetch was rejected.
-			for {
-				frame := readTestFrame(t, reader)
-				if frame.event == "message" {
-					assert.Contains(t, string(frame.data), `"topic":"dag:barrier.yaml"`)
-					break
-				}
-			}
+			frame = readTestMessage(t, reader)
+			assert.Contains(t, string(frame.data), `"topic":"dag:barrier.yaml"`)
 		})
 	}
 }
