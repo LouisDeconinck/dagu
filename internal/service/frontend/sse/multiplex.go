@@ -862,13 +862,6 @@ func (s *streamSession) enqueueMessage(topic string, eventID uint64, data []byte
 	}
 
 	size := len(data) + 64
-	if size > s.writeBufferSize {
-		s.closed = true
-		if s.mux.metrics != nil {
-			s.mux.metrics.BackpressureDisconnect()
-		}
-		return false
-	}
 
 	if existing := s.queuedByTopic[topic]; existing != nil {
 		s.queuedBytes -= existing.size
@@ -886,12 +879,7 @@ func (s *streamSession) enqueueMessage(topic string, eventID uint64, data []byte
 		}
 		for s.queuedBytes > s.writeBufferSize {
 			if !s.dropOldestExcept(topic) {
-				s.closed = true
-				if s.mux.metrics != nil {
-					s.mux.metrics.BackpressureDisconnect()
-				}
-				s.signalReady()
-				return false
+				break
 			}
 		}
 		s.signalReady()
@@ -901,15 +889,11 @@ func (s *streamSession) enqueueMessage(topic string, eventID uint64, data []byte
 	for s.queuedBytes+size > s.writeBufferSize && len(s.queue) > 0 {
 		s.dropOldest()
 	}
-	if s.queuedBytes+size > s.writeBufferSize {
-		s.closed = true
-		if s.mux.metrics != nil {
-			s.mux.metrics.BackpressureDisconnect()
-		}
-		s.signalReady()
-		return false
-	}
 
+	// The write buffer bounds queued backlog, not a single message: after
+	// evicting older messages, the latest state is always enqueued even when it
+	// alone exceeds the buffer. Closing the session here would make unrelated
+	// topics unusable and trigger a reconnect that hits the same payload again.
 	msg := &queuedMessage{
 		topic:   topic,
 		eventID: eventID,
