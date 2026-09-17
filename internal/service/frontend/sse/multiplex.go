@@ -24,6 +24,7 @@ const (
 	defaultMaxTopicsPerConnection = 20
 	defaultWriteBufferSize        = 64 * 1024
 	defaultSlowClientTimeout      = 30 * time.Second
+	maxFetchRetryInterval         = 30 * time.Second
 )
 
 var (
@@ -37,8 +38,10 @@ type StreamConfig struct {
 	MaxTopicsPerConnection int
 	MaxClients             int
 	HeartbeatInterval      time.Duration
-	WriteBufferSize        int
-	SlowClientTimeout      time.Duration
+	// WriteBufferSize bounds queued payload bytes, allowing one oversized message.
+	// Evicted topics receive a fresh snapshot after queued messages drain.
+	WriteBufferSize   int
+	SlowClientTimeout time.Duration
 }
 
 // TopicAuthorizer validates whether the current request may subscribe to a topic.
@@ -715,16 +718,24 @@ type streamSession struct {
 	writeBufferSize   int
 	slowClientTimeout time.Duration
 
-	mutationMu      sync.Mutex
-	publishMu       sync.Mutex
-	mu              sync.Mutex
-	closed          bool
-	topics          map[string]*multiplexTopic
-	queue           []*queuedMessage
-	queuedByTopic   map[string]*queuedMessage
-	queuedBytes     int
-	ready           chan struct{}
-	lastSeenEventID uint64
+	mutationMu       sync.Mutex
+	publishMu        sync.Mutex
+	mu               sync.Mutex
+	closed           bool
+	topics           map[string]*multiplexTopic
+	queue            []*queuedMessage
+	queuedByTopic    map[string]*queuedMessage
+	queuedBytes      int
+	pendingSnapshots []*pendingSnapshot
+	ready            chan struct{}
+	lastSeenEventID  uint64
+}
+
+// A pending snapshot retains only recovery metadata, never the evicted payload.
+type pendingSnapshot struct {
+	topic   *multiplexTopic
+	retryAt time.Time
+	retrier backoff.Retrier
 }
 
 func (s *streamSession) isClosed() bool {
@@ -740,6 +751,7 @@ func (s *streamSession) close() {
 		return
 	}
 	s.closed = true
+	s.pendingSnapshots = nil
 	s.mu.Unlock()
 	s.signalReady()
 }
@@ -762,6 +774,7 @@ func (s *streamSession) removeTopic(topicKey string) *multiplexTopic {
 	defer s.mu.Unlock()
 	topic := s.topics[topicKey]
 	delete(s.topics, topicKey)
+	s.clearPendingSnapshot(topicKey)
 	if queued := s.queuedByTopic[topicKey]; queued != nil {
 		filtered := s.queue[:0]
 		for _, msg := range s.queue {
@@ -771,6 +784,7 @@ func (s *streamSession) removeTopic(topicKey string) *multiplexTopic {
 			}
 			filtered = append(filtered, msg)
 		}
+		clear(s.queue[len(filtered):])
 		s.queue = filtered
 		delete(s.queuedByTopic, topicKey)
 	}
@@ -860,6 +874,7 @@ func (s *streamSession) enqueueMessage(topic string, eventID uint64, data []byte
 	if s.queuedByTopic == nil {
 		s.queuedByTopic = make(map[string]*queuedMessage)
 	}
+	s.clearPendingSnapshot(topic)
 
 	size := len(data) + 64
 
@@ -911,10 +926,7 @@ func (s *streamSession) dropOldest() {
 	if len(s.queue) == 0 {
 		return
 	}
-	oldest := s.queue[0]
-	s.queue = s.queue[1:]
-	delete(s.queuedByTopic, oldest.topic)
-	s.queuedBytes -= oldest.size
+	s.dropQueuedMessage(0)
 }
 
 func (s *streamSession) dropOldestExcept(topic string) bool {
@@ -922,12 +934,64 @@ func (s *streamSession) dropOldestExcept(topic string) bool {
 		if msg.topic == topic {
 			continue
 		}
-		s.queue = append(s.queue[:i], s.queue[i+1:]...)
-		delete(s.queuedByTopic, msg.topic)
-		s.queuedBytes -= msg.size
+		s.dropQueuedMessage(i)
 		return true
 	}
 	return false
+}
+
+func (s *streamSession) dropQueuedMessage(index int) {
+	msg := s.queue[index]
+	s.queue = slices.Delete(s.queue, index, index+1)
+	delete(s.queuedByTopic, msg.topic)
+	s.queuedBytes -= msg.size
+	s.pendingSnapshots = append(s.pendingSnapshots, &pendingSnapshot{topic: s.topics[msg.topic]})
+}
+
+func (s *streamSession) clearPendingSnapshot(topic string) {
+	s.pendingSnapshots = slices.DeleteFunc(s.pendingSnapshots, func(pending *pendingSnapshot) bool {
+		return pending.topic.key == topic
+	})
+}
+
+func (s *streamSession) nextPendingSnapshot(now time.Time) (*pendingSnapshot, time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || len(s.queue) > 0 {
+		return nil, time.Time{}
+	}
+	var retryAt time.Time
+	for _, pending := range s.pendingSnapshots {
+		if !pending.retryAt.After(now) {
+			return pending, time.Time{}
+		}
+		if retryAt.IsZero() || pending.retryAt.Before(retryAt) {
+			retryAt = pending.retryAt
+		}
+	}
+	return nil, retryAt
+}
+
+func (s *streamSession) finishSnapshotRecovery(pending *pendingSnapshot, err error) {
+	if err == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// A replacement marker belongs to a newer eviction or subscription.
+	if !slices.Contains(s.pendingSnapshots, pending) {
+		return
+	}
+	if pending.retrier == nil {
+		policy := backoff.NewExponentialBackoffPolicy(s.mux.watcherBaseInterval)
+		policy.MaxInterval = maxFetchRetryInterval
+		pending.retrier = backoff.NewRetrier(policy)
+	}
+	interval, _ := pending.retrier.Next(err)
+	pending.retryAt = time.Now().Add(interval)
+	if s.mux.metrics != nil {
+		s.mux.metrics.FetchError(string(pending.topic.topicType))
+	}
 }
 
 func (s *streamSession) popNext() *queuedMessage {
@@ -939,6 +1003,7 @@ func (s *streamSession) popNext() *queuedMessage {
 	}
 
 	msg := s.queue[0]
+	s.queue[0] = nil
 	s.queue = s.queue[1:]
 	delete(s.queuedByTopic, msg.topic)
 	s.queuedBytes -= msg.size
@@ -1023,13 +1088,44 @@ func (s *streamSession) writeHeartbeat() error {
 }
 
 func (s *streamSession) Serve(ctx context.Context) error {
+	fetchCtx, cancel := context.WithCancel(s.fetchCtx)
+	defer cancel()
+	defer s.close()
 	ticker := time.NewTicker(s.heartbeatInterval)
 	defer ticker.Stop()
+	retryTimer := time.NewTimer(time.Hour)
+	retryTimer.Stop()
+	defer retryTimer.Stop()
+	var retryCh <-chan time.Time
+	var recovering *pendingSnapshot
+	recovered := make(chan error, 1)
 
 	for {
+		if ctx.Err() != nil || s.isClosed() {
+			return nil
+		}
+		if recovering == nil {
+			pending, retryAt := s.nextPendingSnapshot(time.Now())
+			retryTimer.Stop()
+			retryCh = nil
+			if pending != nil {
+				recovering = pending
+				// Fetches must not block the sole response writer or its heartbeats.
+				go func() {
+					recovered <- pending.topic.sendSnapshot(fetchCtx, s)
+				}()
+			} else if !retryAt.IsZero() {
+				retryTimer.Reset(time.Until(retryAt))
+				retryCh = retryTimer.C
+			}
+		}
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-recovered:
+			s.finishSnapshotRecovery(recovering, err)
+			recovering = nil
+		case <-retryCh:
 		case <-ticker.C:
 			if s.isClosed() {
 				return nil
@@ -1041,14 +1137,11 @@ func (s *streamSession) Serve(ctx context.Context) error {
 			if s.isClosed() {
 				return nil
 			}
-			for {
-				msg := s.popNext()
-				if msg == nil {
-					break
-				}
+			if msg := s.popNext(); msg != nil {
 				if err := s.writeFrame(msg.eventID, "message", msg.data); err != nil {
 					return err
 				}
+				s.signalReady()
 			}
 		}
 	}
@@ -1089,7 +1182,7 @@ func newMultiplexTopic(
 	publishOnWake bool,
 ) *multiplexTopic {
 	policy := backoff.NewExponentialBackoffPolicy(time.Second)
-	policy.MaxInterval = 30 * time.Second
+	policy.MaxInterval = maxFetchRetryInterval
 
 	return &multiplexTopic{
 		mux:                      mux,
