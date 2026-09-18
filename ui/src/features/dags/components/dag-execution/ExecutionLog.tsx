@@ -7,7 +7,7 @@
  * @module features/dags/components/dag-execution
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Download, Files } from 'lucide-react';
+import { Download, FileArchive } from 'lucide-react';
 import { components, Status } from '../../../../api/v1/schema';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -306,7 +306,7 @@ function ExecutionLog({ name, dagRunId, dagRun }: Props) {
     try {
       await downloadFromUrl(
         url.toString(),
-        `${name}-${dagRunId}-steps.log`
+        `${name}-${dagRunId}-steps.zip`
       );
     } catch (err) {
       console.error('Download failed:', err);
@@ -485,16 +485,16 @@ function ExecutionLog({ name, dagRunId, dagRun }: Props) {
               </Button>
             </I18nProps>
 
-            {/* Download merged step logs button */}
+            {/* Download step log archive */}
             <I18nProps>
               <Button
                 size="sm"
                 variant="outline"
                 onClick={handleDownloadStepLogs}
                 disabled={isNavigating}
-                title="Download merged step logs (64 MiB log limit)"
+                title="Download step logs (ZIP)"
               >
-                <Files className="h-4 w-4" />
+                <FileArchive className="h-4 w-4" />
               </Button>
             </I18nProps>
 

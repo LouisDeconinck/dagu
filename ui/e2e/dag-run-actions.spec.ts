@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { expect, test } from '@playwright/test';
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import {
   getDAGRun,
   getStepStdout,
@@ -21,6 +21,32 @@ test.describe('DAG run actions', () => {
   test.beforeEach(async ({ page }) => {
     const stack = await loadStack();
     await loginViaUI(page, stack.auth.adminUsername, stack.auth.adminPassword);
+  });
+
+  test('downloads step logs as an authenticated ZIP', async ({ page, request }) => {
+    const stack = await loadStack();
+    const token = await loginViaAPI(request, stack.auth.adminUsername, stack.auth.adminPassword);
+    const dagName = uniqueName('e2e-log-zip');
+    const fileName = await writeLocalDAG(dagName, `
+name: ${dagName}
+steps:
+  - name: output
+    run: echo archive-output
+`);
+    await waitForDAGAvailable(request, token, fileName);
+    const runId = await startDAG(request, token, fileName);
+    await waitForRunStatus(request, token, dagName, runId, ['succeeded']);
+    await page.goto(`/dags/${encodeURIComponent(fileName)}/dagRun-log?dagRunId=${runId}`);
+    const downloaded = page.waitForEvent('download');
+    await page.getByRole('button', { name: 'Download step logs (ZIP)' }).click();
+    const download = await downloaded;
+    expect(download.suggestedFilename()).toBe(`${dagName}-${runId}-steps.zip`);
+    const path = await download.path();
+    expect(path).not.toBeNull();
+    const bytes = await readFile(path!);
+    expect(bytes.subarray(0, 4).toString('hex')).toBe('504b0304');
+    expect(bytes.includes(Buffer.from('001-output/stdout.log'))).toBe(true);
+    expect(bytes.subarray(-22, -18).toString('hex')).toBe('504b0506');
   });
 
   test('reads parallel output without losing the selected step or scroll position', async ({ page, request }, testInfo) => {

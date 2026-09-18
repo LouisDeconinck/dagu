@@ -6,6 +6,8 @@ import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActivityLine } from '../ActivityLine';
 import StepLog from '../StepLog';
+import ExecutionLog from '../ExecutionLog';
+import { downloadFromUrl } from '@/lib/download';
 import { NodeStatus, Stream } from '@/api/v1/schema';
 import type { StepLogSSEResponse } from '@/hooks/useStepLogSSE';
 import { UserPreferencesProvider } from '@/contexts/UserPreference';
@@ -24,6 +26,18 @@ const logs = vi.hoisted(() => ({
 }));
 vi.mock('@/contexts/ConfigContext', () => ({
   useConfig: () => ({ apiURL: '/api/v1' }),
+}));
+vi.mock('@/lib/download', () => ({
+  downloadFromUrl: vi.fn(),
+  downloadBlob: vi.fn(),
+}));
+vi.mock('@/contexts/RemoteNodeContext', () => ({ useRemoteNode: () => 'edge' }));
+vi.mock('@/hooks/useDAGRunLogsSSE', () => ({
+  useDAGRunLogsSSE: () => ({
+    data: null,
+    isConnected: false,
+    shouldUseFallback: true,
+  }),
 }));
 vi.mock('@/hooks/api', () => ({
   useQuery: (
@@ -46,6 +60,7 @@ vi.mock('@/hooks/useStepLogSSE', () => ({
 }));
 
 beforeEach(() => {
+  vi.mocked(downloadFromUrl).mockReset().mockResolvedValue(undefined);
   logs.data = {
     content: 'first output',
     totalLines: 1,
@@ -246,6 +261,39 @@ describe('StepLog', () => {
         />
       );
       await vi.waitFor(() => expect(onSettled).toHaveBeenCalledWith('build'));
+    }
+  );
+});
+
+describe('ExecutionLog ZIP download', () => {
+  it.each([
+    {
+      label: 'root run',
+      dagRun: undefined,
+      path: '/dag-runs/example/run/steps/log/download',
+    },
+    {
+      label: 'child run',
+      dagRun: {
+        rootDAGRunName: 'parent',
+        rootDAGRunId: 'root',
+        dagRunId: 'run',
+      } as never,
+      path: '/dag-runs/parent/root/sub-dag-runs/run/steps/log/download',
+    },
+  ])(
+    'downloads the selected $label from its remote node',
+    ({ dagRun, path }) => {
+      render(<ExecutionLog name="example" dagRunId="run" dagRun={dagRun} />, {
+        wrapper: UserPreferencesProvider,
+      });
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Download step logs (ZIP)' })
+      );
+      expect(downloadFromUrl).toHaveBeenCalledWith(
+        `${window.location.origin}/api/v1${path}?remoteNode=edge`,
+        'example-run-steps.zip'
+      );
     }
   );
 });
