@@ -140,6 +140,9 @@ func (store *Store) legacySuspendFlagsDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if !legacy.IsDir() {
+		return "", fmt.Errorf("suspend flags path %s is not a directory", legacyDir)
+	}
 	primary, err := os.Stat(store.flagsBaseDir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
