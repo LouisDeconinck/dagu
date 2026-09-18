@@ -1,10 +1,10 @@
 // Copyright (C) 2026 Yota Hamada
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import dayjs from 'dayjs';
 import { Layers, List, Search } from 'lucide-react';
 import React from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import dayjs from '@/lib/dayjs';
 import { Status, ViewSpecType } from '../../api/v1/schema';
 import { Button } from '@/components/ui/button';
 import { DateRangePicker } from '@/components/ui/date-range-picker';
@@ -243,10 +243,11 @@ function DAGRuns() {
     const dateWithSeconds =
       dateString.split(':').length < 3 ? `${dateString}:00` : dateString;
 
-    // Apply timezone offset and convert to unix timestamp (seconds)
+    // Interpret the wall clock in the configured timezone, never in the
+    // browser's, then convert to the Unix timestamp.
     if (config.tzOffsetInSec !== undefined) {
       return dayjs(dateWithSeconds)
-        .utcOffset(config.tzOffsetInSec / 60)
+        .utcOffset(config.tzOffsetInSec / 60, true)
         .unix();
     } else {
       return dayjs(dateWithSeconds).unix();
@@ -675,12 +676,13 @@ function DAGRuns() {
     }
 
     const next = hasUrlFilters ? { ...base, ...urlFilters } : base;
-    // Preset and specific modes define their range relative to "now".
-    // Resolve the merged filters so standalone preset/specific URLs derive
-    // fresh dates instead of falling back to the default range. Legacy URLs
-    // without a dateMode keep their concrete dates.
+    // Preset and specific modes define their range relative to "now", so they
+    // are derived on every restore, wherever the filters came from: the
+    // concrete dates a saved view or this session carries were computed when
+    // the mode was last picked and may be days old. Legacy URLs carrying
+    // concrete dates resolve to a custom range and keep those dates.
     const resolved =
-      dateModeParam === 'preset' || dateModeParam === 'specific'
+      next.dateRangeMode === 'preset' || next.dateRangeMode === 'specific'
         ? resolveRunViewFilters(next)
         : next;
     const current = currentFiltersRef.current;

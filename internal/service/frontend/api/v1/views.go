@@ -158,6 +158,18 @@ func (a *API) UpdateView(ctx context.Context, request api.UpdateViewRequestObjec
 	if request.Body.WorkspaceScope == nil {
 		updated.WorkspaceScope = existing.WorkspaceScope
 	}
+	if request.Body.DagName == nil {
+		updated.DAGName = existing.DAGName
+	}
+	if request.Body.FileName == nil {
+		updated.FileName = existing.FileName
+	}
+	if request.Body.Labels == nil {
+		updated.Labels = slices.Clone(existing.Labels)
+	}
+	if request.Body.Pinned == nil {
+		updated.Pinned = existing.Pinned
+	}
 	if request.Body.SortField == nil {
 		updated.SortField = existing.SortField
 	}
@@ -283,6 +295,7 @@ func viewFromSpec(spec api.ViewSpec) *view.View {
 		IntervalDays:  spec.IntervalDays,
 		Workspace:     valueOf(spec.Workspace),
 		DAGName:       valueOf(spec.DagName),
+		FileName:      valueOf(spec.FileName),
 		Pinned:        valueOf(spec.Pinned),
 		ActiveOnly:    valueOf(spec.ActiveOnly),
 		Default:       valueOf(spec.IsDefault),
@@ -368,6 +381,18 @@ func toViewResponse(v *view.View) api.View {
 		resp.DatePreset = &datePreset
 		resp.SpecificPeriod = &specificPeriod
 		resp.SpecificValue = ptrOf(v.SpecificValue)
+		resp.FromDate = ptrOf(v.FromDate)
+		resp.ToDate = ptrOf(v.ToDate)
+		resp.WorkspaceScope = &workspaceScope
+		resp.IsDefault = ptrOf(v.Default)
+	}
+	if v.Type == view.TypeArtifact {
+		resp.FileName = ptrOf(v.FileName)
+		dateMode := api.RunDateMode(v.DateMode)
+		datePreset := api.RunDatePreset(v.DatePreset)
+		workspaceScope := api.ViewWorkspaceScope(v.WorkspaceScope)
+		resp.DateMode = &dateMode
+		resp.DatePreset = &datePreset
 		resp.FromDate = ptrOf(v.FromDate)
 		resp.ToDate = ptrOf(v.ToDate)
 		resp.WorkspaceScope = &workspaceScope

@@ -173,6 +173,202 @@ func TestViewsAPI_CreateRunView(t *testing.T) {
 	assert.True(t, *created.Pinned)
 }
 
+func TestViewsAPI_CreateArtifactView(t *testing.T) {
+	viewType := apigen.ViewSpecTypeArtifact
+	workspaceScope := apigen.ViewWorkspaceScopeWorkspace
+	dateMode := apigen.RunDateModeCustom
+	datePreset := apigen.RunDatePresetAll
+	isDefault := true
+	pinned := true
+	workspace := "production"
+	dagName := "nightly-etl"
+	fileName := "*.csv"
+	fromDate := "2026-09-01T00:00"
+	toDate := "2026-09-30T23:59"
+	created := mustCreateView(t, newViewsTestAPI(t), context.Background(), apigen.ViewSpec{
+		Name:           "Nightly reports",
+		Type:           &viewType,
+		IntervalDays:   1,
+		Workspace:      &workspace,
+		WorkspaceScope: &workspaceScope,
+		DagName:        &dagName,
+		FileName:       &fileName,
+		DateMode:       &dateMode,
+		DatePreset:     &datePreset,
+		FromDate:       &fromDate,
+		ToDate:         &toDate,
+		IsDefault:      &isDefault,
+		Pinned:         &pinned,
+	})
+
+	assert.Equal(t, "artifact", created.Type)
+	require.NotNil(t, created.WorkspaceScope)
+	assert.Equal(t, workspaceScope, *created.WorkspaceScope)
+	require.NotNil(t, created.DagName)
+	assert.Equal(t, dagName, *created.DagName)
+	require.NotNil(t, created.FileName)
+	assert.Equal(t, fileName, *created.FileName)
+	require.NotNil(t, created.DateMode)
+	assert.Equal(t, dateMode, *created.DateMode)
+	require.NotNil(t, created.DatePreset)
+	assert.Equal(t, datePreset, *created.DatePreset)
+	require.NotNil(t, created.FromDate)
+	assert.Equal(t, fromDate, *created.FromDate)
+	require.NotNil(t, created.ToDate)
+	assert.Equal(t, toDate, *created.ToDate)
+	require.NotNil(t, created.IsDefault)
+	assert.True(t, *created.IsDefault)
+	require.NotNil(t, created.Pinned)
+	assert.True(t, *created.Pinned)
+	assert.Nil(t, created.DagRunId, "run-only fields stay out of an artifact view")
+	assert.Nil(t, created.RunStatus)
+	assert.Nil(t, created.SpecificPeriod)
+	assert.Nil(t, created.SpecificValue)
+}
+
+func TestViewsAPI_UpdatePreservesOmittedArtifactSettings(t *testing.T) {
+	ctx := context.Background()
+	api := newViewsTestAPI(t)
+	viewType := apigen.ViewSpecTypeArtifact
+	workspaceScope := apigen.ViewWorkspaceScopeAll
+	dateMode := apigen.RunDateModeCustom
+	datePreset := apigen.RunDatePresetAll
+	dagName := "nightly-etl"
+	fileName := "*.csv"
+	fromDate := "2026-09-01T00:00"
+	toDate := "2026-09-30T23:59"
+	isDefault := true
+	created := mustCreateView(t, api, ctx, apigen.ViewSpec{
+		Name:           "Before",
+		Type:           &viewType,
+		IntervalDays:   1,
+		WorkspaceScope: &workspaceScope,
+		DagName:        &dagName,
+		FileName:       &fileName,
+		DateMode:       &dateMode,
+		DatePreset:     &datePreset,
+		FromDate:       &fromDate,
+		ToDate:         &toDate,
+		IsDefault:      &isDefault,
+	})
+
+	resp, err := api.UpdateView(ctx, apigen.UpdateViewRequestObject{
+		ViewId: created.Id,
+		Body: &apigen.ViewSpec{
+			Name:         "After",
+			Type:         &viewType,
+			IntervalDays: 1,
+		},
+	})
+	require.NoError(t, err)
+	updated, ok := resp.(apigen.UpdateView200JSONResponse)
+	require.True(t, ok, "expected 200, got %T", resp)
+	require.NotNil(t, updated.FileName)
+	assert.Equal(t, fileName, *updated.FileName)
+	require.NotNil(t, updated.DateMode)
+	assert.Equal(t, dateMode, *updated.DateMode)
+	require.NotNil(t, updated.DatePreset)
+	assert.Equal(t, datePreset, *updated.DatePreset)
+	require.NotNil(t, updated.FromDate)
+	assert.Equal(t, fromDate, *updated.FromDate)
+	require.NotNil(t, updated.ToDate)
+	assert.Equal(t, toDate, *updated.ToDate)
+	require.NotNil(t, updated.IsDefault)
+	assert.True(t, *updated.IsDefault)
+}
+
+// An explicit empty date clears the bound; the nil-preserve branches must not
+// resurrect the value the caller just cleared.
+func TestViewsAPI_UpdateClearsArtifactDateBound(t *testing.T) {
+	ctx := context.Background()
+	api := newViewsTestAPI(t)
+	viewType := apigen.ViewSpecTypeArtifact
+	workspaceScope := apigen.ViewWorkspaceScopeAll
+	dateMode := apigen.RunDateModeCustom
+	datePreset := apigen.RunDatePresetAll
+	fromDate := "2026-09-01T00:00"
+	toDate := "2026-09-30T23:59"
+	cleared := ""
+	created := mustCreateView(t, api, ctx, apigen.ViewSpec{
+		Name:           "Nightly reports",
+		Type:           &viewType,
+		IntervalDays:   1,
+		WorkspaceScope: &workspaceScope,
+		DateMode:       &dateMode,
+		DatePreset:     &datePreset,
+		FromDate:       &fromDate,
+		ToDate:         &toDate,
+	})
+
+	resp, err := api.UpdateView(ctx, apigen.UpdateViewRequestObject{
+		ViewId: created.Id,
+		Body: &apigen.ViewSpec{
+			Name:           "Nightly reports",
+			Type:           &viewType,
+			IntervalDays:   1,
+			WorkspaceScope: &workspaceScope,
+			DateMode:       &dateMode,
+			DatePreset:     &datePreset,
+			FromDate:       &fromDate,
+			ToDate:         &cleared,
+		},
+	})
+	require.NoError(t, err)
+	updated, ok := resp.(apigen.UpdateView200JSONResponse)
+	require.True(t, ok, "expected 200, got %T", resp)
+	assert.Empty(t, valueOfString(updated.ToDate), "cleared end date must stay cleared")
+	require.NotNil(t, updated.FromDate)
+	assert.Equal(t, fromDate, *updated.FromDate)
+}
+
+func valueOfString(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+// A PUT patches: fields the request omits keep their stored value, so a
+// rename must not drop the filters the view was saved with.
+func TestViewsAPI_UpdatePreservesOmittedArtifactFilters(t *testing.T) {
+	ctx := context.Background()
+	api := newViewsTestAPI(t)
+	viewType := apigen.ViewSpecTypeArtifact
+	workspaceScope := apigen.ViewWorkspaceScopeAll
+	dagName := "reporter"
+	fileName := "**/*.csv"
+	pinned := true
+	created := mustCreateView(t, api, ctx, apigen.ViewSpec{
+		Name:           "Nightly reports",
+		Type:           &viewType,
+		IntervalDays:   1,
+		WorkspaceScope: &workspaceScope,
+		DagName:        &dagName,
+		FileName:       &fileName,
+		Pinned:         &pinned,
+	})
+
+	resp, err := api.UpdateView(ctx, apigen.UpdateViewRequestObject{
+		ViewId: created.Id,
+		Body: &apigen.ViewSpec{
+			Name:           "Renamed",
+			Type:           &viewType,
+			IntervalDays:   1,
+			WorkspaceScope: &workspaceScope,
+		},
+	})
+	require.NoError(t, err)
+	updated, ok := resp.(apigen.UpdateView200JSONResponse)
+	require.True(t, ok, "expected 200, got %T", resp)
+	assert.Equal(t, "Renamed", updated.Name)
+	require.NotNil(t, updated.DagName)
+	assert.Equal(t, dagName, *updated.DagName)
+	require.NotNil(t, updated.FileName)
+	assert.Equal(t, fileName, *updated.FileName)
+	require.NotNil(t, updated.Pinned)
+	assert.True(t, *updated.Pinned)
+}
+
 func TestViewsAPI_WorkflowDefaultIsSharedPerScope(t *testing.T) {
 	ctx := context.Background()
 	api := newViewsTestAPI(t)
