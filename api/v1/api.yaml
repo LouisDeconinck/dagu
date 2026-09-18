@@ -3069,15 +3069,14 @@ paths:
 
   /dag-runs/{name}/{dagRunId}/steps/log/download:
     get:
-      summary: "Download merged step logs of a DAG-run"
+      summary: "Download step logs as ZIP of a DAG-run"
       description: |
         Downloads stdout and stderr for the steps and lifecycle handlers of this
         DAG-run only. Logs from nested DAG-runs are not included.
-        Copies up to 64 MiB of log content in run order, shared across all stdout
-        and stderr sections. Section headers and separators do not count toward
-        this limit. If the limit is exceeded, remaining log content is omitted
-        and a truncation notice is appended. Truncated downloads still return
-        HTTP 200.
+        Returns a streaming ZIP archive with no size limit. Each available log is
+        stored as <index>-<step-name>/stdout.log or stderr.log, in run order.
+        Missing files are skipped. Each file includes only the bytes present when
+        it is opened; subsequent log growth is excluded.
       operationId: "downloadDAGRunStepLogs"
       tags:
         - "dag-runs"
@@ -3087,16 +3086,17 @@ paths:
         - $ref: "#/components/parameters/DAGRunId"
       responses:
         "200":
-          description: "Merged log file content"
+          description: "ZIP archive of step log files"
           headers:
             Content-Disposition:
               schema:
                 type: "string"
               description: "Attachment filename"
           content:
-            text/plain:
+            application/zip:
               schema:
                 type: "string"
+                format: "binary"
         "404":
           description: "DAG-run not found"
           content:
@@ -3793,15 +3793,14 @@ paths:
 
   /dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/log/download:
     get:
-      summary: "Download merged step logs of a sub DAG-run"
+      summary: "Download step logs as ZIP of a sub DAG-run"
       description: |
         Downloads stdout and stderr for the steps and lifecycle handlers of this
         sub DAG-run only. Logs from nested DAG-runs are not included.
-        Copies up to 64 MiB of log content in run order, shared across all stdout
-        and stderr sections. Section headers and separators do not count toward
-        this limit. If the limit is exceeded, remaining log content is omitted
-        and a truncation notice is appended. Truncated downloads still return
-        HTTP 200.
+        Returns a streaming ZIP archive with no size limit. Each available log is
+        stored as <index>-<step-name>/stdout.log or stderr.log, in run order.
+        Missing files are skipped. Each file includes only the bytes present when
+        it is opened; subsequent log growth is excluded.
       operationId: "downloadSubDAGRunStepLogs"
       tags:
         - "dag-runs"
@@ -3817,16 +3816,17 @@ paths:
           description: "ID of the sub DAG-run to download the step logs for"
       responses:
         "200":
-          description: "Merged log file content"
+          description: "ZIP archive of step log files"
           headers:
             Content-Disposition:
               schema:
                 type: "string"
               description: "Attachment filename"
           content:
-            text/plain:
+            application/zip:
               schema:
                 type: "string"
+                format: "binary"
         "404":
           description: "Sub DAG-run not found"
           content:

@@ -4,6 +4,7 @@
 package api_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -286,9 +287,26 @@ func TestGetDAGRunSpec(t *testing.T) {
 	).ExpectStatus(http.StatusNotFound).Send(t)
 }
 
+func readLogArchive(t *testing.T, body string) map[string]string {
+	t.Helper()
+	archive, err := zip.NewReader(strings.NewReader(body), int64(len(body)))
+	require.NoError(t, err)
+	logs := make(map[string]string)
+	for _, entry := range archive.File {
+		reader, err := entry.Open()
+		require.NoError(t, err)
+		content, err := io.ReadAll(reader)
+		require.NoError(t, err)
+		require.NoError(t, reader.Close())
+		require.NotContains(t, logs, entry.Name)
+		logs[entry.Name] = string(content)
+	}
+	return logs
+}
+
 func TestDownloadDAGRunStepLogs(t *testing.T) {
 	server := test.SetupServer(t)
-	const dagName = "merged_step_logs_dag"
+	const dagName = "step_logs_dag"
 
 	firstCommand := test.JoinShellCommands(
 		test.Output("out-first"),
@@ -326,17 +344,13 @@ func TestDownloadDAGRunStepLogs(t *testing.T) {
 
 	disposition := resp.Response.Header().Get("Content-Disposition")
 	require.Contains(t, disposition, "attachment")
-	require.Contains(t, disposition, fmt.Sprintf("%s-%s-steps.log", dagName, startBody.DagRunId))
+	require.Contains(t, disposition, fmt.Sprintf("%s-%s-steps.zip", dagName, startBody.DagRunId))
 
-	assert.Contains(t, resp.Body, "===== Step: first =====")
-	assert.Contains(t, resp.Body, "out-first")
-	assert.Contains(t, resp.Body, "err-first")
-	assert.Contains(t, resp.Body, "===== Step: second =====")
-	assert.Contains(t, resp.Body, "out-second")
-	assert.Less(t,
-		strings.Index(resp.Body, "===== Step: first ====="),
-		strings.Index(resp.Body, "===== Step: second ====="),
-	)
+	require.Equal(t, "application/zip", resp.Response.Header().Get("Content-Type"))
+	logs := readLogArchive(t, resp.Body)
+	assert.Contains(t, logs["001-first/stdout.log"], "out-first")
+	assert.Contains(t, logs["001-first/stderr.log"], "err-first")
+	assert.Contains(t, logs["002-second/stdout.log"], "out-second")
 
 	_ = server.Client().Get(
 		fmt.Sprintf("/api/v1/dag-runs/%s/%s/steps/log/download", dagName, "non_existent_run"),
@@ -348,7 +362,7 @@ func TestDownloadDAGRunStepLogs(t *testing.T) {
 
 func TestDownloadSubDAGRunStepLogs(t *testing.T) {
 	server := test.SetupServer(t)
-	const dagName = "merged_step_logs_sub_dag"
+	const dagName = "step_logs_sub_dag"
 	childCommand := test.JoinShellCommands(
 		test.Output("sub-out"),
 		test.Stderr("sub-err"),
@@ -395,15 +409,25 @@ steps:
 			fmt.Sprintf("/api/v1/dag-runs/%s/%s/sub-dag-runs/%s/steps/log/download",
 				dagName, startBody.DagRunId, subDAGRunID),
 		).Send(t)
-		return resp.Response.StatusCode() == http.StatusOK &&
-			strings.Contains(resp.Body, "sub-out")
+		return resp.Response.StatusCode() == http.StatusOK
 	}, dagRunEventuallyTimeout(10*time.Second), 200*time.Millisecond)
 
 	disposition := resp.Response.Header().Get("Content-Disposition")
 	require.Contains(t, disposition, "attachment")
-	require.Contains(t, disposition, fmt.Sprintf("%s-%s-sub-%s-steps.log", dagName, startBody.DagRunId, subDAGRunID))
-	assert.Contains(t, resp.Body, "===== Step: child_step =====")
-	assert.Contains(t, resp.Body, "sub-err")
+	require.Contains(t, disposition, fmt.Sprintf("%s-%s-sub-%s-steps.zip", dagName, startBody.DagRunId, subDAGRunID))
+	require.Equal(t, "application/zip", resp.Response.Header().Get("Content-Type"))
+	logs := readLogArchive(t, resp.Body)
+	assert.Contains(t, logs["001-child_step/stdout.log"], "sub-out")
+	assert.Contains(t, logs["001-child_step/stderr.log"], "sub-err")
+	for name := range logs {
+		assert.True(t, strings.HasPrefix(name, "001-child_step/"))
+	}
+
+	root := server.Client().Get(fmt.Sprintf("/api/v1/dag-runs/%s/%s/steps/log/download", dagName, startBody.DagRunId)).
+		ExpectStatus(http.StatusOK).Send(t)
+	for name := range readLogArchive(t, root.Body) {
+		assert.True(t, strings.HasPrefix(name, "001-call_child/"))
+	}
 
 	_ = server.Client().Get(
 		fmt.Sprintf("/api/v1/dag-runs/%s/%s/sub-dag-runs/%s/steps/log/download",

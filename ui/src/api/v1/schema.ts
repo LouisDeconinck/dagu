@@ -1158,14 +1158,13 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Download merged step logs of a DAG-run
+         * Download step logs as ZIP of a DAG-run
          * @description Downloads stdout and stderr for the steps and lifecycle handlers of this
          *     DAG-run only. Logs from nested DAG-runs are not included.
-         *     Copies up to 64 MiB of log content in run order, shared across all stdout
-         *     and stderr sections. Section headers and separators do not count toward
-         *     this limit. If the limit is exceeded, remaining log content is omitted
-         *     and a truncation notice is appended. Truncated downloads still return
-         *     HTTP 200.
+         *     Returns a streaming ZIP archive with no size limit. Each available log is
+         *     stored as <index>-<step-name>/stdout.log or stderr.log, in run order.
+         *     Missing files are skipped. Each file includes only the bytes present when
+         *     it is opened; subsequent log growth is excluded.
          *
          */
         get: operations["downloadDAGRunStepLogs"];
@@ -1499,14 +1498,13 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Download merged step logs of a sub DAG-run
+         * Download step logs as ZIP of a sub DAG-run
          * @description Downloads stdout and stderr for the steps and lifecycle handlers of this
          *     sub DAG-run only. Logs from nested DAG-runs are not included.
-         *     Copies up to 64 MiB of log content in run order, shared across all stdout
-         *     and stderr sections. Section headers and separators do not count toward
-         *     this limit. If the limit is exceeded, remaining log content is omitted
-         *     and a truncation notice is appended. Truncated downloads still return
-         *     HTTP 200.
+         *     Returns a streaming ZIP archive with no size limit. Each available log is
+         *     stored as <index>-<step-name>/stdout.log or stderr.log, in run order.
+         *     Missing files are skipped. Each file includes only the bytes present when
+         *     it is opened; subsequent log growth is excluded.
          *
          */
         get: operations["downloadSubDAGRunStepLogs"];
@@ -10614,7 +10612,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Merged log file content */
+            /** @description ZIP archive of step log files */
             200: {
                 headers: {
                     /** @description Attachment filename */
@@ -10622,7 +10620,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "text/plain": string;
+                    "application/zip": string;
                 };
             };
             /** @description DAG-run not found */
@@ -11566,7 +11564,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Merged log file content */
+            /** @description ZIP archive of step log files */
             200: {
                 headers: {
                     /** @description Attachment filename */
@@ -11574,7 +11572,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "text/plain": string;
+                    "application/zip": string;
                 };
             };
             /** @description Sub DAG-run not found */

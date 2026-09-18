@@ -1163,90 +1163,12 @@ func (a *API) DownloadDAGRunStepLogs(ctx context.Context, request api.DownloadDA
 		return nil, err
 	}
 
-	merged, err := mergedStepLogs(dagStatus)
-	if err != nil {
-		return nil, err
-	}
-
-	filename := fmt.Sprintf("%s-%s-steps.log", sanitizeFilename(request.Name), sanitizeFilename(request.DagRunId))
-	return api.DownloadDAGRunStepLogs200TextResponse{
-		Body: merged,
-		Headers: api.DownloadDAGRunStepLogs200ResponseHeaders{
-			ContentDisposition: ptrOf(fmt.Sprintf("attachment; filename=\"%s\"", filename)),
-		},
+	return &stepLogArchiveResponse{
+		ctx:      ctx,
+		status:   dagStatus,
+		openLog:  a.dagRunRepository.OpenLog,
+		filename: fmt.Sprintf("%s-%s-steps.zip", sanitizeFilename(request.Name), sanitizeFilename(request.DagRunId)),
 	}, nil
-}
-
-// mergedStepLogsLimit bounds the log bytes copied into a merged download so a
-// run with large or numerous logs cannot exhaust server memory. Content beyond
-// the limit is dropped and a truncation notice is appended instead.
-const mergedStepLogsLimit = 64 << 20 // 64 MiB
-
-// mergedStepLogs concatenates the stdout and stderr logs of every node in run
-// order into one document, with a header attributing each section to its step.
-// Missing log files (e.g., skipped steps) produce an empty section.
-func mergedStepLogs(dagStatus *ir.DAGRunStatus) (string, error) {
-	return mergedStepLogsBounded(dagStatus, mergedStepLogsLimit)
-}
-
-func mergedStepLogsBounded(dagStatus *ir.DAGRunStatus, limit int64) (string, error) {
-	var buf bytes.Buffer
-	remaining := limit
-	truncated := false
-	for _, node := range dagStatus.NodesInRunOrder() {
-		if node == nil {
-			continue
-		}
-		fmt.Fprintf(&buf, "===== Step: %s =====\n", node.Step.Name)
-		for _, stream := range []struct {
-			name string
-			path string
-		}{
-			{"stdout", node.Stdout},
-			{"stderr", node.Stderr},
-		} {
-			fmt.Fprintf(&buf, "[%s]\n", stream.name)
-			if stream.path == "" {
-				continue
-			}
-			logFile, err := os.Open(filepath.Clean(stream.path))
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					continue
-				}
-				return "", fmt.Errorf("error reading %s: %w", stream.path, err)
-			}
-			info, err := logFile.Stat()
-			if err != nil {
-				_ = logFile.Close()
-				return "", fmt.Errorf("error reading %s: %w", stream.path, err)
-			}
-			// Directories stat successfully and report size 0 on Windows, so a
-			// zero-length copy would silently skip this check without it.
-			if info.IsDir() {
-				_ = logFile.Close()
-				return "", fmt.Errorf("error reading %s: is a directory", stream.path)
-			}
-			size := info.Size()
-			written, err := io.CopyN(&buf, logFile, min(size, remaining))
-			_ = logFile.Close()
-			if err != nil && !errors.Is(err, io.EOF) {
-				return "", fmt.Errorf("error reading %s: %w", stream.path, err)
-			}
-			remaining -= written
-			if size > written {
-				truncated = true
-			}
-			if written > 0 && buf.Bytes()[buf.Len()-1] != '\n' {
-				buf.WriteByte('\n')
-			}
-		}
-		buf.WriteByte('\n')
-	}
-	if truncated {
-		fmt.Fprintf(&buf, "[merged log truncated at %d bytes]\n", limit)
-	}
-	return buf.String(), nil
 }
 
 func (a *API) UpdateDAGRunStepStatus(ctx context.Context, request api.UpdateDAGRunStepStatusRequestObject) (api.UpdateDAGRunStepStatusResponseObject, error) {
@@ -2780,17 +2702,11 @@ func (a *API) DownloadSubDAGRunStepLogs(ctx context.Context, request api.Downloa
 		return nil, err
 	}
 
-	merged, err := mergedStepLogs(dagStatus)
-	if err != nil {
-		return nil, err
-	}
-
-	filename := fmt.Sprintf("%s-%s-sub-%s-steps.log", sanitizeFilename(request.Name), sanitizeFilename(request.DagRunId), sanitizeFilename(request.SubDAGRunId))
-	return api.DownloadSubDAGRunStepLogs200TextResponse{
-		Body: merged,
-		Headers: api.DownloadSubDAGRunStepLogs200ResponseHeaders{
-			ContentDisposition: ptrOf(fmt.Sprintf("attachment; filename=\"%s\"", filename)),
-		},
+	return &stepLogArchiveResponse{
+		ctx:      ctx,
+		status:   dagStatus,
+		openLog:  a.dagRunRepository.OpenLog,
+		filename: fmt.Sprintf("%s-%s-sub-%s-steps.zip", sanitizeFilename(request.Name), sanitizeFilename(request.DagRunId), sanitizeFilename(request.SubDAGRunId)),
 	}, nil
 }
 
