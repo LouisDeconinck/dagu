@@ -747,6 +747,26 @@ func TestJQExecutor_Args(t *testing.T) {
 			expectedOutput: "18446744073709551615\n",
 		},
 		{
+			name:   "SignedIntegerBounds",
+			query:  `$numbers[]`,
+			script: `{}`,
+			args: map[string]any{"numbers": []any{
+				int64(math.MinInt32), int64(math.MinInt32) - 1,
+				int64(math.MaxInt32), int64(math.MaxInt32) + 1,
+				int64(math.MinInt64), int64(math.MaxInt64),
+			}},
+			raw:            true,
+			expectedOutput: "-2147483648\n-2147483649\n2147483647\n2147483648\n-9223372036854775808\n9223372036854775807\n",
+		},
+		{
+			name:           "Uint32KeepsPrecision",
+			query:          `$n`,
+			script:         `{}`,
+			args:           map[string]any{"n": uint32(math.MaxUint32)},
+			raw:            true,
+			expectedOutput: "4294967295\n",
+		},
+		{
 			name:      "UndeclaredVariableFails",
 			query:     `$missing`,
 			script:    `{}`,

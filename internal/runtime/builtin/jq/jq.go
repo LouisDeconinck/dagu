@@ -140,7 +140,10 @@ func normalizeArgValue(v any) any {
 	case int32:
 		return int(v)
 	case int64:
-		return int(v)
+		if v >= math.MinInt && v <= math.MaxInt {
+			return int(v)
+		}
+		return new(big.Int).SetInt64(v)
 	case uint:
 		if v <= uint(math.MaxInt) {
 			return int(v)
@@ -151,7 +154,7 @@ func normalizeArgValue(v any) any {
 	case uint16:
 		return int(v)
 	case uint32:
-		return int(v)
+		return normalizeArgValue(uint64(v))
 	case uint64:
 		if v <= uint64(math.MaxInt) {
 			return int(v)

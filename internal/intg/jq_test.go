@@ -616,6 +616,13 @@ func TestJQArgResolution(t *testing.T) {
 			want: "World|$who|number|boolean|World",
 		},
 		{
+			name: "LargeNegativeInteger",
+			config: `filter: '$n'
+      args:
+        n: -2147483649`,
+			want: "-2147483649",
+		},
+		{
 			name: "NumericReference",
 			config: `filter: '.items[] | select(. > ($minimum | tonumber))'
       args:
