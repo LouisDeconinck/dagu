@@ -282,6 +282,8 @@ func (h *remoteNodeProxy) doRequest(body io.Reader, r *http.Request) (*http.Resp
 	}
 
 	if isStepLogDownload(r, h.apiBasePath) {
+		// ZIP responses are already compressed and can be forwarded unchanged.
+		req.Header.Set("Accept-Encoding", "identity")
 		// Log downloads have no total duration limit; connection setup remains bounded.
 		client.Timeout = 0
 		transport.DialContext = (&net.Dialer{Timeout: remoteProxyTimeout}).DialContext

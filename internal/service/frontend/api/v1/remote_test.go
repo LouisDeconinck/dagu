@@ -265,6 +265,7 @@ func TestRemoteStepLogDownloadStreams(t *testing.T) {
 			release := make(chan struct{})
 			remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				assert.Equal(t, "/api/v1/dag-runs/example/run"+suffix, r.URL.Path)
+				assert.Equal(t, "identity", r.Header.Get("Accept-Encoding"))
 				w.Header().Set("Content-Type", stepLogArchiveContentType)
 				w.Header().Set("Content-Disposition", `attachment; filename="remote.zip"`)
 				_, _ = w.Write(first)
