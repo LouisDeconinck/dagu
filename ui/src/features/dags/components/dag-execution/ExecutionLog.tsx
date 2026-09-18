@@ -492,7 +492,7 @@ function ExecutionLog({ name, dagRunId, dagRun }: Props) {
                 variant="outline"
                 onClick={handleDownloadStepLogs}
                 disabled={isNavigating}
-                title="Download merged step logs"
+                title="Download merged step logs (64 MiB log limit)"
               >
                 <Files className="h-4 w-4" />
               </Button>

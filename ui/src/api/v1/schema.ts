@@ -1159,7 +1159,14 @@ export interface paths {
         };
         /**
          * Download merged step logs of a DAG-run
-         * @description Downloads the logs of all steps in a DAG-run merged into a single file
+         * @description Downloads stdout and stderr for the steps and lifecycle handlers of this
+         *     DAG-run only. Logs from nested DAG-runs are not included.
+         *     Copies up to 64 MiB of log content in run order, shared across all stdout
+         *     and stderr sections. Section headers and separators do not count toward
+         *     this limit. If the limit is exceeded, remaining log content is omitted
+         *     and a truncation notice is appended. Truncated downloads still return
+         *     HTTP 200.
+         *
          */
         get: operations["downloadDAGRunStepLogs"];
         put?: never;
@@ -1493,7 +1500,14 @@ export interface paths {
         };
         /**
          * Download merged step logs of a sub DAG-run
-         * @description Downloads the logs of all steps in a sub DAG-run merged into a single file
+         * @description Downloads stdout and stderr for the steps and lifecycle handlers of this
+         *     sub DAG-run only. Logs from nested DAG-runs are not included.
+         *     Copies up to 64 MiB of log content in run order, shared across all stdout
+         *     and stderr sections. Section headers and separators do not count toward
+         *     this limit. If the limit is exceeded, remaining log content is omitted
+         *     and a truncation notice is appended. Truncated downloads still return
+         *     HTTP 200.
+         *
          */
         get: operations["downloadSubDAGRunStepLogs"];
         put?: never;
