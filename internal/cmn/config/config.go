@@ -415,10 +415,8 @@ type PathsConfig struct {
 	DataDir         string
 	ToolsDir        string
 	SuspendFlagsDir string
-	// SuspendFlagsDirLegacy is the suspend flags location used before the
-	// default moved under DataDir. It is only set when the suspend flags
-	// directory was not configured explicitly, so repositories can migrate
-	// flags written by older versions.
+	// SuspendFlagsDirLegacy is the fallback suspension directory when the
+	// primary directory was not configured explicitly.
 	SuspendFlagsDirLegacy string
 	AdminLogsDir          string
 	EventStoreDir         string

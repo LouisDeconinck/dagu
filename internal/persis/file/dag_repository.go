@@ -4,16 +4,10 @@
 package file
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
 	"github.com/dagucloud/dagu/v2/internal/cmn/fileutil"
-	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
-	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/persis"
 	filedag "github.com/dagucloud/dagu/v2/internal/persis/file/dag"
@@ -80,13 +74,11 @@ func NewDAGRepository(cfg *config.Config, opts ...DAGRepositoryOption) (*persis.
 	if options.SkipExamples != nil {
 		skipExamples = *options.SkipExamples
 	}
-	if err := migrateSuspendFlags(cfg.Paths.SuspendFlagsDirLegacy, cfg.Paths.SuspendFlagsDir); err != nil {
-		return nil, fmt.Errorf("migrate suspend flags: %w", err)
-	}
 	workspaceBaseConfigDir := workspace.BaseConfigDir(cfg.Paths.DAGsDir)
 	dagStore := filedag.NewStore(
 		cfg.Paths.DAGsDir,
 		filedag.WithFlagsBaseDir(cfg.Paths.SuspendFlagsDir),
+		filedag.WithLegacyFlagsBaseDir(cfg.Paths.SuspendFlagsDirLegacy),
 		filedag.WithSearchPaths(options.SearchPaths),
 		filedag.WithBaseConfig(cfg.Paths.BaseConfig),
 		filedag.WithWorkspaceBaseConfigDir(workspaceBaseConfigDir),
@@ -103,53 +95,4 @@ func NewDAGRepository(cfg *config.Config, opts ...DAGRepositoryOption) (*persis.
 		BaseConfigPath:         cfg.Paths.BaseConfig,
 		WorkspaceBaseConfigDir: workspaceBaseConfigDir,
 	}), nil
-}
-
-// suspendFlagFilePermission matches the permission used for suspend flag files.
-const suspendFlagFilePermission os.FileMode = 0750
-
-// migrateSuspendFlags moves suspend flag files written under the legacy default
-// location into the current flags directory. It is a no-op when no legacy
-// directory is recorded or when it does not exist.
-func migrateSuspendFlags(legacyDir, flagsDir string) error {
-	if legacyDir == "" || flagsDir == "" || legacyDir == flagsDir {
-		return nil
-	}
-	entries, err := os.ReadDir(legacyDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("read legacy suspend flags directory %s: %w", legacyDir, err)
-	}
-	if err := os.MkdirAll(flagsDir, suspendFlagFilePermission); err != nil {
-		return err
-	}
-	migrated := 0
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		target := filepath.Join(flagsDir, entry.Name())
-		if !fileutil.FileExists(target) {
-			if err := fileutil.WriteFileAtomic(target, []byte{}, suspendFlagFilePermission); err != nil {
-				return err
-			}
-		}
-		if err := fileutil.Remove(filepath.Join(legacyDir, entry.Name())); err != nil {
-			return err
-		}
-		migrated++
-	}
-	// Best effort: the legacy directory may contain entries the migration does
-	// not own (for example subdirectories), in which case it is left in place.
-	if err := fileutil.Remove(legacyDir); err != nil {
-		logger.Warn(context.Background(), "Failed to remove legacy suspend flags directory",
-			tag.Dir(legacyDir), tag.Error(err))
-	}
-	if migrated > 0 {
-		logger.Info(context.Background(), "Migrated suspend flags to the data directory",
-			tag.Dir(legacyDir), tag.Dir(flagsDir))
-	}
-	return nil
 }

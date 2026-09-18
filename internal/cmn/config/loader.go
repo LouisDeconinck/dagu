@@ -1762,7 +1762,7 @@ func (l *ConfigLoader) finalizePaths(cfg *Config) error {
 
 	// Suspend flags default under the shared data directory so every process
 	// observing the same data_dir sees identical suspension state. A legacy
-	// default location is recorded for flag migration only when the path was
+	// default location is recorded for compatibility only when the path was
 	// not configured explicitly.
 	if cfg.Paths.SuspendFlagsDir == "" {
 		cfg.Paths.SuspendFlagsDir = filepath.Join(cfg.Paths.DataDir, "suspend")

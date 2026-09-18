@@ -20,8 +20,7 @@ type Paths struct {
 	DAGsDir string
 	// SuspendFlagsDir is the directory for storing flags that indicate DAG suspension.
 	SuspendFlagsDir string
-	// LegacySuspendFlagsDir is the suspend flags location used before the default
-	// moved under the data directory. It is only used to migrate existing flags.
+	// LegacySuspendFlagsDir is the fallback directory for existing suspend flags.
 	LegacySuspendFlagsDir string
 	// DataDir is the directory for persisting application data (e.g., history).
 	DataDir string
