@@ -305,7 +305,8 @@ export interface paths {
          * Validate a DAG specification
          * @description Validates a DAG YAML specification without persisting any changes.
          *
-         *     Returns a list of validation errors. When the spec can be partially parsed,
+         *     Returns separate lists of validation errors and non-fatal warnings.
+         *     When the spec can be partially parsed,
          *     the response may also include parsed DAG details built with error-tolerant loading.
          *
          */
@@ -624,6 +625,26 @@ export interface paths {
          * @description Returns cursor-based snippets for one matching Wiki page.
          */
         get: operations["searchWikiPageMatches"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/artifacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List recent DAG-run artifacts
+         * @description Returns root DAG-runs that produced artifacts, newest first, each with its files. Child runs are reached through their root.
+         */
+        get: operations["listArtifacts"];
         put?: never;
         post?: never;
         delete?: never;
@@ -5147,6 +5168,35 @@ export interface components {
             /** @description Whether completed human-task input is durable but the same DAG-run still needs its retry queued */
             humanTaskResumePending?: boolean;
         };
+        /** @description One file within a DAG-run's artifact directory */
+        ArtifactListFile: {
+            /** @description Path of the file relative to the DAG-run artifact directory */
+            path: string;
+            /**
+             * Format: int64
+             * @description Size of the file in bytes
+             */
+            size: number;
+        };
+        /** @description One root DAG-run and the artifact files it produced */
+        ArtifactListItem: {
+            name: components["schemas"]["DAGName"];
+            dagRunId: components["schemas"]["DAGRunId"];
+            /** @description RFC 3339 timestamp of when the DAG-run was created. This is what fromDate and toDate bound and what the listing is ordered by; for a run that waited in a queue it precedes startedAt. */
+            createdAt: string;
+            /** @description RFC 3339 timestamp of when the DAG-run started */
+            startedAt?: string;
+            /** @description Files in the run's artifact directory, sorted by path. With fileName set, only the matching files. At most 100 are returned; see filesTruncated. */
+            files: components["schemas"]["ArtifactListFile"][];
+            /** @description True when the run holds more files than were returned. Which files were returned is then not defined; the per-run artifact endpoint serves the full tree. */
+            filesTruncated: boolean;
+        };
+        /** @description Page of root DAG-runs that produced artifacts, newest first */
+        ArtifactListResponse: {
+            items: components["schemas"]["ArtifactListItem"][];
+            /** @description Opaque cursor for the next page; absent when the last page was returned */
+            nextCursor?: string;
+        };
         /**
          * @description Artifact tree node type
          * @enum {string}
@@ -6664,7 +6714,7 @@ export interface components {
          */
         RunDateMode: RunDateMode;
         /**
-         * @description Relative date preset applied by an Executions page view.
+         * @description Relative date preset applied by an Executions or Artifacts page view. 'all' applies no date bound and is accepted only for artifact views.
          * @enum {string}
          */
         RunDatePreset: RunDatePreset;
@@ -6688,6 +6738,8 @@ export interface components {
             labels?: string[];
             /** @description DAG name substring filter. Empty matches any. */
             dagName?: string;
+            /** @description Artifact file name filter: a glob when it contains wildcards, otherwise a substring. Empty matches any. */
+            fileName?: string;
             /** @description DAG run ID filter. Empty matches any. */
             dagRunId?: string;
             /** @description Run status filter: 'all' or a status number. Empty matches any. */
@@ -6725,6 +6777,8 @@ export interface components {
             workspace?: string;
             labels?: string[];
             dagName?: string;
+            /** @description Artifact file name filter. Empty matches any. */
+            fileName?: string;
             intervalDays: number;
             /** @description Visible status columns in left-to-right display order. */
             columns?: components["schemas"]["ViewColumn"][];
@@ -6795,6 +6849,14 @@ export interface components {
         Workspace: string;
         /** @description Optional Wiki page path prefix within the selected workspace */
         WikiPagePrefix: components["schemas"]["WikiPagePath"];
+        /** @description Filter by DAG names containing this value */
+        ArtifactDAGName: string;
+        /** @description Select files by path. A value containing glob metacharacters (* ? [ {) is matched as a glob against the path relative to the DAG-run artifact directory; any other value is matched as a case-insensitive substring of that path. A run is returned only if at least one file matches, and only the matching files are listed for it. */
+        ArtifactFileName: string;
+        /** @description Number of runs to return (default 100, max 500) */
+        ArtifactListLimit: number;
+        /** @description Opaque cursor returned by the previous artifact list response */
+        ArtifactListCursor: string;
         /** @description Opaque cursor returned by the previous search response */
         SearchCursor: string;
         /** @description Number of search results to return (default 20, max 50) */
@@ -8028,6 +8090,8 @@ export interface operations {
                         dag?: components["schemas"]["DAGDetails"];
                         /** @description List of validation errors */
                         errors: string[];
+                        /** @description Non-fatal spec warnings; these do not affect valid */
+                        warnings?: string[];
                     };
                 };
             };
@@ -8072,6 +8136,8 @@ export interface operations {
                         suspended: boolean;
                         /** @description List of errors encountered during the request */
                         errors: string[];
+                        /** @description Non-fatal spec warnings */
+                        warnings?: string[];
                         /** @description The DAG specification in YAML format */
                         spec?: string;
                         editorHints?: components["schemas"]["DAGEditorHints"];
@@ -8502,6 +8568,8 @@ export interface operations {
                         spec: string;
                         /** @description List of errors in the spec */
                         errors: string[];
+                        /** @description Non-fatal spec warnings */
+                        warnings?: string[];
                         /** @description Passive value-reference notices produced while loading this spec. These notices are not persisted. */
                         valueReferenceNotices: components["schemas"]["ValueReferenceNotice"][];
                     };
@@ -8965,6 +9033,61 @@ export interface operations {
             };
             /** @description Wiki page not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    listArtifacts: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+                /** @description Workspace selector. For list and search APIs, use all, default, or a workspace name. Omitted means all. */
+                workspace?: components["parameters"]["Workspace"];
+                /** @description start datetime for filtering DAG-runs in ISO 8601 format with timezone */
+                fromDate?: components["parameters"]["DateTimeFrom"];
+                /** @description end datetime for filtering DAG-runs in ISO 8601 format with timezone */
+                toDate?: components["parameters"]["DateTimeTo"];
+                /** @description Filter by DAG names containing this value */
+                name?: components["parameters"]["ArtifactDAGName"];
+                /** @description Select files by path. A value containing glob metacharacters (* ? [ {) is matched as a glob against the path relative to the DAG-run artifact directory; any other value is matched as a case-insensitive substring of that path. A run is returned only if at least one file matches, and only the matching files are listed for it. */
+                fileName?: components["parameters"]["ArtifactFileName"];
+                /** @description Number of runs to return (default 100, max 500) */
+                limit?: components["parameters"]["ArtifactListLimit"];
+                /** @description Opaque cursor returned by the previous artifact list response */
+                cursor?: components["parameters"]["ArtifactListCursor"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactListResponse"];
+                };
+            };
+            /** @description Invalid cursor, file name pattern, or pagination parameters */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19348,7 +19471,8 @@ export enum RunDatePreset {
     last7days = "last7days",
     last30days = "last30days",
     thisWeek = "thisWeek",
-    thisMonth = "thisMonth"
+    thisMonth = "thisMonth",
+    all = "all"
 }
 export enum RunSpecificPeriod {
     date = "date",
@@ -19358,7 +19482,8 @@ export enum RunSpecificPeriod {
 export enum ViewSpecType {
     kanban = "kanban",
     workflow = "workflow",
-    run = "run"
+    run = "run",
+    artifact = "artifact"
 }
 export enum ComponentsParametersEventLogPaginationMode {
     offset = "offset",

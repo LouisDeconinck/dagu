@@ -927,7 +927,8 @@ paths:
       description: |
         Validates a DAG YAML specification without persisting any changes.
 
-        Returns a list of validation errors. When the spec can be partially parsed,
+        Returns separate lists of validation errors and non-fatal warnings.
+        When the spec can be partially parsed,
         the response may also include parsed DAG details built with error-tolerant loading.
       operationId: "validateDAGSpec"
       tags:
@@ -965,6 +966,12 @@ paths:
                   errors:
                     type: array
                     description: "List of validation errors"
+                    items:
+                      type: string
+                  warnings:
+                    type: array
+                    description: "Non-fatal spec warnings; these do not affect valid"
+                    x-go-type-skip-optional-pointer: true
                     items:
                       type: string
                 required:
@@ -1010,6 +1017,12 @@ paths:
                   errors:
                     type: array
                     description: "List of errors encountered during the request"
+                    items:
+                      type: string
+                  warnings:
+                    type: array
+                    description: "Non-fatal spec warnings"
+                    x-go-type-skip-optional-pointer: true
                     items:
                       type: string
                   spec:
@@ -1409,6 +1422,12 @@ paths:
                   errors:
                     type: array
                     description: "List of errors in the spec"
+                    items:
+                      type: string
+                  warnings:
+                    type: array
+                    description: "Non-fatal spec warnings"
+                    x-go-type-skip-optional-pointer: true
                     items:
                       type: string
                   valueReferenceNotices:
@@ -1817,6 +1836,42 @@ paths:
                 $ref: "#/components/schemas/Error"
         "404":
           description: "Wiki page not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /artifacts:
+    get:
+      summary: "List recent DAG-run artifacts"
+      description: "Returns root DAG-runs that produced artifacts, newest first, each with its files. Child runs are reached through their root."
+      operationId: "listArtifacts"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/Workspace"
+        - $ref: "#/components/parameters/DateTimeFrom"
+        - $ref: "#/components/parameters/DateTimeTo"
+        - $ref: "#/components/parameters/ArtifactDAGName"
+        - $ref: "#/components/parameters/ArtifactFileName"
+        - $ref: "#/components/parameters/ArtifactListLimit"
+        - $ref: "#/components/parameters/ArtifactListCursor"
+      responses:
+        "200":
+          description: "A successful response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactListResponse"
+        "400":
+          description: "Invalid cursor, file name pattern, or pagination parameters"
           content:
             application/json:
               schema:
@@ -9835,6 +9890,45 @@ components:
       schema:
         $ref: "#/components/schemas/WikiPagePath"
 
+    ArtifactDAGName:
+      name: name
+      in: query
+      description: "Filter by DAG names containing this value"
+      required: false
+      schema:
+        type: string
+
+    ArtifactFileName:
+      name: fileName
+      in: query
+      description: >-
+        Select files by path. A value containing glob metacharacters (* ? [ {)
+        is matched as a glob against the path relative to the DAG-run artifact
+        directory; any other value is matched as a case-insensitive substring
+        of that path. A run is returned only if at least one file matches, and
+        only the matching files are listed for it.
+      required: false
+      schema:
+        type: string
+
+    ArtifactListLimit:
+      name: limit
+      in: query
+      description: "Number of runs to return (default 100, max 500)"
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+
+    ArtifactListCursor:
+      name: cursor
+      in: query
+      description: "Opaque cursor returned by the previous artifact list response"
+      required: false
+      schema:
+        type: string
+
     SearchCursor:
       name: cursor
       in: query
@@ -13096,6 +13190,73 @@ components:
             - log
             - nodes
 
+    ArtifactListFile:
+      type: object
+      description: "One file within a DAG-run's artifact directory"
+      properties:
+        path:
+          type: string
+          description: "Path of the file relative to the DAG-run artifact directory"
+        size:
+          type: integer
+          format: int64
+          description: "Size of the file in bytes"
+      required:
+        - path
+        - size
+
+    ArtifactListItem:
+      type: object
+      description: "One root DAG-run and the artifact files it produced"
+      properties:
+        name:
+          $ref: "#/components/schemas/DAGName"
+        dagRunId:
+          $ref: "#/components/schemas/DAGRunId"
+        createdAt:
+          type: string
+          description: >-
+            RFC 3339 timestamp of when the DAG-run was created. This is what
+            fromDate and toDate bound and what the listing is ordered by; for a
+            run that waited in a queue it precedes startedAt.
+        startedAt:
+          type: string
+          description: "RFC 3339 timestamp of when the DAG-run started"
+        files:
+          type: array
+          description: >-
+            Files in the run's artifact directory, sorted by path. With
+            fileName set, only the matching files. At most 100 are returned;
+            see filesTruncated.
+          items:
+            $ref: "#/components/schemas/ArtifactListFile"
+        filesTruncated:
+          type: boolean
+          description: >-
+            True when the run holds more files than were returned. Which files
+            were returned is then not defined; the per-run artifact endpoint
+            serves the full tree.
+      required:
+        - name
+        - dagRunId
+        - createdAt
+        - files
+        - filesTruncated
+
+    ArtifactListResponse:
+      type: object
+      description: "Page of root DAG-runs that produced artifacts, newest first"
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/ArtifactListItem"
+        nextCursor:
+          type: string
+          description: "Opaque cursor for the next page; absent when the last page was returned"
+      required:
+        - items
+
     ArtifactNodeType:
       type: string
       description: "Artifact tree node type"
@@ -16110,7 +16271,8 @@ components:
         - last30days
         - thisWeek
         - thisMonth
-      description: "Relative date preset applied by an Executions page view."
+        - all
+      description: "Relative date preset applied by an Executions or Artifacts page view. 'all' applies no date bound and is accepted only for artifact views."
 
     RunSpecificPeriod:
       type: string
@@ -16137,6 +16299,7 @@ components:
             - kanban
             - workflow
             - run
+            - artifact
           default: kanban
           description: "Saved view type."
         workspace:
@@ -16161,6 +16324,10 @@ components:
           type: string
           maxLength: 255
           description: "DAG name substring filter. Empty matches any."
+        fileName:
+          type: string
+          maxLength: 255
+          description: "Artifact file name filter: a glob when it contains wildcards, otherwise a substring. Empty matches any."
         dagRunId:
           type: string
           maxLength: 64
@@ -16240,6 +16407,9 @@ components:
             type: string
         dagName:
           type: string
+        fileName:
+          type: string
+          description: "Artifact file name filter. Empty matches any."
         intervalDays:
           type: integer
         columns:

@@ -4,12 +4,14 @@
 package sse
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -482,6 +484,365 @@ func TestMultiplexTopicSendSnapshotDropsRemovedTopics(t *testing.T) {
 	require.NotNil(t, session.removeTopic(parsed.Key))
 	require.NoError(t, topic.sendSnapshot(context.Background(), session))
 	assert.Nil(t, session.popNext())
+}
+
+func TestStreamSessionOversizedMessageKeepsSessionOpen(t *testing.T) {
+	mux := NewMultiplexer(StreamConfig{WriteBufferSize: 256}, nil)
+	t.Cleanup(mux.Shutdown)
+
+	mux.RegisterFetcher(TopicTypeDAG, func(_ context.Context, identifier string) (any, error) {
+		return map[string]string{"id": identifier, "blob": strings.Repeat("x", 1024)}, nil
+	})
+
+	result, err := mux.createSession(
+		context.Background(),
+		httptest.NewRecorder(),
+		[]string{"dag:test.yaml"},
+		0,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result.session)
+	defer mux.removeSession(result.session)
+
+	topic := mux.topics["dag:test.yaml"]
+	require.NotNil(t, topic)
+
+	// A payload larger than the write buffer must not close the multiplexed
+	// session: the write buffer bounds queued backlog, not a single message.
+	require.NoError(t, topic.sendSnapshot(context.Background(), result.session))
+	assert.False(t, result.session.isClosed())
+
+	// The session keeps serving updates for the topic afterwards.
+	require.NoError(t, topic.sendSnapshot(context.Background(), result.session))
+	assert.False(t, result.session.isClosed())
+
+	msg := result.session.popNext()
+	require.NotNil(t, msg)
+	assert.Equal(t, "dag:test.yaml", msg.topic)
+	assert.Nil(t, result.session.popNext())
+}
+
+func TestStreamRecoversEvictedSnapshots(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		topics []string
+	}{
+		{"large-first", []string{"dag:large.yaml", "dagrun:small/run-1"}},
+		{"large-last", []string{"dagrun:small/run-1", "dag:large.yaml"}},
+		{"multiple-large", []string{"dag:large.yaml", "dag:large-2.yaml", "dagrun:small/run-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := NewMultiplexer(StreamConfig{}, nil)
+			t.Cleanup(mux.Shutdown)
+			fetcher := func(_ context.Context, identifier string) (any, error) {
+				blob := ""
+				if strings.HasPrefix(identifier, "large") {
+					blob = strings.Repeat("x", defaultWriteBufferSize+1024)
+				}
+				return map[string]string{"id": identifier, "blob": blob}, nil
+			}
+			for _, topicType := range []TopicType{TopicTypeDAG, TopicTypeDAGRun} {
+				mux.RegisterFetcher(topicType, fetcher)
+				// Recovery must work without payload changes or external wakes.
+				mux.SetRefreshMode(topicType, TopicRefreshModeOnDemand)
+			}
+			reader, _ := openTestStream(t, mux, tc.topics)
+			var delivered []string
+			var lastID uint64
+			for range tc.topics {
+				frame := readTestMessage(t, reader)
+				require.Greater(t, frame.id, lastID)
+				lastID = frame.id
+				var envelope messageEnvelope
+				require.NoError(t, json.Unmarshal(frame.data, &envelope))
+				delivered = append(delivered, envelope.Topic)
+			}
+			assert.ElementsMatch(t, tc.topics, delivered)
+		})
+	}
+}
+
+type testStreamFrame struct {
+	id    uint64
+	event string
+	data  []byte
+}
+
+func openTestStream(t *testing.T, mux *Multiplexer, topics []string) (*bufio.Reader, *streamSession) {
+	t.Helper()
+	handler := NewMultiplexHandler(mux, nil)
+	server := httptest.NewServer(http.HandlerFunc(handler.HandleStream))
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	t.Cleanup(cancel)
+	query := url.Values{"topic": topics}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"?"+query.Encode(), nil)
+	require.NoError(t, err)
+	response, err := server.Client().Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = response.Body.Close() })
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	reader := bufio.NewReader(response.Body)
+	frame := readTestFrame(t, reader)
+	require.Equal(t, "control", frame.event)
+	var control StreamControlEvent
+	require.NoError(t, json.Unmarshal(frame.data, &control))
+	session, err := mux.getSession(control.SessionID)
+	require.NoError(t, err)
+	return reader, session
+}
+
+func readTestMessage(t *testing.T, reader *bufio.Reader) testStreamFrame {
+	t.Helper()
+	for {
+		frame := readTestFrame(t, reader)
+		if frame.event == "message" {
+			return frame
+		}
+	}
+}
+
+func readTestFrame(t *testing.T, reader *bufio.Reader) testStreamFrame {
+	t.Helper()
+	var frame testStreamFrame
+	for {
+		line, err := reader.ReadString('\n')
+		require.NoError(t, err)
+		line = strings.TrimSuffix(line, "\n")
+		switch {
+		case line == "":
+			return frame
+		case strings.HasPrefix(line, "id: "):
+			frame.id, err = strconv.ParseUint(strings.TrimPrefix(line, "id: "), 10, 64)
+			require.NoError(t, err)
+		case strings.HasPrefix(line, "event: "):
+			frame.event = strings.TrimPrefix(line, "event: ")
+		case strings.HasPrefix(line, "data: "):
+			frame.data = []byte(strings.TrimPrefix(line, "data: "))
+		}
+	}
+}
+
+func TestStreamCoalescesOversizedSnapshots(t *testing.T) {
+	type userKey struct{}
+	fetchCtx := context.WithValue(t.Context(), userKey{}, "alice")
+	mux := NewMultiplexer(StreamConfig{WriteBufferSize: 256}, nil)
+	t.Cleanup(mux.Shutdown)
+	mux.SetRefreshMode(TopicTypeDAG, TopicRefreshModeOnDemand)
+	var revision int
+	mux.RegisterFetcher(TopicTypeDAG, func(ctx context.Context, id string) (any, error) {
+		if ctx.Value(userKey{}) != "alice" {
+			return nil, errors.New("missing session user")
+		}
+		blob := ""
+		if id == "a.yaml" && revision > 0 {
+			blob = strings.Repeat("x", 1024)
+		}
+		return map[string]any{"revision": revision, "blob": blob}, nil
+	})
+	writer := &testFrameWriter{ResponseRecorder: httptest.NewRecorder(), frames: make(chan []byte, 4)}
+	result, err := mux.createSession(fetchCtx, writer, []string{"dag:a.yaml", "dag:b.yaml"}, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { mux.removeSession(result.session) })
+	result.session.bootstrapTopics(fetchCtx, 0, result.topics)
+	for revision = 1; revision <= 2; revision++ {
+		require.NoError(t, mux.topics["dag:a.yaml"].sendSnapshot(fetchCtx, result.session))
+	}
+	revision = 2
+
+	// Only one oversized payload is retained; the other topic must still arrive.
+	result.session.mu.Lock()
+	assert.Len(t, result.session.queue, 1)
+	assert.Equal(t, result.session.queue[0].size, result.session.queuedBytes)
+	result.session.mu.Unlock()
+	startTestSession(t, result.session)
+	var delivered []string
+	var lastID uint64
+	for range 2 {
+		frame := readWrittenFrame(t, writer)
+		require.Greater(t, frame.id, lastID)
+		lastID = frame.id
+		var envelope struct {
+			Topic   string
+			Payload struct{ Revision int }
+		}
+		require.NoError(t, json.Unmarshal(frame.data, &envelope))
+		assert.Equal(t, 2, envelope.Payload.Revision)
+		delivered = append(delivered, envelope.Topic)
+	}
+	assert.Equal(t, []string{"dag:a.yaml", "dag:b.yaml"}, delivered)
+}
+
+func TestStreamRetriesRecovery(t *testing.T) {
+	mux := NewMultiplexer(StreamConfig{WriteBufferSize: 256}, nil)
+	mux.watcherBaseInterval = 20 * time.Millisecond
+	t.Cleanup(mux.Shutdown)
+	mux.SetRefreshMode(TopicTypeDAG, TopicRefreshModeOnDemand)
+	var attempts atomic.Int32
+	mux.RegisterFetcher(TopicTypeDAG, func(_ context.Context, id string) (any, error) {
+		if id == "retry.yaml" && attempts.Add(1) == 2 {
+			return nil, errors.New("temporary fetch failure")
+		}
+		blob := ""
+		if id == "large.yaml" {
+			blob = strings.Repeat("x", 1024)
+		}
+		return map[string]string{"blob": blob}, nil
+	})
+	reader, _ := openTestStream(t, mux, []string{"dag:retry.yaml", "dag:other.yaml", "dag:large.yaml"})
+	var delivered []string
+	for range 3 {
+		frame := readTestMessage(t, reader)
+		var envelope messageEnvelope
+		require.NoError(t, json.Unmarshal(frame.data, &envelope))
+		delivered = append(delivered, envelope.Topic)
+	}
+	assert.Equal(t, []string{"dag:large.yaml", "dag:other.yaml", "dag:retry.yaml"}, delivered)
+	assert.EqualValues(t, 3, attempts.Load())
+}
+
+func TestStreamRecoveryIgnoresStaleFetch(t *testing.T) {
+	for _, reattach := range []bool{false, true} {
+		t.Run(strconv.FormatBool(reattach), func(t *testing.T) {
+			mux := NewMultiplexer(StreamConfig{WriteBufferSize: 256, HeartbeatInterval: 20 * time.Millisecond}, nil)
+			t.Cleanup(mux.Shutdown)
+			mux.SetRefreshMode(TopicTypeDAG, TopicRefreshModeOnDemand)
+			started := make(chan struct{})
+			release := make(chan struct{})
+			var attempts atomic.Int32
+			mux.RegisterFetcher(TopicTypeDAG, func(ctx context.Context, id string) (any, error) {
+				if id == "large.yaml" {
+					return strings.Repeat("x", 1024), nil
+				}
+				if id == "barrier.yaml" {
+					return "barrier", nil
+				}
+				revision := attempts.Add(1)
+				if revision == 2 {
+					close(started)
+					select {
+					case <-release:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
+				return map[string]int32{"revision": revision}, nil
+			})
+			reader, session := openTestStream(t, mux, []string{"dag:small.yaml", "dag:barrier.yaml", "dag:large.yaml"})
+			readTestMessage(t, reader)
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("snapshot recovery did not start")
+			}
+			// The response writer remains usable while recovery is blocked.
+			require.Empty(t, readTestFrame(t, reader).event)
+			if reattach {
+				_, err := mux.mutateSession(t.Context(), session.id, nil, []string{"dag:small.yaml"})
+				require.NoError(t, err)
+				mutation, err := mux.mutateSession(t.Context(), session.id, []string{"dag:small.yaml"}, nil)
+				require.NoError(t, err)
+				session.bootstrapTopics(t.Context(), 0, mutation.added)
+			} else {
+				mux.WakeTopic(TopicTypeDAG, "small.yaml")
+			}
+			frame := readTestMessage(t, reader)
+			assert.Contains(t, string(frame.data), `"revision":3`)
+			close(release)
+			// The next recovery can only finish after the stale fetch was rejected.
+			frame = readTestMessage(t, reader)
+			assert.Contains(t, string(frame.data), `"topic":"dag:barrier.yaml"`)
+		})
+	}
+}
+
+func TestStreamCancelsRecovery(t *testing.T) {
+	mux := NewMultiplexer(StreamConfig{WriteBufferSize: 256}, nil)
+	t.Cleanup(mux.Shutdown)
+	mux.SetRefreshMode(TopicTypeDAG, TopicRefreshModeOnDemand)
+	started, canceled := make(chan struct{}), make(chan struct{})
+	var attempts atomic.Int32
+	mux.RegisterFetcher(TopicTypeDAG, func(ctx context.Context, id string) (any, error) {
+		if id == "large.yaml" {
+			return strings.Repeat("x", 1024), nil
+		}
+		if attempts.Add(1) == 2 {
+			close(started)
+			<-ctx.Done()
+			close(canceled)
+			return nil, ctx.Err()
+		}
+		return "small", nil
+	})
+	_, session := openTestStream(t, mux, []string{"dag:small.yaml", "dag:large.yaml"})
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot recovery did not start")
+	}
+	session.close()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot recovery was not canceled")
+	}
+}
+
+func TestStreamStopsOnWriteFailure(t *testing.T) {
+	mux := NewMultiplexer(StreamConfig{SlowClientTimeout: time.Second}, nil)
+	t.Cleanup(mux.Shutdown)
+	mux.RegisterFetcher(TopicTypeDAG, func(context.Context, string) (any, error) { return "data", nil })
+	mux.SetRefreshMode(TopicTypeDAG, TopicRefreshModeOnDemand)
+	writer := &testFrameWriter{ResponseRecorder: httptest.NewRecorder(), writeErr: context.DeadlineExceeded}
+	result, err := mux.createSession(t.Context(), writer, []string{"dag:test.yaml"}, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { mux.removeSession(result.session) })
+	result.session.bootstrapTopics(t.Context(), 0, result.topics)
+	require.ErrorIs(t, result.session.Serve(t.Context()), context.DeadlineExceeded)
+	assert.False(t, writer.deadline.IsZero())
+	assert.True(t, result.session.isClosed())
+}
+
+type testFrameWriter struct {
+	*httptest.ResponseRecorder
+	frames   chan []byte
+	writeErr error
+	deadline time.Time
+}
+
+func (w *testFrameWriter) Write(data []byte) (int, error) {
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	w.frames <- append([]byte(nil), data...)
+	return len(data), nil
+}
+
+func (w *testFrameWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadline = deadline
+	return nil
+}
+
+func readWrittenFrame(t *testing.T, writer *testFrameWriter) testStreamFrame {
+	t.Helper()
+	select {
+	case data := <-writer.frames:
+		return readTestFrame(t, bufio.NewReader(strings.NewReader(string(data))))
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream did not deliver a frame")
+		return testStreamFrame{}
+	}
+}
+
+func startTestSession(t *testing.T, session *streamSession) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- session.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, <-done)
+	})
 }
 
 func TestMultiplexerSharesTopicRegistryAcrossSessions(t *testing.T) {

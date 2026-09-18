@@ -166,6 +166,7 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
       : {
           dag: next.dag,
           errors: next.errors ?? [],
+          warnings: next.warnings ?? [],
           valueReferenceNotices: data?.valueReferenceNotices ?? [],
           spec: next.spec,
         }
@@ -192,6 +193,8 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
     hasUnsavedChanges: localHasUnsavedChanges,
     conflict,
     resolveConflict,
+    beginSave,
+    cancelSave,
     markAsSaved,
     discardChanges,
   } = useContentEditor({
@@ -205,9 +208,11 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
   // buffer stops being dirty (save or discard), which also clears the markers.
   const [liveValidation, setLiveValidation] = React.useState<{
     errors: string[];
+    warnings: string[];
     dag?: components['schemas']['DAGDetails'];
   } | null>(null);
   const [isValidating, setIsValidating] = React.useState(false);
+  const [isSaving, setIsSaving] = React.useState(false);
   const validateSeqRef = React.useRef(0);
 
   React.useEffect(() => {
@@ -219,6 +224,7 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
     }
 
     const seq = ++validateSeqRef.current;
+    setLiveValidation(null);
     setIsValidating(true);
     const timer = window.setTimeout(() => {
       void client
@@ -232,7 +238,11 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
           }
           setIsValidating(false);
           if (!requestError && result) {
-            setLiveValidation({ errors: result.errors ?? [], dag: result.dag });
+            setLiveValidation({
+              errors: result.errors ?? [],
+              warnings: result.warnings ?? [],
+              dag: result.dag,
+            });
           } else {
             // A failed request leaves the buffer's validity unknown; stale
             // results from an older buffer would misreport it.
@@ -380,6 +390,9 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
 
   // Save handler function
   const handleSave = React.useCallback(async () => {
+    if (isSaving) {
+      return;
+    }
     if (currentValue == null) {
       showError('No changes to save', 'Make some edits before saving.');
       return;
@@ -387,56 +400,69 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
 
     // Save current scroll position before any operations that might cause re-render
     saveScrollPosition();
+    beginSave(currentValue);
 
-    const { data: responseData, error } = await client.PUT(
-      '/dags/{fileName}/spec',
-      {
-        params: {
-          path: {
-            fileName: fileName,
+    setIsSaving(true);
+    try {
+      const { data: responseData, error } = await client.PUT(
+        '/dags/{fileName}/spec',
+        {
+          params: {
+            path: {
+              fileName: fileName,
+            },
+            query: {
+              remoteNode,
+            },
           },
-          query: {
-            remoteNode,
+          body: {
+            spec: currentValue,
           },
-        },
-        body: {
-          spec: currentValue,
-        },
+        }
+      );
+
+      if (error) {
+        cancelSave();
+        showError(
+          error.message || 'Failed to save spec',
+          'Please check the YAML syntax and try again.'
+        );
+        return;
       }
-    );
 
-    if (error) {
-      showError(
-        error.message || 'Failed to save spec',
-        'Please check the YAML syntax and try again.'
-      );
-      return;
+      if (responseData?.errors?.length) {
+        cancelSave();
+        // Feed the rejected save into the same markers/panel as live validation.
+        setLiveValidation((prev) => ({
+          errors: responseData.errors,
+          warnings: prev?.warnings ?? [],
+          dag: prev?.dag,
+        }));
+        showError(
+          'The spec was not saved',
+          undefined,
+          'Validation errors',
+          responseData.errors
+        );
+        return;
+      }
+
+      // Mark as saved to prevent false conflict detection on our own save
+      markAsSaved(currentValue);
+
+      // Revalidate SWR cache from server as safety net
+      mutateSpec();
+
+      // Show success toast notification
+      showToast('Changes saved successfully');
+    } catch {
+      cancelSave();
+      showError('Failed to save spec', 'Please try again.');
+    } finally {
+      setIsSaving(false);
     }
-
-    if (responseData?.errors?.length) {
-      // Feed the rejected save into the same markers/panel as live validation.
-      setLiveValidation((prev) => ({
-        errors: responseData.errors,
-        dag: prev?.dag,
-      }));
-      showError(
-        'The spec was not saved',
-        undefined,
-        'Validation errors',
-        responseData.errors
-      );
-      return;
-    }
-
-    // Mark as saved to prevent false conflict detection on our own save
-    markAsSaved(currentValue);
-
-    // Revalidate SWR cache from server as safety net
-    mutateSpec();
-
-    // Show success toast notification
-    showToast('Changes saved successfully');
   }, [
+    isSaving,
     currentValue,
     fileName,
     remoteNode,
@@ -444,6 +470,8 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
     saveScrollPosition,
     showError,
     showToast,
+    beginSave,
+    cancelSave,
     markAsSaved,
     mutateSpec,
   ]);
@@ -504,6 +532,10 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
   if (isLoading) {
     return <LoadingIndicator />;
   }
+
+  const warnings = localHasUnsavedChanges
+    ? (liveValidation?.warnings ?? [])
+    : (data?.warnings ?? []);
 
   // Check if we have local DAGs
   const hasLocalDags = localDags && localDags.length > 0;
@@ -623,6 +655,23 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
     );
   };
 
+  const renderValidationStatus = () => {
+    if (isValidating) {
+      return <I18nText text={'Validating...'} />;
+    }
+    if (!liveValidation) {
+      return null;
+    }
+    const count = liveValidation.errors.length;
+    if (count > 0) {
+      return ts(count === 1 ? '{count} issue' : '{count} issues', { count });
+    }
+    if (liveValidation.warnings.length > 0) {
+      return <I18nText text={'Valid with warnings'} />;
+    }
+    return <I18nText text={'Valid'} />;
+  };
+
   return (
     <DAGContext.Consumer>
       {(props) => {
@@ -638,22 +687,7 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
                     : 'text-xs text-muted-foreground'
                 }
               >
-                {isValidating ? (
-                  <I18nText text={'Validating...'} />
-                ) : liveValidation ? (
-                  liveValidation.errors.length > 0 ? (
-                    ts(
-                      liveValidation.errors.length === 1
-                        ? '{count} issue'
-                        : '{count} issues',
-                      { count: liveValidation.errors.length }
-                    )
-                  ) : (
-                    <I18nText text={'Valid'} />
-                  )
-                ) : (
-                  ''
-                )}
+                {renderValidationStatus()}
               </span>
             )}
             {valueReferenceNotices.length > 0 && (
@@ -697,7 +731,7 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
                   <Button
                     id="save-config"
                     title="Save changes (Ctrl+S / Cmd+S)"
-                    disabled={!localHasUnsavedChanges}
+                    disabled={isSaving || !localHasUnsavedChanges}
                     onClick={async () => {
                       await handleSave();
                       props.refresh();
@@ -726,6 +760,27 @@ function DAGSpec({ fileName, localDags, editorHints }: Props) {
                 className="flex min-h-0 flex-1 flex-col space-y-6 pb-8"
                 ref={containerRef}
               >
+                {warnings.length > 0 && (
+                  <div
+                    role="status"
+                    className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200"
+                  >
+                    <div className="mb-2 flex items-center gap-2 font-medium">
+                      <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                      <I18nText text={'Warnings'} />
+                    </div>
+                    <ul className="list-disc space-y-1 pl-5">
+                      {warnings.map((warning) => (
+                        <li
+                          key={warning}
+                          className="whitespace-normal break-words"
+                        >
+                          {warning}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {hasLocalDags && (
                   <div className="flex-shrink-0">
                     <div className="overflow-x-auto -mx-2 px-2 scrollbar-thin scrollbar-thumb-gray-300">
