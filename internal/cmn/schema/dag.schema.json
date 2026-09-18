@@ -3931,7 +3931,7 @@
         },
         "args": {
           "type": "object",
-          "description": "Variables to bind in the jq filter. Each key is available as $<key>; values keep their YAML type and may use ${...} references."
+          "description": "Variables to bind in the jq filter. Each key is available as $<key>; values keep their YAML type and strings may use ${...} references. Supplying args, including {}, makes the filter literal jq source."
         }
       },
       "description": "Configuration for JQ JSON query executor."
@@ -6679,7 +6679,7 @@
         },
         "args": {
           "type": "object",
-          "description": "Variables to bind in the jq filter. Each key is available as $<key>; values keep their YAML type and may use ${...} references."
+          "description": "Variables to bind in the jq filter. Each key is available as $<key>; values keep their YAML type and strings may use ${...} references. Supplying args, including {}, makes the filter literal jq source."
         }
       },
       "description": "Configuration for action: jq.filter."

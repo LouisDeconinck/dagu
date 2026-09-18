@@ -560,3 +560,108 @@ steps:
 		})
 	})
 }
+
+func TestJQArgResolution(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		config string
+		want   string
+	}{
+		{
+			name: "LiteralDollar",
+			config: `filter: '$text'
+      args:
+        text: '\$who'`,
+			want: "$who",
+		},
+		{
+			name: "NameCollision",
+			config: `filter: '$who'
+      args:
+        who: Alice`,
+			want: "Alice",
+		},
+		{
+			name: "EmptyArgs",
+			config: `filter: '"${env.who}"'
+      args: {}`,
+			want: "${env.who}",
+		},
+		{
+			name:   "NoArgs",
+			config: `filter: '"${env.who}"'`,
+			want:   "World",
+		},
+		{
+			name: "Multiline",
+			config: `filter: |
+        $who |
+        ascii_upcase
+      args:
+        who: Alice`,
+			want: "ALICE",
+		},
+		{
+			name: "NestedValues",
+			config: `filter: '[$cfg.name, $cfg.literal, ($cfg.count | type), ($cfg.enabled | type), $items[0]] | join("|")'
+      args:
+        cfg:
+          name: ${env.who}
+          literal: '\$who'
+          count: 4
+          enabled: true
+        items: ['${env.who}']`,
+			want: "World|$who|number|boolean|World",
+		},
+		{
+			name: "NumericReference",
+			config: `filter: '.items[] | select(. > ($minimum | tonumber))'
+      args:
+        minimum: ${env.MINIMUM}`,
+			want: "5\n10",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			th := test.Setup(t)
+			dag := th.DAG(t, `env:
+  who: World
+  MINIMUM: '4'
+steps:
+  - id: filter
+    action: jq.filter
+    with:
+      data: '{"items": [1, 5, 10]}'
+      raw: true
+      `+tc.config+`
+    output: RESULT
+`)
+			dag.Agent().RunSuccess(t)
+			dag.AssertOutputs(t, map[string]any{"RESULT": tc.want})
+		})
+	}
+}
+
+func TestJQLegacyArgs(t *testing.T) {
+	t.Parallel()
+
+	th := test.Setup(t)
+	dag := th.DAG(t, `env:
+  who: World
+steps:
+  - id: filter
+    type: jq
+    config:
+      raw: true
+      args:
+        who: Alice
+    command: '$who'
+    script: '{}'
+    output: RESULT
+`)
+	dag.Agent().RunSuccess(t)
+	dag.AssertOutputs(t, map[string]any{"RESULT": "Alice"})
+}

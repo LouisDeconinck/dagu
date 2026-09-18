@@ -98,13 +98,6 @@ func newJQ(ctx context.Context, step ir.Step) (executor.Executor, error) {
 	seen := make(map[string]struct{}, len(jqCfg.Args))
 	for _, name := range sortedKeys(jqCfg.Args) {
 		value := jqCfg.Args[name]
-		if s, ok := value.(string); ok {
-			resolved, err := runtime.ResolveString(ctx, s, cmnvalue.WorkflowField("jq.args."+name))
-			if err != nil {
-				return nil, fmt.Errorf("jq: failed to evaluate config.args.%s: %w", name, err)
-			}
-			value = resolved
-		}
 		variable := "$" + strings.TrimPrefix(name, "$")
 		if _, dup := seen[variable]; dup {
 			return nil, fmt.Errorf("jq: args %q duplicates variable %s", name, variable)

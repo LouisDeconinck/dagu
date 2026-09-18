@@ -379,3 +379,21 @@ func TestSetupExecutor_HarnessScriptPreservesLiteralCodeFences(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "```yaml\nenv:\n  TEST_FILE: ~/dagu-test.txt\n\nsteps:\n  - command: touch $TEST_FILE\n```", node.Step().Script)
 }
+
+func TestBuildJQArgs(t *testing.T) {
+	t.Parallel()
+
+	step := ir.Step{
+		Commands: []ir.CommandEntry{{CmdWithArgs: "$who"}},
+		ExecutorConfig: ir.ExecutorConfig{
+			Type:   "jq",
+			Config: map[string]any{"args": map[string]any{"who": "${env.who}"}},
+		},
+	}
+	ctx := runctx.NewContext(context.Background(), &ir.DAG{Name: "test"}, "", "")
+	env := NewEnv(ctx, step).WithEnvVars("who", "Alice")
+	resolved, _, err := resolveBuildRecipe(WithEnv(ctx, env), step)
+	require.NoError(t, err)
+	require.Equal(t, "$who", resolved.Commands[0].CmdWithArgs)
+	require.Equal(t, map[string]any{"who": "Alice"}, resolved.ExecutorConfig.Config["args"])
+}
