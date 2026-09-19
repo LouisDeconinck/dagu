@@ -865,11 +865,20 @@ func (n *Node) setupExecutor(ctx context.Context) (context.Context, executor.Exe
 		n.SetScript(script)
 	}
 
-	// Evaluate stdin if set
-	if stdin := n.Step().Stdin; stdin != "" {
-		resolved, err := resolveRuntimeString(ctx, stdin, cmnvalue.WorkflowField("stdin"))
+	// Evaluate stdin if set. A path that resolves to nothing, or that still
+	// carries a reference, would otherwise be indistinguishable from an unset
+	// field and leave the step reading empty standard input.
+	if raw := n.Step().Stdin; raw != "" {
+		resolved, err := resolveRuntimeString(ctx, raw, cmnvalue.StepArtifactOutputField("stdin"))
 		if err != nil {
 			return ctx, nil, fmt.Errorf("failed to eval stdin: %w", err)
+		}
+		resolved = strings.TrimSpace(resolved)
+		if resolved == "" {
+			return ctx, nil, fmt.Errorf("stdin %q resolved to an empty path", raw)
+		}
+		if cmnvalue.HasValueReference(resolved) {
+			return ctx, nil, fmt.Errorf("stdin %q must resolve before execution", raw)
 		}
 		n.SetStdin(resolved)
 	}

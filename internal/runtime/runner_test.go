@@ -1509,6 +1509,45 @@ func TestRunner(t *testing.T) {
 		result.assertNodeStatus(t, "reader", ir.NodeFailed)
 	})
 
+	t.Run("StdinEmptyAfterResolutionFailsStep", func(t *testing.T) {
+		if windowsShellTest() {
+			t.Skip("uses cat to read stdin")
+		}
+		r := setupRunner(t)
+
+		plan := r.newPlan(t,
+			newStep("reader",
+				withEnvVars("EMPTY="),
+				withStdin("${env.EMPTY}"),
+				withCommand("cat"),
+			),
+		)
+
+		result := plan.assertRun(t, ir.Failed)
+		result.assertNodeStatus(t, "reader", ir.NodeFailed)
+		node := result.nodeByName(t, "reader")
+		require.ErrorContains(t, node.State().Error, "resolved to an empty path")
+	})
+
+	t.Run("StdinUnresolvedReferenceFailsStep", func(t *testing.T) {
+		if windowsShellTest() {
+			t.Skip("uses cat to read stdin")
+		}
+		r := setupRunner(t)
+
+		plan := r.newPlan(t,
+			newStep("reader",
+				withStdin("${no_such_step.stdout}"),
+				withCommand("cat"),
+			),
+		)
+
+		result := plan.assertRun(t, ir.Failed)
+		result.assertNodeStatus(t, "reader", ir.NodeFailed)
+		node := result.nodeByName(t, "reader")
+		require.ErrorContains(t, node.State().Error, "must resolve before execution")
+	})
+
 	t.Run("DAGRunStatusNotAvailableToMainSteps", func(t *testing.T) {
 		r := setupRunner(t)
 
