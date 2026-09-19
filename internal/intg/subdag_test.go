@@ -986,7 +986,7 @@ func TestSubDAG_PassEnv(t *testing.T) {
 	t.Run("Selective", func(t *testing.T) {
 		th := test.SetupCommand(t)
 
-		th.CreateDAGFile(t, "parent_inherit_selective.yaml", `
+		th.CreateDAGFile(t, "parent_pass_selective.yaml", `
 env:
   - TODAY: "2026-03-05"
   - GH_USER: octocat
@@ -1009,7 +1009,7 @@ steps:
 
 		dagRunID := uuid.Must(uuid.NewV7()).String()
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args:        []string{"start", "--run-id", dagRunID, "parent_inherit_selective"},
+			Args:        []string{"start", "--run-id", dagRunID, "parent_pass_selective"},
 			ExpectedOut: []string{"DAG run finished"},
 		})
 
@@ -1017,14 +1017,14 @@ steps:
 		// child also sees unlisted parent values like NOT_LISTED through the
 		// implicit local env scope; pass_env only controls the explicit set
 		// forwarded to a child that runs on another host.
-		require.Equal(t, "TODAY=2026-03-05\nGH_USER=octocat\nNOT_LISTED=not-requested", readChildResult(t, th, "parent_inherit_selective", dagRunID))
+		require.Equal(t, "TODAY=2026-03-05\nGH_USER=octocat\nNOT_LISTED=not-requested", readChildResult(t, th, "parent_pass_selective", dagRunID))
 	})
 
 	t.Run("All", func(t *testing.T) {
 		th := test.SetupCommand(t)
 		t.Setenv("GH_USER", "octocat")
 
-		th.CreateDAGFile(t, "parent_inherit_all.yaml", `
+		th.CreateDAGFile(t, "parent_pass_all.yaml", `
 env:
   - TODAY: "2026-03-05"
   - NOT_LISTED: not-requested
@@ -1046,20 +1046,20 @@ steps:
 
 		dagRunID := uuid.Must(uuid.NewV7()).String()
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args:        []string{"start", "--run-id", dagRunID, "parent_inherit_all"},
+			Args:        []string{"start", "--run-id", dagRunID, "parent_pass_all"},
 			ExpectedOut: []string{"DAG run finished"},
 		})
 
 		// GH_USER is a host process value, so pass_env: true never forwards
 		// it. Only a name that is part of the parent run environment can be
 		// listed explicitly.
-		require.Equal(t, "TODAY=2026-03-05\nGH_USER=\nNOT_LISTED=not-requested", readChildResult(t, th, "parent_inherit_all", dagRunID))
+		require.Equal(t, "TODAY=2026-03-05\nGH_USER=\nNOT_LISTED=not-requested", readChildResult(t, th, "parent_pass_all", dagRunID))
 	})
 
 	t.Run("Parallel", func(t *testing.T) {
 		th := test.SetupCommand(t)
 
-		th.CreateDAGFile(t, "parent_inherit_parallel.yaml", `
+		th.CreateDAGFile(t, "parent_pass_parallel.yaml", `
 env:
   - TODAY: "2026-03-05"
   - GH_USER: octocat
@@ -1089,12 +1089,12 @@ steps:
 
 		dagRunID := uuid.Must(uuid.NewV7()).String()
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args:        []string{"start", "--run-id", dagRunID, "parent_inherit_parallel"},
+			Args:        []string{"start", "--run-id", dagRunID, "parent_pass_parallel"},
 			ExpectedOut: []string{"DAG run finished"},
 		})
 
 		ctx := context.Background()
-		ref := ir.NewDAGRunRef("parent_inherit_parallel", dagRunID)
+		ref := ir.NewDAGRunRef("parent_pass_parallel", dagRunID)
 		parentAttempt, err := th.DAGRunRepository.FindAttempt(ctx, ref)
 		require.NoError(t, err)
 		parentStatus, err := parentAttempt.ReadStatus(ctx)
