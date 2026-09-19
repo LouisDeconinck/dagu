@@ -1990,15 +1990,6 @@ func validateSubDAG(result *ir.Step) error {
 			fmt.Errorf("action %q does not support call field", result.ExecutorConfig.Type),
 		)
 	}
-	// Queued child runs read their own DAG environment when dequeued; passed
-	// values cannot be carried through queue persistence.
-	if result.SubDAG.PassEnv != nil && result.ExecutorConfig.Type == ir.ExecutorTypeDAGEnqueue {
-		return ir.NewValidationError(
-			"pass_env",
-			result.SubDAG.PassEnv,
-			fmt.Errorf("pass_env is not supported for dag.enqueue"),
-		)
-	}
 	return nil
 }
 
