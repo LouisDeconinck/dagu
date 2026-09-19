@@ -143,7 +143,7 @@ type Config struct {
 }
 
 // Run runs the plan of steps.
-func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan *Node) error {
+func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUpdate) error {
 	if err := r.setup(ctx); err != nil {
 		return err
 	}
@@ -202,9 +202,7 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan *Node) err
 				r.setLastError(err)
 				r.setCanceled() // Fail the DAG if init fails
 			}
-			if progressCh != nil {
-				progressCh <- initNode
-			}
+			r.report(ctx, progressCh, initNode)
 		}
 	}
 
@@ -270,9 +268,7 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan *Node) err
 				logger.Error(handlerCtx, "onWait handler failed", tag.Error(err))
 			}
 
-			if progressCh != nil {
-				progressCh <- handlerNode
-			}
+			r.report(handlerCtx, progressCh, handlerNode)
 		}
 
 		logger.Info(ctx, "DAG waiting for human input")
@@ -291,22 +287,28 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan *Node) err
 
 	eventHandlers = append(eventHandlers, ir.HandlerOnExit)
 
+	// Resolve the handler nodes up front: running them reports progress, which
+	// blocks until the receiver has read the status back through HandlerNode.
+	// Holding the read lock across that wait would deadlock the moment any
+	// writer contends for handlerMu.
 	r.handlerMu.RLock()
-	defer r.handlerMu.RUnlock()
-
+	handlerNodes := make([]*Node, 0, len(eventHandlers))
 	for _, handler := range eventHandlers {
 		if handlerNode := r.handlers[handler]; handlerNode != nil {
-			logger.Debug(handlerCtx, "Handler execution started",
-				tag.Handler(handlerNode.Name()),
-			)
-			if err := r.runEventHandler(handlerCtx, plan, handlerNode, nil); err != nil {
-				r.setLastError(err)
-			}
-
-			if progressCh != nil {
-				progressCh <- handlerNode
-			}
+			handlerNodes = append(handlerNodes, handlerNode)
 		}
+	}
+	r.handlerMu.RUnlock()
+
+	for _, handlerNode := range handlerNodes {
+		logger.Debug(handlerCtx, "Handler execution started",
+			tag.Handler(handlerNode.Name()),
+		)
+		if err := r.runEventHandler(handlerCtx, plan, handlerNode, nil); err != nil {
+			r.setLastError(err)
+		}
+
+		r.report(handlerCtx, progressCh, handlerNode)
 	}
 
 	logger.Debug(handlerCtx, "Runner execution complete",
@@ -319,7 +321,7 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan *Node) err
 
 // runGraphLoop runs dependency-ordered execution: every node whose dependencies
 // are satisfied is dispatched, up to the active-run limit.
-func (r *Runner) runGraphLoop(ctx context.Context, plan *Plan, nodes []*Node, progressCh chan *Node) {
+func (r *Runner) runGraphLoop(ctx context.Context, plan *Plan, nodes []*Node, progressCh chan ProgressUpdate) {
 	// Channels for event loop
 	// Buffer size = total nodes to avoid blocking
 	readyCh := make(chan *Node, len(nodes))
@@ -432,9 +434,7 @@ func (r *Runner) runGraphLoop(ctx context.Context, plan *Plan, nodes []*Node, pr
 
 				// Status already set to Running before goroutine spawn
 				// Send progress notification after successful preparation
-				if progressCh != nil {
-					progressCh <- n
-				}
+				r.report(ctx, progressCh, n)
 
 				r.runNodeExecution(ctx, plan, n, progressCh)
 			}(node)
@@ -505,7 +505,7 @@ func (r *Runner) processCompletedNode(ctx context.Context, plan *Plan, node *Nod
 	}
 }
 
-func (r *Runner) runNodeExecution(ctx context.Context, plan *Plan, node *Node, progressCh chan *Node) {
+func (r *Runner) runNodeExecution(ctx context.Context, plan *Plan, node *Node, progressCh chan ProgressUpdate) {
 	logger.Debug(ctx, "Starting node execution")
 	nodeCtx, nodeCancel := context.WithCancel(ctx)
 	defer nodeCancel()
@@ -550,9 +550,7 @@ func (r *Runner) runNodeExecution(ctx context.Context, plan *Plan, node *Node, p
 	}
 	reportPreparedNode := func() {
 		teardownPreparedNode()
-		if progressCh != nil {
-			progressCh <- node
-		}
+		r.report(ctx, progressCh, node)
 	}
 	defer teardownPreparedNode()
 
@@ -579,15 +577,15 @@ func (r *Runner) runNodeExecution(ctx context.Context, plan *Plan, node *Node, p
 	if buildSession != nil {
 		preconditionProgress = nil
 	}
-	met, err := meetsPreconditions(ctx, node, preconditionProgress)
+	met, err := r.meetsPreconditions(ctx, node, preconditionProgress)
 	if err != nil {
-		markBuildPrecondition(buildSession, node, ir.BuildReasonPreconditionError, "", progressCh)
+		r.markBuildPrecondition(ctx, buildSession, node, ir.BuildReasonPreconditionError, "", progressCh)
 		r.setLastError(err)
 		r.Cancel(plan)
 		return
 	}
 	if !met {
-		markBuildPrecondition(buildSession, node, ir.BuildReasonPreconditionNotMet,
+		r.markBuildPrecondition(ctx, buildSession, node, ir.BuildReasonPreconditionNotMet,
 			"step precondition was not met", progressCh)
 		return
 	}
@@ -763,9 +761,9 @@ func (r *Runner) prepareNode(ctx context.Context, node *Node) error {
 	return node.Prepare(ctx, r.logDir, r.dagRunID)
 }
 
-func (r *Runner) runHumanTask(ctx context.Context, plan *Plan, node *Node, progressCh chan *Node) {
+func (r *Runner) runHumanTask(ctx context.Context, plan *Plan, node *Node, progressCh chan ProgressUpdate) {
 	ctx = r.setupNodeExecutionEnv(ctx, node)
-	met, err := meetsPreconditions(ctx, node, progressCh)
+	met, err := r.meetsPreconditions(ctx, node, progressCh)
 	if err != nil {
 		r.setLastError(err)
 		r.Cancel(plan)
@@ -782,9 +780,7 @@ func (r *Runner) runHumanTask(ctx context.Context, plan *Plan, node *Node, progr
 		r.setLastError(err)
 		node.MarkError(err)
 		node.SetStatus(ir.NodeFailed)
-		if progressCh != nil {
-			progressCh <- node
-		}
+		r.report(ctx, progressCh, node)
 		return
 	}
 
@@ -793,9 +789,7 @@ func (r *Runner) runHumanTask(ctx context.Context, plan *Plan, node *Node, progr
 	} else {
 		node.OpenHumanTask(prompt, time.Now())
 	}
-	if progressCh != nil {
-		progressCh <- node
-	}
+	r.report(ctx, progressCh, node)
 }
 
 func (r *Runner) teardownNode(node *Node) error {
@@ -1057,14 +1051,12 @@ func disableDeclaredStepOutputs(env *Env) {
 	}
 }
 
-func (r *Runner) execNode(ctx context.Context, node *Node, progressCh chan *Node) error {
+func (r *Runner) execNode(ctx context.Context, node *Node, progressCh chan ProgressUpdate) error {
 	if r.dry {
 		return nil
 	}
 	report := func() {
-		if progressCh != nil {
-			progressCh <- node
-		}
+		r.report(ctx, progressCh, node)
 	}
 	if progressCh != nil && node.Step().SubDAG != nil {
 		// Send an additional progress notification after the executor is set up
@@ -1567,7 +1559,7 @@ func (r *Runner) shouldRetryNode(ctx context.Context, node *Node, execErr error)
 
 // recoverNodePanic handles panic recovery for a node goroutine.
 // It signals progressCh so the agent can write the updated status to storage.
-func (r *Runner) recoverNodePanic(ctx context.Context, node *Node, progressCh chan *Node) {
+func (r *Runner) recoverNodePanic(ctx context.Context, node *Node, progressCh chan ProgressUpdate) {
 	if panicObj := recover(); panicObj != nil {
 		stack := string(debug.Stack())
 		err := fmt.Errorf("panic recovered in node %s: %v\n%s", node.Name(), panicObj, stack)
@@ -1584,9 +1576,7 @@ func (r *Runner) recoverNodePanic(ctx context.Context, node *Node, progressCh ch
 		r.mu.Unlock()
 
 		// Signal progress so status is written to storage
-		if progressCh != nil {
-			progressCh <- node
-		}
+		r.report(ctx, progressCh, node)
 	}
 }
 
@@ -1630,21 +1620,17 @@ func externalStepRetryEnabled(ctx context.Context) bool {
 }
 
 // checkPreconditions evaluates the preconditions for a node and updates its status accordingly.
-func meetsPreconditions(ctx context.Context, node *Node, progressCh chan *Node) (bool, error) {
+func (r *Runner) meetsPreconditions(ctx context.Context, node *Node, progressCh chan ProgressUpdate) (bool, error) {
 	err := node.evalPreconditions(ctx)
 	if err != nil {
 		if errors.Is(err, ErrConditionNotMet) {
 			node.SetStatus(ir.NodeSkipped)
-			if progressCh != nil {
-				progressCh <- node
-			}
+			r.report(ctx, progressCh, node)
 			return false, nil
 		}
 		node.SetStatus(ir.NodeFailed)
 		node.SetError(err)
-		if progressCh != nil {
-			progressCh <- node
-		}
+		r.report(ctx, progressCh, node)
 		return false, err
 	}
 	return true, nil
@@ -1785,7 +1771,7 @@ func (r *Runner) evalUntilCondition(ctx context.Context, shell []string, node *N
 }
 
 // prepareNodeForRepeat sets up a node for repetition
-func (r *Runner) prepareNodeForRepeat(ctx context.Context, node *Node, progressCh chan *Node) {
+func (r *Runner) prepareNodeForRepeat(ctx context.Context, node *Node, progressCh chan ProgressUpdate) {
 	step := node.Step()
 
 	node.SetStatus(ir.NodeRunning) // reset status to running for the repeat
@@ -1805,9 +1791,7 @@ func (r *Runner) prepareNodeForRepeat(ctx context.Context, node *Node, progressC
 	node.SetRepeated(true) // mark as repeated
 	logger.Info(ctx, "Repeating step")
 
-	if progressCh != nil {
-		progressCh <- node
-	}
+	r.report(ctx, progressCh, node)
 }
 
 func NewPlanEnv(ctx context.Context, step ir.Step, plan *Plan) Env {

@@ -26,7 +26,7 @@ func (r *Runner) runAgentActionBatch(
 	plan *Plan,
 	state *agentloop.State,
 	decisions []agentloop.Decision,
-	progressCh chan *Node,
+	progressCh chan ProgressUpdate,
 ) (suspended bool, err error) {
 	state.Nudges = 0
 	executions := make([]agentActionExecution, len(decisions))
@@ -52,7 +52,7 @@ func (r *Runner) runAgentActionBatch(
 		actionCtx, setupErr := r.setupVariables(ctx, plan, execution.node)
 		if setupErr != nil {
 			execution.node.MarkError(setupErr)
-			r.report(progressCh, execution.node)
+			r.report(ctx, progressCh, execution.node)
 			continue
 		}
 		execution.ctx = actionCtx
@@ -87,7 +87,7 @@ func (r *Runner) runAgentActionBatch(
 	wg.Wait()
 	for _, execution := range runnable[firstUnstarted:] {
 		execution.node.Cancel()
-		r.report(progressCh, execution.node)
+		r.report(ctx, progressCh, execution.node)
 	}
 
 	for i := range executions {

@@ -215,7 +215,7 @@ func (att *Attempt) Write(ctx context.Context, status ir.DAGRunStatus) error {
 	ir.NormalizeDAGRunConditions(&status)
 
 	if writeErr := att.writer.Write(ctx, status); writeErr != nil {
-		return fmt.Errorf("failed to write status: %w", ErrWriteFailed)
+		return fmt.Errorf("%w: %w", ErrWriteFailed, writeErr)
 	}
 
 	// Invalidate cache after successful write

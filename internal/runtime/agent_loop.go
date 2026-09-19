@@ -31,7 +31,7 @@ const observationLogLines = 40
 // them out, and their outcomes are fed back as observations. The loop ends when
 // every task is complete, when an action opens a human task, or when a limit is
 // reached.
-func (r *Runner) runAgentLoop(ctx context.Context, plan *Plan, progressCh chan *Node) {
+func (r *Runner) runAgentLoop(ctx context.Context, plan *Plan, progressCh chan ProgressUpdate) {
 	dag := GetDAGContext(ctx).DAG
 
 	agentNode := plan.GetNodeByName(ir.AgentStepName)
@@ -57,7 +57,7 @@ func (r *Runner) runAgentLoop(ctx context.Context, plan *Plan, progressCh chan *
 		return
 	}
 	defer r.teardownPreparedNode(agentNode)
-	r.report(progressCh, agentNode)
+	r.report(ctx, progressCh, agentNode)
 
 	catalog, err := agentloop.NewCatalog(agentCtx, dag)
 	if err != nil {
@@ -100,7 +100,7 @@ func (r *Runner) runAgentLoop(ctx context.Context, plan *Plan, progressCh chan *
 			if node != nil && node.State().Status == ir.NodeWaiting {
 				r.persistAgent(agentCtx, agentNode, state, progressCh)
 				agentNode.SetStatus(ir.NodeSucceeded)
-				r.report(progressCh, agentNode)
+				r.report(ctx, progressCh, agentNode)
 				return
 			}
 		}
@@ -138,7 +138,7 @@ func (r *Runner) runAgentLoop(ctx context.Context, plan *Plan, progressCh chan *
 	for !state.Settled() {
 		if r.isCanceled() {
 			agentNode.SetStatus(ir.NodeAborted)
-			r.report(progressCh, agentNode)
+			r.report(ctx, progressCh, agentNode)
 			return
 		}
 		if state.Turns >= maxTurns {
@@ -178,7 +178,7 @@ func (r *Runner) runAgentLoop(ctx context.Context, plan *Plan, progressCh chan *
 		// meantime, drop it rather than settling a task or opening a question.
 		if r.isCanceled() {
 			agentNode.SetStatus(ir.NodeAborted)
-			r.report(progressCh, agentNode)
+			r.report(ctx, progressCh, agentNode)
 			return
 		}
 
@@ -193,7 +193,7 @@ func (r *Runner) runAgentLoop(ctx context.Context, plan *Plan, progressCh chan *
 			// The action is waiting on a person. The run reports Waiting, the
 			// process exits, and this loop resumes once the task is completed.
 			agentNode.SetStatus(ir.NodeSucceeded)
-			r.report(progressCh, agentNode)
+			r.report(ctx, progressCh, agentNode)
 			return
 		}
 	}
@@ -220,7 +220,7 @@ func (r *Runner) applyDecisions(
 	plan *Plan,
 	state *agentloop.State,
 	decisions []agentloop.Decision,
-	progressCh chan *Node,
+	progressCh chan ProgressUpdate,
 ) (bool, error) {
 	if len(decisions) > 1 {
 		if problem := validateAgentActionBatch(plan, state, decisions); problem != "" {
@@ -284,7 +284,7 @@ func (r *Runner) applyDecision(
 	plan *Plan,
 	state *agentloop.State,
 	decision *agentloop.Decision,
-	progressCh chan *Node,
+	progressCh chan ProgressUpdate,
 ) (suspended bool, err error) {
 	if decision.Kind != agentloop.DecideStop {
 		// Any turn that used a tool breaks a run of silent replies.
@@ -343,7 +343,7 @@ func (r *Runner) askUser(
 	plan *Plan,
 	state *agentloop.State,
 	decision *agentloop.Decision,
-	progressCh chan *Node,
+	progressCh chan ProgressUpdate,
 ) (suspended bool, err error) {
 	node := plan.GetNodeByName(ir.AskUserStepName)
 	if node == nil {
@@ -398,7 +398,7 @@ func (r *Runner) askUser(
 		ToolCallID: decision.ToolCallID,
 		StartedAt:  stringutil.FormatTime(node.State().StartedAt),
 	})
-	r.report(progressCh, node)
+	r.report(ctx, progressCh, node)
 
 	state.SetPendingBatch([]agentloop.PendingAction{{
 		ToolCallID: decision.ToolCallID,
@@ -439,7 +439,7 @@ func (r *Runner) runAgentAction(
 	plan *Plan,
 	state *agentloop.State,
 	decision *agentloop.Decision,
-	progressCh chan *Node,
+	progressCh chan ProgressUpdate,
 ) (suspended bool, err error) {
 	node := plan.GetNodeByName(decision.Step)
 	if node == nil {
@@ -465,7 +465,7 @@ func (r *Runner) runAgentAction(
 	actionCtx, err := r.setupVariables(ctx, plan, node)
 	if err != nil {
 		node.MarkError(err)
-		r.report(progressCh, node)
+		r.report(ctx, progressCh, node)
 		recordActionEvent(state, decision.ToolCallID, decision.Step, attempt, node)
 		state.Append(observe(ctx, node, decision.ToolCallID))
 		return false, nil
@@ -554,7 +554,7 @@ func declaredStep(ctx context.Context, name string, node *Node) ir.Step {
 
 // executeAgentAction runs a single action to completion, mirroring the
 // per-node handling of the graph loop.
-func (r *Runner) executeAgentAction(ctx context.Context, plan *Plan, node *Node, progressCh chan *Node) {
+func (r *Runner) executeAgentAction(ctx context.Context, plan *Plan, node *Node, progressCh chan ProgressUpdate) {
 	defer r.finishNode(node, nil)
 	defer r.recoverNodePanic(ctx, node, progressCh)
 
@@ -566,10 +566,10 @@ func (r *Runner) executeAgentAction(ctx context.Context, plan *Plan, node *Node,
 	if err := r.prepareNode(ctx, node); err != nil {
 		r.setLastError(err)
 		node.MarkError(err)
-		r.report(progressCh, node)
+		r.report(ctx, progressCh, node)
 		return
 	}
-	r.report(progressCh, node)
+	r.report(ctx, progressCh, node)
 	r.runNodeExecution(ctx, plan, node, progressCh)
 }
 
@@ -588,17 +588,17 @@ func (r *Runner) skipUnusedActions(ctx context.Context, plan *Plan) {
 
 // failAgent ends the run with an error. Steps the agent never chose
 // are marked skipped so the plan reads as finished rather than still running.
-func (r *Runner) failAgent(ctx context.Context, plan *Plan, node *Node, err error, progressCh chan *Node) {
+func (r *Runner) failAgent(ctx context.Context, plan *Plan, node *Node, err error, progressCh chan ProgressUpdate) {
 	logger.Error(ctx, "Agent failed", tag.Error(err))
 	r.setLastError(err)
 	node.MarkError(err)
 	r.skipUnusedActions(ctx, plan)
-	r.report(progressCh, node)
+	r.report(ctx, progressCh, node)
 }
 
 // persistAgent writes the agent's state and transcript to the node so
 // they survive suspension and appear in the UI.
-func (r *Runner) persistAgent(ctx context.Context, node *Node, state *agentloop.State, progressCh chan *Node) {
+func (r *Runner) persistAgent(ctx context.Context, node *Node, state *agentloop.State, progressCh chan ProgressUpdate) {
 	raw, err := state.Marshal()
 	if err != nil {
 		logger.Error(ctx, "Failed to persist agent state", tag.Error(err))
@@ -607,12 +607,28 @@ func (r *Runner) persistAgent(ctx context.Context, node *Node, state *agentloop.
 	}
 	node.SetChatMessages(state.Messages())
 	r.saveChatMessages(ctx, node)
-	r.report(progressCh, node)
+	r.report(ctx, progressCh, node)
 }
 
-func (r *Runner) report(progressCh chan *Node, node *Node) {
-	if progressCh != nil {
-		progressCh <- node
+// report publishes a node state change and waits for the receiver to persist
+// the status snapshot covering it, so that a node's state is durable before
+// execution continues past it. Waiting for that outcome stops once ctx is
+// done; publishing itself still blocks until the receiver takes the update.
+//
+// A failed persist is logged and does not alter the run outcome: the terminal
+// status write at the end of the run is the one that decides that.
+func (r *Runner) report(ctx context.Context, progressCh chan ProgressUpdate, node *Node) {
+	if progressCh == nil {
+		return
+	}
+	ack := make(chan error, 1)
+	progressCh <- ProgressUpdate{Node: node, ack: ack}
+	select {
+	case err := <-ack:
+		if err != nil {
+			logger.Error(ctx, "Failed to persist node status", tag.Error(err))
+		}
+	case <-ctx.Done():
 	}
 }
 
