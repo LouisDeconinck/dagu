@@ -51,13 +51,15 @@ type DispatchTask struct {
 	ParallelItem string
 	// PassedEnv carries resolved "KEY=value" pairs the parent opted to share
 	// with the child run via the step's pass_env field.
-	PassedEnv      []string
-	QueueName      string
-	WorkerID       string
-	TargetWorkerID string
-	ProfileName    string
-	DefinitionID   string
-	TriggerActor   string
+	PassedEnv []string
+	// PassedSecretEnv carries the same for values the parent holds as secrets.
+	PassedSecretEnv []string
+	QueueName       string
+	WorkerID        string
+	TargetWorkerID  string
+	ProfileName     string
+	DefinitionID    string
+	TriggerActor    string
 
 	PreviousStatus *ir.DAGRunStatus
 

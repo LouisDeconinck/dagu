@@ -1365,7 +1365,7 @@ func (n *Node) BuildSubDAGRuns(ctx context.Context, subDAG *ir.SubDAG) ([]SubDAG
 }
 
 func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]executor.RunParams, error) {
-	passedEnv := resolveSubDAGPassEnv(ctx, subDAG.PassEnv)
+	passedEnv, passedSecretEnv := resolveSubDAGPassEnv(ctx, subDAG.PassEnv)
 	parallel := n.Step().Parallel
 
 	// Single sub DAG execution (non-parallel)
@@ -1389,11 +1389,12 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 		}
 		dagRunID := GenerateSubDAGRunIDForTarget(ctx, dagName, params, repeated)
 		return []executor.RunParams{{
-			RunID:          dagRunID,
-			Params:         params,
-			DAGName:        dagName,
-			WorkerSelector: workerSelector,
-			PassedEnv:      passedEnv,
+			RunID:           dagRunID,
+			Params:          params,
+			DAGName:         dagName,
+			WorkerSelector:  workerSelector,
+			PassedEnv:       passedEnv,
+			PassedSecretEnv: passedSecretEnv,
 		}}, nil
 	}
 
@@ -1514,12 +1515,13 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 			dagRunID = GenerateSubDAGRunIDForTarget(ctx, dagName, finalParams+"\x00"+parallelItem, repeated)
 		}
 		runParamsByID[dagRunID] = executor.RunParams{
-			RunID:          dagRunID,
-			Params:         finalParams,
-			ParallelItem:   parallelItem,
-			DAGName:        dagName,
-			WorkerSelector: workerSelector,
-			PassedEnv:      passedEnv,
+			RunID:           dagRunID,
+			Params:          finalParams,
+			ParallelItem:    parallelItem,
+			DAGName:         dagName,
+			WorkerSelector:  workerSelector,
+			PassedEnv:       passedEnv,
+			PassedSecretEnv: passedSecretEnv,
 		}
 	}
 
@@ -1543,7 +1545,9 @@ func isNonPassableEnvKey(key string) bool {
 }
 
 // resolveSubDAGPassEnv resolves the "KEY=value" pairs a child run receives
-// through the step's opt-in pass_env field.
+// through the step's opt-in pass_env field. Values the parent holds as secrets
+// are returned separately so the child can classify them as secrets too and
+// keep masking them, rather than receiving them as ordinary run values.
 //
 // The whole-environment form carries values the workflow itself declared.
 // Secrets, host process values, Dagu-managed run values, and runtime-profile
@@ -1553,13 +1557,13 @@ func isNonPassableEnvKey(key string) bool {
 // The name-list form resolves each entry against the environment scope visible
 // to the calling step. It never reads the Dagu process environment directly,
 // because that would bypass the operator-controlled base environment allowlist.
-func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) []string {
+func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) (envs, secretEnvs []string) {
 	if passEnv == nil {
-		return nil
+		return nil, nil
 	}
 	if passEnv.All {
 		all := GetDAGContext(ctx).PassableEnvs()
-		envs := make([]string, 0, len(all))
+		envs = make([]string, 0, len(all))
 		for _, env := range all {
 			key, _, _ := strings.Cut(env, "=")
 			if isNonPassableEnvKey(key) {
@@ -1567,7 +1571,7 @@ func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) []stri
 			}
 			envs = append(envs, env)
 		}
-		return envs
+		return envs, nil
 	}
 	// Read the step scope only when one exists. Asking for it unconditionally
 	// would build a fallback scope backed by the raw process environment, which
@@ -1576,7 +1580,6 @@ func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) []stri
 	if stepEnv, ok := LookupEnv(ctx); ok {
 		scope = stepEnv.Scope
 	}
-	var envs []string
 	for _, name := range passEnv.Names {
 		if isNonPassableEnvKey(name) {
 			logger.Warn(ctx, "pass_env variable is reserved or host-local and was not passed",
@@ -1590,14 +1593,12 @@ func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) []stri
 			continue
 		}
 		if entry.Source == cmnvalue.EnvSourceSecret {
-			// The child receives the value as an ordinary run value, so it does
-			// not mask it, and a dispatched child run records it on disk.
-			logger.Warn(ctx, "pass_env is passing a secret value to a child run; the child does not mask it",
-				tag.String("env", name))
+			secretEnvs = append(secretEnvs, name+"="+entry.Value)
+			continue
 		}
 		envs = append(envs, name+"="+entry.Value)
 	}
-	return envs
+	return envs, secretEnvs
 }
 
 func resolveWorkerSelector(

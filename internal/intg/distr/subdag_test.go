@@ -739,7 +739,7 @@ worker_selector:
   type: test-worker
 steps:
   - name: report
-    run: echo "TOKEN=${API_TOKEN}"
+    run: echo "prefix-${API_TOKEN}-suffix"
     output: RESULT
 `, withLabels(map[string]string{"type": "test-worker"}))
 		defer f.cleanup()
@@ -747,9 +747,11 @@ steps:
 		agent := f.dagWrapper.Agent()
 		agent.RunSuccess(t)
 
-		// An explicitly named secret is forwarded. It reaches the child as an
-		// ordinary execution value, so the child does not mask it.
-		require.Equal(t, "TOKEN=s3cr3t", readChildResult(t, f))
+		// The worker receives the value on the secret channel, so the child
+		// substitutes the real value and masks only the secret itself.
+		result := readChildResult(t, f)
+		require.Equal(t, "prefix-*******-suffix", result)
+		require.NotContains(t, result, "s3cr3t")
 	})
 
 	t.Run("defaultNoInheritance", func(t *testing.T) {

@@ -386,6 +386,9 @@ func (r *Runner) taskOptions(
 	if len(req.PassedEnv) > 0 {
 		options = append(options, executor.WithPassedEnv(req.PassedEnv))
 	}
+	if len(req.PassedSecretEnv) > 0 {
+		options = append(options, executor.WithPassedSecretEnv(req.PassedSecretEnv))
+	}
 	if baseConfig := subWorkflowBaseConfig(req); len(baseConfig) > 0 {
 		options = append(options, executor.WithBaseConfig(string(baseConfig), subWorkflowBaseWorkspace(req)))
 	}

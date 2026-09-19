@@ -236,6 +236,8 @@ type Agent struct {
 	workspaceSeed *runtimeexec.WorkspaceSeed
 	// extraEnvs are additional execution-scoped env vars injected into the DAG run context.
 	extraEnvs []string
+	// extraSecretEnvs are execution-scoped env vars the run treats as secrets.
+	extraSecretEnvs []string
 	// profileName is the selected runtime profile name for this run.
 	profileName string
 
@@ -310,6 +312,9 @@ type Options struct {
 	ProgressDisplay bool
 	// ExtraEnvs are additional execution-scoped env vars injected into the DAG run context.
 	ExtraEnvs []string
+	// ExtraSecretEnvs are execution-scoped env vars the run must treat as
+	// secrets: usable by steps, masked wherever the run reports a value.
+	ExtraSecretEnvs []string
 	// WorkDir sets the existing per-run work directory.
 	WorkDir string
 	// WorkspaceSeed carries the workspace into inline child workflows.
@@ -432,6 +437,7 @@ func New(
 		profileResolver:          opts.ProfileResolver,
 		registry:                 opts.ServiceRegistry,
 		extraEnvs:                append([]string{}, opts.ExtraEnvs...),
+		extraSecretEnvs:          append([]string{}, opts.ExtraSecretEnvs...),
 		workDir:                  opts.WorkDir,
 		workspaceSeed:            opts.WorkspaceSeed,
 		profileName:              opts.ProfileName,
@@ -533,7 +539,8 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	secretEnvs, secretErr := a.resolveSecrets(ctx)
 	profileValues, profileErr := a.resolveProfile(ctx)
 	a.lock.Lock()
-	a.secretMasker = newStatusSecretMasker(append(profileValues.allSecrets(), secretEnvs...))
+	a.secretMasker = newStatusSecretMasker(
+		append(append(profileValues.allSecrets(), secretEnvs...), a.extraSecretEnvs...))
 	a.lock.Unlock()
 
 	configVars := runtimeConfigVars(a.dag.Env, profileValues, secretEnvs)
@@ -695,6 +702,9 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	}
 	if len(a.extraEnvs) > 0 {
 		contextOpts = append(contextOpts, runtime.WithEnvVars(a.extraEnvs...))
+	}
+	if len(a.extraSecretEnvs) > 0 {
+		contextOpts = append(contextOpts, runtime.WithSecretEnvVars(a.extraSecretEnvs...))
 	}
 
 	if a.workDir != "" {

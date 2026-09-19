@@ -205,6 +205,14 @@ func WithPassedEnv(envs []string) TaskOption {
 	}
 }
 
+// WithPassedSecretEnv sets the resolved parent secret values the child run
+// receives through the step's pass_env field.
+func WithPassedSecretEnv(envs []string) TaskOption {
+	return func(task *dispatch.DispatchTask) {
+		task.PassedSecretEnv = append([]string(nil), envs...)
+	}
+}
+
 // WithRetryPath sets the persisted child DAG path for a retry task.
 func WithRetryPath(path dagrun.RetryPath) TaskOption {
 	return func(task *dispatch.DispatchTask) {

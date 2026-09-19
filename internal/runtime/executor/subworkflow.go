@@ -63,6 +63,8 @@ type SubWorkflowRequest struct {
 	// PassedEnv holds resolved "KEY=value" pairs the parent opted to share
 	// with the child run via the step's pass_env field.
 	PassedEnv []string
+	// PassedSecretEnv holds the same for values the parent holds as secrets.
+	PassedSecretEnv []string
 }
 
 // SubWorkflowRetryRequest describes a child workflow step retry.

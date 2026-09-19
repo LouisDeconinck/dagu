@@ -777,6 +777,7 @@ func (h *remoteTaskHandler) executeDAGRun(
 		StatusPusher:             statusPusher,
 		LogWriterFactory:         logStreamer,
 		ExtraEnvs:                extraEnvs,
+		ExtraSecretEnvs:          task.PassedSecretEnvs,
 		QueuedRun:                run.queued,
 		AttemptID:                attemptID,
 		StateStore:               h.stateStore,

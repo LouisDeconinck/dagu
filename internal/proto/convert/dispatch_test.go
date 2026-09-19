@@ -180,16 +180,19 @@ func TestDispatchTaskPassedEnvRoundTrips(t *testing.T) {
 	t.Parallel()
 
 	task := &dispatch.DispatchTask{
-		PassedEnv: []string{"TODAY=2026-01-01", "GH_USER=octocat"},
+		PassedEnv:       []string{"TODAY=2026-01-01", "GH_USER=octocat"},
+		PassedSecretEnv: []string{"API_TOKEN=s3cr3t"},
 	}
 
 	protoTask, err := convert.DispatchTaskToProto(task)
 	require.NoError(t, err)
 	require.NotNil(t, protoTask)
 	assert.Equal(t, []string{"TODAY=2026-01-01", "GH_USER=octocat"}, protoTask.PassedEnvs)
+	assert.Equal(t, []string{"API_TOKEN=s3cr3t"}, protoTask.PassedSecretEnvs)
 
 	got, err := convert.ProtoToDispatchTask(protoTask)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, []string{"TODAY=2026-01-01", "GH_USER=octocat"}, got.PassedEnv)
+	assert.Equal(t, []string{"API_TOKEN=s3cr3t"}, got.PassedSecretEnv)
 }

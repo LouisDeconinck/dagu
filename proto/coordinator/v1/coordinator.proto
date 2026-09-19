@@ -172,6 +172,9 @@ message Task {
   // Resolved "KEY=value" pairs the parent opted to share with the child run via
   // the step's pass_env field.
   repeated string passed_envs = 41;
+  // Same, for values the parent holds as secrets. Kept apart so the child
+  // classifies them as secrets and masks them in its own output.
+  repeated string passed_secret_envs = 42;
 }
 
 enum Operation {

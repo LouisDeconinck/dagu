@@ -1056,6 +1056,43 @@ steps:
 		require.Equal(t, "TODAY=2026-03-05\nGH_USER=\nNOT_LISTED=not-requested", readChildResult(t, th, "parent_pass_all", dagRunID))
 	})
 
+	t.Run("NamedSecretIsUsableAndMasked", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		t.Setenv("HOST_TOKEN", "s3cr3tvalue")
+
+		th.CreateDAGFile(t, "parent_pass_secret.yaml", `
+secrets:
+  - name: API_TOKEN
+    provider: env
+    key: HOST_TOKEN
+steps:
+  - name: call_sub
+    action: dag.run
+    with:
+      dag: sub_pass_secret
+    pass_env: [API_TOKEN]
+`)
+
+		// The child wraps the value, so a masked result still proves the real
+		// value was substituted: only the secret itself is redacted.
+		th.CreateDAGFile(t, "sub_pass_secret.yaml", `
+steps:
+  - name: report
+    run: echo "prefix-${API_TOKEN}-suffix"
+    output: RESULT
+`)
+
+		dagRunID := uuid.Must(uuid.NewV7()).String()
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args:        []string{"start", "--run-id", dagRunID, "parent_pass_secret"},
+			ExpectedOut: []string{"DAG run finished"},
+		})
+
+		result := readChildResult(t, th, "parent_pass_secret", dagRunID)
+		require.Equal(t, "prefix-*******-suffix", result)
+		require.NotContains(t, result, "s3cr3tvalue")
+	})
+
 	t.Run("Parallel", func(t *testing.T) {
 		th := test.SetupCommand(t)
 

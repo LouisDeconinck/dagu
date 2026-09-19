@@ -62,6 +62,8 @@ var (
 	WithDefaultEnvVars = runctx.WithDefaultEnvVars
 	// WithEnvVars sets additional execution-scoped environment variables.
 	WithEnvVars = runctx.WithEnvVars
+	// WithSecretEnvVars sets execution-scoped secret environment variables.
+	WithSecretEnvVars = runctx.WithSecretEnvVars
 	// WithCoordinator sets the coordinator dispatcher for distributed execution.
 	WithCoordinator = runctx.WithCoordinator
 	// WithDefaultSecrets sets low-precedence inherited secret environment variables.

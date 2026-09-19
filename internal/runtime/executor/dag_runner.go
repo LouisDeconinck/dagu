@@ -304,6 +304,7 @@ func (e *SubDAGExecutor) subWorkflowRequest(ctx context.Context, runParams RunPa
 		WorkerSelector:    cloneWorkerSelector(e.effectiveWorkerSelector()),
 		ExternalStepRetry: e.externalStepRetry,
 		PassedEnv:         runParams.PassedEnv,
+		PassedSecretEnv:   runParams.PassedSecretEnv,
 	}
 	if e.workspaceSeed != nil {
 		req.Workspace = &SubWorkflowWorkspace{

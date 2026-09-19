@@ -489,6 +489,7 @@ func (r *Local) newAgent(
 	opts.ParallelItem = req.ParallelItem
 	opts.RetryPath = req.RetryPath
 	opts.ExtraEnvs = append(inProcessExtraEnvs(rCtx, req), toolEnvs...)
+	opts.ExtraSecretEnvs = append([]string(nil), req.PassedSecretEnv...)
 	opts.WorkerID = r.workerID
 	opts.StatusPusher = r.statusPusher
 	opts.SubWorkflowRunnerFactory = r.subWorkflowRunnerFactory
