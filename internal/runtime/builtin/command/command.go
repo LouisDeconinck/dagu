@@ -62,12 +62,30 @@ func (e *commandExecutor) Run(ctx context.Context) error {
 			_ = fileutil.Remove(scriptFile)
 		}()
 	}
+	// Wrap stderr with a tailing writer so we can include recent
+	// stderr output (rolling, up to limit) in error messages.
+	// Use encoding from DAGContext to properly decode non-UTF-8 output.
+	env := runtime.GetEnv(ctx)
+	tw := executor.NewTailWriterWithEncoding(e.config.Stderr, 0, env.LogEncodingCharset)
+	e.stderrTail = tw
+	e.config.Stderr = tw
+
+	// Ensure the working directory exists. This precedes opening the stdin
+	// file because a relative stdin path resolves against it.
+	if e.config.Dir != "" {
+		if err := os.MkdirAll(e.config.Dir, 0750); err != nil {
+			e.mu.Unlock()
+			return fmt.Errorf("failed to create working directory: %w", err)
+		}
+	}
+
 	// Open the stdin file, if configured, so its contents are piped to the
 	// command's standard input.
 	if e.config.StdinPath != "" {
-		stdinPath := e.config.StdinPath
-		if dir := e.config.Dir; dir != "" && !filepath.IsAbs(stdinPath) {
-			stdinPath = filepath.Join(dir, stdinPath)
+		stdinPath, err := resolveStdinPath(e.config.StdinPath, e.config.Dir)
+		if err != nil {
+			e.mu.Unlock()
+			return err
 		}
 		stdin, err := os.Open(stdinPath)
 		if err != nil {
@@ -78,26 +96,10 @@ func (e *commandExecutor) Run(ctx context.Context) error {
 		e.config.Stdin = stdin
 	}
 
-	// Wrap stderr with a tailing writer so we can include recent
-	// stderr output (rolling, up to limit) in error messages.
-	// Use encoding from DAGContext to properly decode non-UTF-8 output.
-	env := runtime.GetEnv(ctx)
-	tw := executor.NewTailWriterWithEncoding(e.config.Stderr, 0, env.LogEncodingCharset)
-	e.stderrTail = tw
-	e.config.Stderr = tw
-
 	cmd, err := e.config.newCmd(ctx, e.scriptFile)
 	if err != nil {
 		e.mu.Unlock()
 		return fmt.Errorf("failed to create command: %w", err)
-	}
-
-	// Ensure the working directory exists
-	if cmd.Dir != "" {
-		if err := os.MkdirAll(cmd.Dir, 0750); err != nil {
-			e.mu.Unlock()
-			return fmt.Errorf("failed to create working directory: %w", err)
-		}
 	}
 
 	process, err := cmdutil.StartManagedProcess(cmd)
@@ -174,6 +176,22 @@ func (e *commandExecutor) stop(req cmdutil.StopRequest) error {
 	}
 	_, err := e.process.Stop(req)
 	return err
+}
+
+// resolveStdinPath expands a leading tilde and anchors a relative path to the
+// step working directory.
+func resolveStdinPath(path, dir string) (string, error) {
+	if strings.HasPrefix(path, "~") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to expand %q: %w", path, err)
+		}
+		return filepath.Join(home, path[1:]), nil
+	}
+	if dir != "" && !filepath.IsAbs(path) {
+		return filepath.Join(dir, path), nil
+	}
+	return path, nil
 }
 
 // annotateStderrTail returns a cleaned version of the tail with the temp script
