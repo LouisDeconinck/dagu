@@ -436,6 +436,13 @@ func spec005StartCases() []spec005StartCase {
 			},
 		},
 		{
+			name:          "step stdin path resolves named params",
+			file:          "step_stdin_path.yaml",
+			setup:         setupSpec005StepStdin,
+			outputFile:    "stdin-read.txt",
+			outputContent: "prod\n",
+		},
+		{
 			name:               "step stdout path resolves named params",
 			file:               "step_stdout_path.yaml",
 			outputFile:         "stdout-prod.txt",
@@ -633,6 +640,11 @@ func setupSpec005RootWorkingDir(t *testing.T, dagu *harness.Runner) {
 	t.Helper()
 	dagu.Mkdir("root-work-prod")
 	dagu.Mkdir("root-work-${params.environment}")
+}
+
+func setupSpec005StepStdin(t *testing.T, dagu *harness.Runner) {
+	t.Helper()
+	dagu.WriteFile("stdin-prod.txt", "prod\n")
 }
 
 func setupSpec005StepWorkingDir(t *testing.T, dagu *harness.Runner) {
