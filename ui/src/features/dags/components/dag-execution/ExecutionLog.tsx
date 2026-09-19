@@ -13,7 +13,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ReloadButton } from '@/components/ui/reload-button';
 import { Switch } from '@/components/ui/switch';
-import { downloadFromUrl } from '@/lib/download';
+import { downloadFromUrl, downloadFromForm } from '@/lib/download';
+import { useSimpleToast } from '@/components/ui/simple-toast';
 import { useConfig } from '../../../../contexts/ConfigContext';
 import { useRemoteNode } from '../../../../contexts/RemoteNodeContext';
 import { useUserPreferences } from '../../../../contexts/UserPreference';
@@ -59,6 +60,7 @@ type Props = {
 function ExecutionLog({ name, dagRunId, dagRun }: Props) {
   const remoteNode = useRemoteNode();
   const config = useConfig();
+  const { showToast } = useSimpleToast();
   const { preferences, updatePreference } = useUserPreferences();
   const [viewMode, setViewMode] = useState<'tail' | 'head' | 'page'>('tail');
   const [pageSize, setPageSize] = useState(1000);
@@ -295,23 +297,31 @@ function ExecutionLog({ name, dagRunId, dagRun }: Props) {
     }
   }, [config.apiURL, name, dagRunId, dagRun, isSubDAGRun, remoteNode]);
 
-  const handleDownloadStepLogs = useCallback(async () => {
-    const endpoint = isSubDAGRun
-      ? `${config.apiURL}/dag-runs/${dagRun?.rootDAGRunName}/${dagRun?.rootDAGRunId}/sub-dag-runs/${dagRun?.dagRunId}/steps/log/download`
-      : `${config.apiURL}/dag-runs/${name}/${dagRunId}/steps/log/download`;
-
-    const url = new URL(endpoint, window.location.origin);
-    url.searchParams.set('remoteNode', remoteNode);
-
-    try {
-      await downloadFromUrl(
-        url.toString(),
-        `${name}-${dagRunId}-steps.zip`
-      );
-    } catch (err) {
-      console.error('Download failed:', err);
-    }
-  }, [config.apiURL, name, dagRunId, dagRun, isSubDAGRun, remoteNode]);
+  const handleDownloadStepLogs = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const endpoint = isSubDAGRun
+          ? `${config.apiURL}/dag-runs/${dagRun?.rootDAGRunName}/${dagRun?.rootDAGRunId}/sub-dag-runs/${dagRun?.dagRunId}/steps/log/download`
+          : `${config.apiURL}/dag-runs/${name}/${dagRunId}/steps/log/download`;
+        const url = new URL(endpoint, window.location.origin);
+        url.searchParams.set('remoteNode', remoteNode);
+        downloadFromForm(url.toString());
+        showToast('Download requested. Check your browser downloads.', {
+          variant: 'info',
+        });
+      } catch (err) {
+        showToast(
+          err instanceof Error ? err.message : 'Could not request download',
+          { variant: 'error' }
+        );
+      } finally {
+        button.disabled = false;
+      }
+    },
+    [config.apiURL, name, dagRunId, dagRun, isSubDAGRun, remoteNode, showToast]
+  );
 
   // Show loading indicator only on initial load
   if (isLoading && !cachedData && isInitialLoad.current) {

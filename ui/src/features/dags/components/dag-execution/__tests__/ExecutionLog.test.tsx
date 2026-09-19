@@ -7,10 +7,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActivityLine } from '../ActivityLine';
 import StepLog from '../StepLog';
 import ExecutionLog from '../ExecutionLog';
-import { downloadFromUrl } from '@/lib/download';
+import { downloadFromUrl, downloadFromForm } from '@/lib/download';
 import { NodeStatus, Stream } from '@/api/v1/schema';
 import type { StepLogSSEResponse } from '@/hooks/useStepLogSSE';
 import { UserPreferencesProvider } from '@/contexts/UserPreference';
+
+const showToast = vi.hoisted(() => vi.fn());
+vi.mock('@/components/ui/simple-toast', () => ({
+  useSimpleToast: () => ({ showToast }),
+}));
 
 const logs = vi.hoisted(() => ({
   data: {
@@ -29,6 +34,7 @@ vi.mock('@/contexts/ConfigContext', () => ({
 }));
 vi.mock('@/lib/download', () => ({
   downloadFromUrl: vi.fn(),
+  downloadFromForm: vi.fn(),
   downloadBlob: vi.fn(),
 }));
 vi.mock('@/contexts/RemoteNodeContext', () => ({ useRemoteNode: () => 'edge' }));
@@ -61,6 +67,8 @@ vi.mock('@/hooks/useStepLogSSE', () => ({
 
 beforeEach(() => {
   vi.mocked(downloadFromUrl).mockReset().mockResolvedValue(undefined);
+  vi.mocked(downloadFromForm).mockReset();
+  showToast.mockReset();
   logs.data = {
     content: 'first output',
     totalLines: 1,
@@ -290,10 +298,42 @@ describe('ExecutionLog ZIP download', () => {
       fireEvent.click(
         screen.getByRole('button', { name: 'Download step logs (ZIP)' })
       );
-      expect(downloadFromUrl).toHaveBeenCalledWith(
-        `${window.location.origin}/api/v1${path}?remoteNode=edge`,
-        'example-run-steps.zip'
+      expect(downloadFromForm).toHaveBeenCalledWith(
+        `${window.location.origin}/api/v1${path}?remoteNode=edge`
       );
+      expect(showToast).toHaveBeenCalledWith(
+        'Download requested. Check your browser downloads.',
+        { variant: 'info' }
+      );
+    }
+  );
+});
+
+describe('ExecutionLog download feedback', () => {
+  it.each([false, true])(
+    'releases the button after submitting (failure: %s)',
+    (fail) => {
+      render(<ExecutionLog name="example" dagRunId="run" />, {
+        wrapper: UserPreferencesProvider,
+      });
+      const button = screen.getByRole('button', {
+        name: 'Download step logs (ZIP)',
+      });
+      vi.mocked(downloadFromForm).mockImplementation(() => {
+        expect(button).toBeDisabled();
+        if (fail) {
+          throw new Error('Cannot submit');
+        }
+      });
+      fireEvent.click(button);
+      expect(button).toBeEnabled();
+      if (fail) {
+        expect(showToast).toHaveBeenCalledWith('Cannot submit', {
+          variant: 'error',
+        });
+      }
+      fireEvent.click(button);
+      expect(downloadFromForm).toHaveBeenCalledTimes(2);
     }
   );
 });
