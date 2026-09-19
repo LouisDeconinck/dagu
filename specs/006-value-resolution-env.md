@@ -277,43 +277,69 @@ Allowed references:
 - Container `env` follows the same rule as the root or step that owns the container.
 - Entries in a container `env` declaration may reference earlier entries from the same container `env` declaration.
 
-### Sub-DAG Environment Inheritance
+### Sub-DAG Passed Environment
 
-A step that runs a child DAG (`call`, or `action: dag.run`) may request parent
-environment values through the step field `inherit_env`.
+A step that runs a child DAG (`call`, or `action: dag.run`) may hand parent
+environment values to that child through the step field `pass_env`.
+
+`pass_env` is additive, not a filter. A child run that executes in the parent's
+process already observes the parent run environment scope; `pass_env` selects
+the values carried to a child run that may execute on another host. A name list
+therefore does not restrict what an in-process child observes.
 
 Forms:
 
-- `inherit_env: true` inherits the parent run environment scope as it exists
+- `pass_env: true` passes the parent run's own environment values as they exist
   when the step starts the child run.
-- `inherit_env: [NAME, ...]` inherits only the listed environment names.
-- Omitting `inherit_env`, or setting it to `false`, requests no additional
-  inheritance.
+- `pass_env: [NAME, ...]` passes only the listed environment names.
+- Omitting `pass_env`, or setting it to `false`, passes nothing beyond params.
 
 Rules:
 
-- `inherit_env` requires a child DAG call. It is not supported for
-  `dag.enqueue` because queued child runs cannot carry transient parent
-  environment values through queue persistence.
-- `inherit_env` is evaluated when the child run is created. Every represented
-  child run of a `parallel` step receives the same requested configuration.
+- `pass_env` requires a child DAG call. It is not supported for `dag.enqueue`
+  because queued child runs cannot carry transient parent environment values
+  through queue persistence.
+- `pass_env` is evaluated when the child run is created. Every represented child
+  run of a `parallel` step receives the same requested configuration.
 - Each list entry must match `^[A-Za-z_][A-Za-z0-9_]*$` after trimming.
   Duplicate names collapse to one.
 - Names beginning with `_DAGU_` (any case) are reserved for Dagu internal
   transport and are rejected.
-- A listed name resolves first against the environment scope visible to the
-  calling step, then against the parent process environment. A name that
-  resolves in neither produces a warning and contributes no value.
-- `inherit_env: true` never carries names reserved for Dagu internal
-  transport (`_DAGU_*`) or host-local tool environment values managed by the
-  `tools` feature (`PATH`, `AQUA_*`, `DAGU_TOOLS_MANIFEST`) when the parent run
-  installed tools.
-- Inherited values enter the child run environment scope as execution-scoped
+- A listed name resolves against the environment scope visible to the calling
+  step. Resolution never reads the Dagu process environment directly, so a host
+  process value reaches a child only when the operator's base environment policy
+  already admits it into the run. A name that does not resolve produces a
+  warning and contributes no value.
+- `pass_env: true` carries the run's own values only. It never carries secrets,
+  host process values, or runtime-profile values, because those are either
+  sensitive or describe the machine running the parent rather than the machine
+  running the child.
+- Neither form carries names reserved for Dagu internal transport (`_DAGU_*`) or
+  host-local tool environment values managed by the `tools` feature (`PATH`,
+  `AQUA_*`, `DAGU_TOOLS_MANIFEST`).
+- Passed values enter the child run environment scope as execution-scoped
   values. They sit above inherited process environment and DAG `env`
   declarations, and below protected Dagu-managed run environment values and
   secrets.
-- Inherited values are runtime values for the child run; they are not child
-  runtime params and do not relax child param declaration rules.
+- Passed values are runtime values for the child run; they are not child runtime
+  params and do not relax child param declaration rules.
+
+Secrets:
+
+- A secret named explicitly in a `pass_env` list is passed. It reaches the child
+  as an ordinary execution value, so the child does not classify it as a secret
+  and does not mask it in that run's logs or outputs. For a child run dispatched
+  to a worker, the value is also written to the coordinator's dispatch record.
+- Declaring the secret in the child's own `secrets:` field is preferred. A child
+  that declares a secret resolves it through the secret provider and keeps it
+  masked.
+
+Transient values:
+
+- Passed values are resolved when the parent step creates the child run, and are
+  not persisted with the child run. A retry or restart that re-runs the parent
+  step resolves them again. A child run resumed directly from its own persisted
+  state, such as by approving a human task, does not receive them.
 
 ### Environment References
 
