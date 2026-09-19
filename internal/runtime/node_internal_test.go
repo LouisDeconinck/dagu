@@ -498,6 +498,21 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 		require.Empty(t, got)
 	})
 
+	t.Run("AllSkipsParams", func(t *testing.T) {
+		ctx := config.WithConfig(context.Background(), &config.Config{})
+		ctx = runctx.NewContext(ctx,
+			&ir.DAG{Name: "parent", Env: []string{"TODAY=2026-03-05"}},
+			"run-id", "parent.log",
+			runctx.WithParams([]string{"1=positional", "NAMED=value"}))
+
+		got, _ := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true})
+
+		// A child owns its own params. Forwarding the parent's would override
+		// the arguments the step passed to the child, and "1" is not a name a
+		// child could declare.
+		require.Equal(t, []string{"TODAY=2026-03-05"}, got)
+	})
+
 	t.Run("AllSkipsStepScopedValues", func(t *testing.T) {
 		ctx := newCtx(t, nil)
 		env := NewEnv(ctx, ir.Step{Name: "call_sub"})

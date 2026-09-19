@@ -323,9 +323,14 @@ Rules:
   already admits it into the run. A name that does not resolve produces a
   warning and contributes no value.
 - `pass_env: true` carries the values the workflow itself declared. It never
-  carries secrets, host process values, Dagu-managed run values, or
-  runtime-profile values, because those are either sensitive or describe the
-  machine running the parent rather than the machine running the child.
+  carries secrets, host process values, Dagu-managed run values, params, or
+  runtime-profile values. Those are either sensitive, describe the machine
+  running the parent rather than the machine running the child, or belong to the
+  parent run rather than the child. A child owns its own params: the step passes
+  them through `params`, and forwarding the parent's would override them.
+- Neither form carries a name that is not a valid environment variable name.
+  Positional params are held under `1`, `2`, and so on, which a child could not
+  declare for itself.
 - Neither form carries names reserved for Dagu internal transport (`_DAGU_*`),
   names Dagu manages for a run or a step, or host-local tool environment values
   managed by the `tools` feature (`PATH`, `AQUA_*`, `DAGU_TOOLS_MANIFEST`).

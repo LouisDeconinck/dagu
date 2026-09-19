@@ -106,8 +106,12 @@ func (e Context) InheritedEnvs() []string {
 }
 
 // PassableEnvs returns the run's own environment values, excluding secrets,
-// host process values, and runtime-profile values. These are the values a
-// parent run may forward to a child run that executes on another host.
+// host process values, params, and runtime-profile values. These are the values
+// a parent run may forward to a child run that executes on another host.
+//
+// Params are excluded because a child run owns its own: forwarding the parent's
+// would override the arguments the step passed to the child, and positional
+// params carry numeric names that are not valid environment variable names.
 func (e Context) PassableEnvs() []string {
 	if e.EnvScope == nil {
 		return nil
@@ -116,6 +120,7 @@ func (e Context) PassableEnvs() []string {
 		runtimeProfileOrigin,
 		cmnvalue.EnvSourceOS,
 		cmnvalue.EnvSourceSecret,
+		cmnvalue.EnvSourceParam,
 	)
 }
 

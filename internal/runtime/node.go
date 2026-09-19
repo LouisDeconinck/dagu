@@ -1539,7 +1539,11 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 // executes on, and tool-managed names point at the parent host's resolved
 // toolset.
 func isNonPassableEnvKey(key string) bool {
-	return strings.HasPrefix(strings.ToUpper(key), ir.ReservedEnvPrefix) ||
+	// Whatever crosses must be a name a child could declare itself, which is
+	// also what the name-list form accepts. Scope entries are not limited to
+	// that shape: positional params are held under "1", "2", and so on.
+	return !cmnvalue.ValidEnvName(key) ||
+		strings.HasPrefix(strings.ToUpper(key), ir.ReservedEnvPrefix) ||
 		runenv.IsNonTransferableRunEnvKey(key) ||
 		dagutools.IsManagedEnvKey(key)
 }
