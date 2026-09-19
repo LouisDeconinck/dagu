@@ -23,10 +23,10 @@ func TestMain(m *testing.M) {
 	// Register executor capabilities for testing.
 	// In production, this is done by runtime/builtin init functions.
 
-	// Command executors: support command, multiple commands, script, shell, input
+	// Command executors: support command, multiple commands, script, shell, stdin
 	for _, t := range []string{"", "shell", "command"} {
 		registry.RegisterExecutorCapabilities(t, registry.ExecutorCapabilities{
-			Command: true, MultipleCommands: true, Script: true, Shell: true, Input: true,
+			Command: true, MultipleCommands: true, Script: true, Shell: true, Stdin: true,
 		})
 	}
 	// Docker: supports command, multiple commands, and container
@@ -2442,58 +2442,58 @@ func TestValidateShell(t *testing.T) {
 	}
 }
 
-func TestValidateInput(t *testing.T) {
+func TestValidateStdin(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name         string
 		executorType string
-		input        string
+		stdin        string
 		wantErr      bool
 	}{
-		// Executors that support input
+		// Executors that support stdin
 		{
-			name:         "InputWithDefaultExecutor",
+			name:         "StdinWithDefaultExecutor",
 			executorType: "",
-			input:        "data.txt",
+			stdin:        "data.txt",
 			wantErr:      false,
 		},
 		{
-			name:         "InputWithCommandExecutor",
+			name:         "StdinWithCommandExecutor",
 			executorType: "command",
-			input:        "data.txt",
+			stdin:        "data.txt",
 			wantErr:      false,
 		},
 		{
-			name:         "InputWithShellExecutor",
+			name:         "StdinWithShellExecutor",
 			executorType: "shell",
-			input:        "data.txt",
+			stdin:        "data.txt",
 			wantErr:      false,
 		},
-		// Executors that do not support input
+		// Executors that do not support stdin
 		{
-			name:         "InputWithDockerExecutor",
+			name:         "StdinWithDockerExecutor",
 			executorType: "docker",
-			input:        "data.txt",
+			stdin:        "data.txt",
 			wantErr:      true,
 		},
 		{
-			name:         "InputWithSSHExecutor",
+			name:         "StdinWithSSHExecutor",
 			executorType: "ssh",
-			input:        "data.txt",
+			stdin:        "data.txt",
 			wantErr:      true,
 		},
 		{
-			name:         "InputWithHTTPExecutor",
+			name:         "StdinWithHTTPExecutor",
 			executorType: "http",
-			input:        "data.txt",
+			stdin:        "data.txt",
 			wantErr:      true,
 		},
-		// Empty input - should always pass
+		// Empty stdin - should always pass
 		{
-			name:         "EmptyInputWithSSHExecutor",
+			name:         "EmptyStdinWithSSHExecutor",
 			executorType: "ssh",
-			input:        "",
+			stdin:        "",
 			wantErr:      false,
 		},
 	}
@@ -2502,16 +2502,16 @@ func TestValidateInput(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			result := &ir.Step{
-				Input: tt.input,
+				Stdin: tt.stdin,
 				ExecutorConfig: ir.ExecutorConfig{
 					Type: tt.executorType,
 				},
 			}
-			err := validateInput(result)
+			err := validateStdin(result)
 
 			if tt.wantErr {
 				assert.Error(t, err)
-				assert.Contains(t, err.Error(), "does not support input field")
+				assert.Contains(t, err.Error(), "does not support stdin field")
 				assert.Contains(t, err.Error(), tt.executorType)
 			} else {
 				assert.NoError(t, err)

@@ -62,20 +62,20 @@ func (e *commandExecutor) Run(ctx context.Context) error {
 			_ = fileutil.Remove(scriptFile)
 		}()
 	}
-	// Open the input file, if configured, so its contents are piped to the
+	// Open the stdin file, if configured, so its contents are piped to the
 	// command's standard input.
-	if e.config.InputPath != "" {
-		inputPath := e.config.InputPath
-		if dir := e.config.Dir; dir != "" && !filepath.IsAbs(inputPath) {
-			inputPath = filepath.Join(dir, inputPath)
+	if e.config.StdinPath != "" {
+		stdinPath := e.config.StdinPath
+		if dir := e.config.Dir; dir != "" && !filepath.IsAbs(stdinPath) {
+			stdinPath = filepath.Join(dir, stdinPath)
 		}
-		input, err := os.Open(inputPath)
+		stdin, err := os.Open(stdinPath)
 		if err != nil {
 			e.mu.Unlock()
-			return fmt.Errorf("failed to open input file %q: %w", inputPath, err)
+			return fmt.Errorf("failed to open stdin file %q: %w", stdinPath, err)
 		}
-		defer func() { _ = input.Close() }()
-		e.config.Stdin = input
+		defer func() { _ = stdin.Close() }()
+		e.config.Stdin = stdin
 	}
 
 	// Wrap stderr with a tailing writer so we can include recent
@@ -205,8 +205,8 @@ type commandConfig struct {
 	ShellPackages    []string // Packages for nix-shell
 	Stdout           io.Writer
 	Stderr           io.Writer
-	// InputPath is the resolved path of the file piped to the command's stdin.
-	InputPath          string
+	// StdinPath is the resolved path of the file piped to the command's stdin.
+	StdinPath          string
 	Stdin              io.Reader
 	UserSpecifiedShell bool
 }
@@ -379,7 +379,7 @@ func NewCommandConfig(ctx context.Context, step ir.Step) (*commandConfig, error)
 		Shell:              env.Shell(ctx),
 		ShellCommandArgs:   shellCmdArgs,
 		ShellPackages:      step.ShellPackages,
-		InputPath:          step.Input,
+		StdinPath:          step.Stdin,
 		UserSpecifiedShell: step.Shell != "",
 	}, nil
 }
@@ -392,7 +392,7 @@ func init() {
 		MultipleCommands: true,
 		Script:           true,
 		Shell:            true,
-		Input:            true,
+		Stdin:            true,
 		CommandContext: func(ctx context.Context, step ir.Step) cmnvalue.CommandContext {
 			shell := commandContextShell(ctx, step)
 			return cmnvalue.CommandContext{

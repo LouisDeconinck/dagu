@@ -865,13 +865,13 @@ func (n *Node) setupExecutor(ctx context.Context) (context.Context, executor.Exe
 		n.SetScript(script)
 	}
 
-	// Evaluate input if set
-	if input := n.Step().Input; input != "" {
-		resolved, err := resolveRuntimeString(ctx, input, cmnvalue.WorkflowField("input"))
+	// Evaluate stdin if set
+	if stdin := n.Step().Stdin; stdin != "" {
+		resolved, err := resolveRuntimeString(ctx, stdin, cmnvalue.WorkflowField("stdin"))
 		if err != nil {
-			return ctx, nil, fmt.Errorf("failed to eval input: %w", err)
+			return ctx, nil, fmt.Errorf("failed to eval stdin: %w", err)
 		}
-		n.SetInput(resolved)
+		n.SetStdin(resolved)
 	}
 
 	// Create the executor

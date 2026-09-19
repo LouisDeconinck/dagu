@@ -53,12 +53,12 @@ type step struct {
 	ShellPackages []string `yaml:"shell_packages,omitempty"`
 	// Script is the script to run.
 	Script string `yaml:"script,omitempty"`
+	// Stdin is the file whose contents are piped to the command's standard input.
+	Stdin string `yaml:"stdin,omitempty"`
 	// Stdout is the file to write the stdout.
 	Stdout any `yaml:"stdout,omitempty"`
 	// Stderr is the file to write the stderr.
 	Stderr any `yaml:"stderr,omitempty"`
-	// Input is the file whose contents are piped to the command's standard input.
-	Input string `yaml:"input,omitempty"`
 	// LogOutput specifies how stdout and stderr are handled in log files for this step.
 	// Overrides the DAG-level logOutput setting.
 	// Can be "separate" (default) for separate .out and .err files,
@@ -432,7 +432,7 @@ var stepLogOutputStage = stepTransformStage{
 			out.Stderr = v.filePath
 			out.StderrArtifact = v.artifactPath
 		}),
-	stepField("input", buildStepInput, func(out *ir.Step, v string) { out.Input = v }),
+	stepField("stdin", buildStepStdin, func(out *ir.Step, v string) { out.Stdin = v }),
 	stepField("log_output", buildStepLogOutput, func(out *ir.Step, v ir.LogOutputMode) { out.LogOutput = v }),
 }
 
@@ -562,7 +562,7 @@ var stepCommandValidationStage = stepValidationStage{
 	{"command", validateMultipleCommands},
 	{"script", validateScript},
 	{"shell", validateShell},
-	{"input", validateInput},
+	{"stdin", validateStdin},
 }
 
 var stepExecutionValidationStage = stepValidationStage{
@@ -673,8 +673,8 @@ func buildStepScript(_ stepBuildContext, s *step) (string, error) {
 	return strings.TrimSpace(s.Script), nil
 }
 
-func buildStepInput(_ stepBuildContext, s *step) (string, error) {
-	return strings.TrimSpace(s.Input), nil
+func buildStepStdin(_ stepBuildContext, s *step) (string, error) {
+	return strings.TrimSpace(s.Stdin), nil
 }
 
 type stepOutputRedirect struct {
@@ -1957,16 +1957,16 @@ func validateShell(result *ir.Step) error {
 	return nil
 }
 
-// validateInput checks if the executor type supports the input field.
-func validateInput(result *ir.Step) error {
-	if result.Input == "" {
+// validateStdin checks if the executor type supports the stdin field.
+func validateStdin(result *ir.Step) error {
+	if result.Stdin == "" {
 		return nil
 	}
-	if !registry.ExecutorCapabilitiesFor(result.ExecutorConfig.Type).Input {
+	if !registry.ExecutorCapabilitiesFor(result.ExecutorConfig.Type).Stdin {
 		return ir.NewValidationError(
-			"input",
-			result.Input,
-			fmt.Errorf("action %q does not support input field", result.ExecutorConfig.Type),
+			"stdin",
+			result.Stdin,
+			fmt.Errorf("action %q does not support stdin field", result.ExecutorConfig.Type),
 		)
 	}
 	return nil

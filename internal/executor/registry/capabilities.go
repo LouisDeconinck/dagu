@@ -21,9 +21,9 @@ type ExecutorCapabilities struct {
 	Script bool
 	// Shell indicates whether the executor uses shell/shellArgs/shellPackages.
 	Shell bool
-	// Input indicates whether the executor supports the input field for piping
+	// Stdin indicates whether the executor supports the stdin field for piping
 	// a file's contents to the command's standard input.
-	Input bool
+	Stdin bool
 	// Container indicates whether the executor supports step-level container config.
 	Container bool
 	// SubDAG indicates whether the executor can execute sub-DAGs.

@@ -243,11 +243,11 @@ func (d *Data) SetScript(script string) {
 	d.inner.Step.Script = script
 }
 
-func (d *Data) SetInput(input string) {
+func (d *Data) SetStdin(stdin string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.inner.Step.Input = input
+	d.inner.Step.Stdin = stdin
 }
 
 func (s *Data) SetStep(step ir.Step) {

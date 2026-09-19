@@ -1463,7 +1463,7 @@ func TestRunner(t *testing.T) {
 		assert.Contains(t, string(content), "downstream")
 	})
 
-	t.Run("InputPipesStepStdoutFileToStdin", func(t *testing.T) {
+	t.Run("StdinPipesStepStdoutFileToProcess", func(t *testing.T) {
 		if windowsShellTest() {
 			t.Skip("uses cat to read stdin")
 		}
@@ -1476,7 +1476,7 @@ func TestRunner(t *testing.T) {
 			),
 			newStep("second",
 				withDepends("first"),
-				withInput("${first.stdout}"),
+				withStdin("${first.stdout}"),
 				withCommand("cat"),
 				withOutput("OUT"),
 			),
@@ -1492,7 +1492,7 @@ func TestRunner(t *testing.T) {
 		assert.Equal(t, "OUT=upstream-data", output)
 	})
 
-	t.Run("InputMissingFileFailsStep", func(t *testing.T) {
+	t.Run("StdinMissingFileFailsStep", func(t *testing.T) {
 		if windowsShellTest() {
 			t.Skip("uses cat to read stdin")
 		}
@@ -1500,7 +1500,7 @@ func TestRunner(t *testing.T) {
 
 		plan := r.newPlan(t,
 			newStep("reader",
-				withInput("does-not-exist.txt"),
+				withStdin("does-not-exist.txt"),
 				withCommand("cat"),
 			),
 		)

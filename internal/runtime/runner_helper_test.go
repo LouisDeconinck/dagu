@@ -92,9 +92,9 @@ func withStdout(stdout string) stepOption {
 	}
 }
 
-func withInput(input string) stepOption {
+func withStdin(stdin string) stepOption {
 	return func(step *ir.Step) {
-		step.Input = input
+		step.Stdin = stdin
 	}
 }
 

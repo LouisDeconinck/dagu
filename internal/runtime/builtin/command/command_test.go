@@ -639,22 +639,22 @@ func TestCommandExecutor_SimpleCommand(t *testing.T) {
 	}
 }
 
-// TestCommandExecutor_Input tests that the step input field pipes a file to stdin
-func TestCommandExecutor_Input(t *testing.T) {
+// TestCommandExecutor_Stdin tests that the step stdin field pipes a file to standard input
+func TestCommandExecutor_Stdin(t *testing.T) {
 	if goruntime.GOOS == "windows" {
 		t.Skip("Skipping Unix-specific test on Windows")
 	}
 
-	t.Run("InputFilePipedToStdin", func(t *testing.T) {
+	t.Run("StdinFilePipedToProcess", func(t *testing.T) {
 		ctx := setupTestContext(t, nil, ir.Step{})
 
-		inputFile := filepath.Join(t.TempDir(), "input.txt")
-		require.NoError(t, os.WriteFile(inputFile, []byte("piped content\n"), 0600))
+		stdinFile := filepath.Join(t.TempDir(), "stdin.txt")
+		require.NoError(t, os.WriteFile(stdinFile, []byte("piped content\n"), 0600))
 
 		step := ir.Step{
 			Name:     "test",
 			Commands: []ir.CommandEntry{{Command: "cat", CmdWithArgs: "cat"}},
-			Input:    inputFile,
+			Stdin:    stdinFile,
 		}
 		exec, err := NewCommand(ctx, step)
 		require.NoError(t, err)
@@ -667,14 +667,14 @@ func TestCommandExecutor_Input(t *testing.T) {
 		assert.Equal(t, "piped content\n", stdout.String())
 	})
 
-	t.Run("RelativeInputPathResolvedFromWorkingDir", func(t *testing.T) {
+	t.Run("RelativeStdinPathResolvedFromWorkingDir", func(t *testing.T) {
 		workDir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(workDir, "data.txt"), []byte("relative\n"), 0600))
 
 		step := ir.Step{
 			Name:     "test",
 			Commands: []ir.CommandEntry{{Command: "cat", CmdWithArgs: "cat"}},
-			Input:    "data.txt",
+			Stdin:    "data.txt",
 		}
 		ctx := context.Background()
 		ctx = runtime.NewContext(ctx, &ir.DAG{Name: "test-dag"}, "test-run", "")
@@ -692,27 +692,27 @@ func TestCommandExecutor_Input(t *testing.T) {
 		assert.Equal(t, "relative\n", stdout.String())
 	})
 
-	t.Run("MissingInputFileFails", func(t *testing.T) {
+	t.Run("MissingStdinFileFails", func(t *testing.T) {
 		ctx := setupTestContext(t, nil, ir.Step{})
 
 		step := ir.Step{
 			Name:     "test",
 			Commands: []ir.CommandEntry{{Command: "cat", CmdWithArgs: "cat"}},
-			Input:    filepath.Join(t.TempDir(), "missing.txt"),
+			Stdin:    filepath.Join(t.TempDir(), "missing.txt"),
 		}
 		exec, err := NewCommand(ctx, step)
 		require.NoError(t, err)
 
 		err = exec.Run(ctx)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to open input file")
+		assert.Contains(t, err.Error(), "failed to open stdin file")
 	})
 
-	t.Run("EachCommandReceivesInput", func(t *testing.T) {
+	t.Run("EachCommandReceivesStdin", func(t *testing.T) {
 		ctx := setupTestContext(t, nil, ir.Step{})
 
-		inputFile := filepath.Join(t.TempDir(), "input.txt")
-		require.NoError(t, os.WriteFile(inputFile, []byte("shared input\n"), 0600))
+		stdinFile := filepath.Join(t.TempDir(), "stdin.txt")
+		require.NoError(t, os.WriteFile(stdinFile, []byte("shared input\n"), 0600))
 
 		step := ir.Step{
 			Name: "test",
@@ -720,7 +720,7 @@ func TestCommandExecutor_Input(t *testing.T) {
 				{Command: "cat", CmdWithArgs: "cat"},
 				{Command: "cat", CmdWithArgs: "cat"},
 			},
-			Input: inputFile,
+			Stdin: stdinFile,
 		}
 		exec, err := NewCommand(ctx, step)
 		require.NoError(t, err)

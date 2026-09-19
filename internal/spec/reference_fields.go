@@ -152,11 +152,11 @@ func (w *referenceFieldWalker) walkStep(path string, step ir.Step) {
 	if step.Foreach != nil {
 		w.walkForeach(path+".foreach", step.Foreach, base)
 	}
+	w.add(base.withPathValue(path+".stdin", step.Stdin).withField(cmnvalue.WorkflowField(path + ".stdin")))
 	w.add(base.withPathValue(path+".stdout", step.Stdout).withField(cmnvalue.StepArtifactOutputField(path + ".stdout")))
 	w.add(base.withPathValue(path+".stdout.artifact", step.StdoutArtifact).withField(cmnvalue.StepArtifactOutputField(path + ".stdout.artifact")))
 	w.add(base.withPathValue(path+".stderr", step.Stderr).withField(cmnvalue.StepArtifactOutputField(path + ".stderr")))
 	w.add(base.withPathValue(path+".stderr.artifact", step.StderrArtifact).withField(cmnvalue.StepArtifactOutputField(path + ".stderr.artifact")))
-	w.add(base.withPathValue(path+".input", step.Input).withField(cmnvalue.WorkflowField(path + ".input")))
 	if step.StdoutOutputs != nil {
 		w.walkStdoutOutputs(path+".stdout.outputs", step.StdoutOutputs, base)
 	}
