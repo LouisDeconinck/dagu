@@ -352,6 +352,12 @@ Secrets:
   masked there and keeps it out of the coordinator's dispatch record. A child
   dispatched to a worker resolves it through the coordinator, which authorizes
   the request against that run's lease.
+- The rejection sees only what the calling run itself holds as a secret. A run
+  that received a value implicitly from its own parent holds it as ordinary run
+  environment, because implicit inheritance does not carry the source with the
+  value. Such a value is not recognised as a secret and `pass_env` will pass it.
+  A workflow that nests child runs should declare secrets where they are used
+  rather than rely on a value reaching a nested run.
 
 Transient values:
 

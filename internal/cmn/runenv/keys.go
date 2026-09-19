@@ -129,11 +129,29 @@ func isReservedRunEnvKey(key string) bool {
 	return false
 }
 
+// nonTransferableExtraNames are generated per run or per step but are absent
+// from reservedRunEnvNames, which authored-name validation also consumes and
+// which has always permitted them. They still must not cross a run boundary:
+// each one addresses the run or step that produced it.
+var nonTransferableExtraNames = []string{
+	EnvKeyPWD,
+	EnvKeyDAGUOutputFile,
+	EnvKeyDAGWaitingSteps,
+	EnvKeyDAGDefinitionID,
+	EnvKeyParallelItem,
+}
+
 // IsNonTransferableRunEnvKey reports whether key must not cross a run boundary.
-// It covers the run-managed names plus PWD, which holds the executing step's
-// working directory on the host running that step. PWD is deliberately absent
-// from ReservedRunEnvNames so that authored-name validation, which has always
-// permitted it, keeps its current behavior.
+// It covers the run-managed names plus the per-run and per-step values that
+// authored-name validation still allows a workflow to define.
 func IsNonTransferableRunEnvKey(key string) bool {
-	return isReservedRunEnvKey(key) || strings.EqualFold(key, EnvKeyPWD)
+	if isReservedRunEnvKey(key) {
+		return true
+	}
+	for _, name := range nonTransferableExtraNames {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
 }

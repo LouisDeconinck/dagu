@@ -2969,7 +2969,9 @@ func buildStepSubDAG(ctx stepBuildContext, s *step, result *ir.Step) error {
 
 	// if the call field is not set, return nil.
 	if name == "" {
-		if s.PassEnv.Enabled() {
+		// Reject any explicit value, including a disabling one, the same as
+		// dag.enqueue does: the field has no meaning on a step with no child.
+		if !s.PassEnv.IsZero() {
 			return ir.NewValidationError("pass_env", s.PassEnv.Value(),
 				fmt.Errorf("pass_env requires a sub DAG call"))
 		}

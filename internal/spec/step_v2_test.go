@@ -1395,7 +1395,11 @@ steps:
 
 	t.Run("RunManagedName", func(t *testing.T) {
 		t.Parallel()
-		for _, name := range []string{"DAG_RUN_WORK_DIR", "DAG_PARAMS_JSON", "PWD"} {
+		for _, name := range []string{
+			"DAG_RUN_WORK_DIR", "DAG_PARAMS_JSON", "PWD",
+			"DAGU_OUTPUT_FILE", "DAG_WAITING_STEPS",
+			"DAGU_DAG_DEFINITION_ID", "DAGU_PARALLEL_ITEM",
+		} {
 			_, err := LoadYAML(context.Background(), []byte(`
 steps:
   - id: fanout

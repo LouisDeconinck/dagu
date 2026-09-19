@@ -509,7 +509,11 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 		ctx := newCtx(t, nil)
 
 		got, err := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{
-			Names: []string{"DAG_RUN_WORK_DIR", "DAG_PARAMS_JSON", "PWD"},
+			Names: []string{
+				"DAG_RUN_WORK_DIR", "DAG_PARAMS_JSON", "PWD",
+				"DAGU_OUTPUT_FILE", "DAG_WAITING_STEPS",
+				"DAGU_DAG_DEFINITION_ID", "DAGU_PARALLEL_ITEM",
+			},
 		})
 
 		require.NoError(t, err)

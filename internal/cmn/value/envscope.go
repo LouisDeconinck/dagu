@@ -186,8 +186,9 @@ func (e *EnvScope) ToSliceWithoutOriginOrSources(origin string, sources ...EnvSo
 	for _, source := range sources {
 		excluded[source] = struct{}{}
 	}
-	result := make([]string, 0, len(e.entries))
-	for key, entry := range e.collectAllEntries() {
+	entries := e.collectAllEntries()
+	result := make([]string, 0, len(entries))
+	for key, entry := range entries {
 		if entry.Origin == origin {
 			continue
 		}
