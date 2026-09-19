@@ -1348,6 +1348,61 @@ steps:
 	})
 }
 
+func TestBuildStepStdin(t *testing.T) {
+	t.Parallel()
+
+	t.Run("StdinField", func(t *testing.T) {
+		t.Parallel()
+
+		data := []byte(`
+steps:
+  - id: fetch
+    run: echo data
+  - id: summarize
+    stdin: ${fetch.stdout}
+    run: cat
+    depends: fetch
+`)
+		dag, err := spec.LoadYAML(context.Background(), data)
+		require.NoError(t, err)
+		th := DAG{t: t, DAG: dag}
+		assert.Len(t, th.Steps, 2)
+		assert.Equal(t, "", th.Steps[0].Stdin)
+		assert.Equal(t, "${fetch.stdout}", th.Steps[1].Stdin)
+	})
+	t.Run("StdinRejectedForUnsupportedExecutor", func(t *testing.T) {
+		t.Parallel()
+
+		data := []byte(`
+steps:
+  - name: fetch
+    type: ssh
+    stdin: data.txt
+    command: cat
+    with:
+      host: example.com
+      user: test
+`)
+		_, err := spec.LoadYAML(context.Background(), data)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not support stdin field")
+	})
+	t.Run("StdinTrimmed", func(t *testing.T) {
+		t.Parallel()
+
+		data := []byte(`
+steps:
+  - name: reader
+    stdin: "  data.txt  "
+    run: cat
+`)
+		dag, err := spec.LoadYAML(context.Background(), data)
+		require.NoError(t, err)
+		th := DAG{t: t, DAG: dag}
+		assert.Equal(t, "data.txt", th.Steps[0].Stdin)
+	})
+}
+
 func TestBuildStepPreconditions(t *testing.T) {
 	t.Parallel()
 
