@@ -1678,6 +1678,10 @@
           "deprecated": true,
           "description": "Deprecated multi-line script content. Use run with a multi-line string."
         },
+        "stdin": {
+          "type": "string",
+          "description": "File path whose contents are piped to the step command's standard input."
+        },
         "stdout": {
           "oneOf": [
             {
@@ -2386,6 +2390,7 @@
                 { "required": ["retry_policy"] },
                 { "required": ["signal_on_stop"] },
                 { "required": ["stderr"] },
+                { "required": ["stdin"] },
                 { "required": ["stdout"] },
                 { "required": ["timeout_sec"] },
                 { "required": ["worker_selector"] }
