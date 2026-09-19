@@ -105,6 +105,25 @@ func (e Context) InheritedEnvs() []string {
 	return e.EnvScope.ToSliceWithoutOrigin(runtimeProfileOrigin)
 }
 
+// PassableEnvs returns the run's own environment values, excluding secrets,
+// host process values, params, and runtime-profile values. These are the values
+// a parent run may forward to a child run that executes on another host.
+//
+// Params are excluded because a child run owns its own: forwarding the parent's
+// would override the arguments the step passed to the child, and positional
+// params carry numeric names that are not valid environment variable names.
+func (e Context) PassableEnvs() []string {
+	if e.EnvScope == nil {
+		return nil
+	}
+	return e.EnvScope.ToSliceWithoutOriginOrSources(
+		runtimeProfileOrigin,
+		cmnvalue.EnvSourceOS,
+		cmnvalue.EnvSourceSecret,
+		cmnvalue.EnvSourceParam,
+	)
+}
+
 // DAGLoader loads DAG definitions needed during execution.
 type DAGLoader interface {
 	GetDAG(ctx context.Context, name string) (*ir.DAG, error)

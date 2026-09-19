@@ -36,6 +36,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/executor/registry"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/runtime/executor"
+	dagutools "github.com/dagucloud/dagu/v2/internal/tools"
 	"github.com/goccy/go-yaml"
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -1364,6 +1365,10 @@ func (n *Node) BuildSubDAGRuns(ctx context.Context, subDAG *ir.SubDAG) ([]SubDAG
 }
 
 func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]executor.RunParams, error) {
+	passedEnv, err := resolveSubDAGPassEnv(ctx, subDAG.PassEnv)
+	if err != nil {
+		return nil, err
+	}
 	parallel := n.Step().Parallel
 
 	// Single sub DAG execution (non-parallel)
@@ -1391,6 +1396,7 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 			Params:         params,
 			DAGName:        dagName,
 			WorkerSelector: workerSelector,
+			PassedEnv:      passedEnv,
 		}}, nil
 	}
 
@@ -1516,6 +1522,7 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 			ParallelItem:   parallelItem,
 			DAGName:        dagName,
 			WorkerSelector: workerSelector,
+			PassedEnv:      passedEnv,
 		}
 	}
 
@@ -1525,6 +1532,82 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 	}
 
 	return runParams, nil
+}
+
+// isNonPassableEnvKey reports whether a name is never carried to a child run.
+// Reserved internal transport names would collide with the child's own
+// transport values, run-managed names describe the parent run and the host it
+// executes on, and tool-managed names point at the parent host's resolved
+// toolset.
+func isNonPassableEnvKey(key string) bool {
+	// Whatever crosses must be a name a child could declare itself, which is
+	// also what the name-list form accepts. Scope entries are not limited to
+	// that shape: positional params are held under "1", "2", and so on.
+	return !cmnvalue.ValidEnvName(key) ||
+		strings.HasPrefix(strings.ToUpper(key), ir.ReservedEnvPrefix) ||
+		runenv.IsNonTransferableRunEnvKey(key) ||
+		dagutools.IsManagedEnvKey(key)
+}
+
+// resolveSubDAGPassEnv resolves the "KEY=value" pairs a child run receives
+// through the step's opt-in pass_env field.
+//
+// The whole-environment form carries values the workflow itself declared.
+// Secrets, host process values, Dagu-managed run values, and runtime-profile
+// values are excluded because they are either sensitive or describe the parent
+// run and the host executing it rather than the child.
+//
+// The name-list form resolves each entry against the environment scope visible
+// to the calling step. It never reads the Dagu process environment directly,
+// because that would bypass the operator-controlled base environment allowlist.
+//
+// Resolving a name to a secret fails the step. Passing one would write the
+// value to the coordinator dispatch record and hand the child a value it cannot
+// know to mask, so the child must declare the secret itself instead.
+func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) ([]string, error) {
+	if passEnv == nil {
+		return nil, nil
+	}
+	if passEnv.All {
+		all := GetDAGContext(ctx).PassableEnvs()
+		envs := make([]string, 0, len(all))
+		for _, env := range all {
+			key, _, _ := strings.Cut(env, "=")
+			if isNonPassableEnvKey(key) {
+				continue
+			}
+			envs = append(envs, env)
+		}
+		return envs, nil
+	}
+	// Read the step scope only when one exists. Asking for it unconditionally
+	// would build a fallback scope backed by the raw process environment, which
+	// is the boundary this field must not cross.
+	scope := GetDAGContext(ctx).EnvScope
+	if stepEnv, ok := LookupEnv(ctx); ok {
+		scope = stepEnv.Scope
+	}
+	var envs []string
+	for _, name := range passEnv.Names {
+		if isNonPassableEnvKey(name) {
+			logger.Warn(ctx, "pass_env variable is reserved or host-local and was not passed",
+				tag.String("env", name))
+			continue
+		}
+		entry, ok := scope.GetEntry(name)
+		if !ok {
+			logger.Warn(ctx, "pass_env variable not found in the parent environment",
+				tag.String("env", name))
+			continue
+		}
+		if entry.Source == cmnvalue.EnvSourceSecret {
+			return nil, fmt.Errorf(
+				"pass_env cannot pass %q because it is a secret in this run; declare it in the child DAG's secrets instead",
+				name)
+		}
+		envs = append(envs, name+"="+entry.Value)
+	}
+	return envs, nil
 }
 
 func resolveWorkerSelector(

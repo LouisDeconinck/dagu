@@ -197,6 +197,14 @@ func WithExternalStepRetry(enabled bool) TaskOption {
 	}
 }
 
+// WithPassedEnv sets the resolved parent environment values the child run
+// receives through the step's pass_env field.
+func WithPassedEnv(envs []string) TaskOption {
+	return func(task *dispatch.DispatchTask) {
+		task.PassedEnv = append([]string(nil), envs...)
+	}
+}
+
 // WithRetryPath sets the persisted child DAG path for a retry task.
 func WithRetryPath(path dagrun.RetryPath) TaskOption {
 	return func(task *dispatch.DispatchTask) {

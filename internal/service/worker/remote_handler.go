@@ -404,7 +404,9 @@ func taskExtraEnvs(task *coordinatorv1.Task) []string {
 	if task == nil {
 		return nil
 	}
-	var envs []string
+	// Values passed by the parent step are applied first so run-managed
+	// transport values keep precedence.
+	envs := append([]string(nil), task.PassedEnvs...)
 	if task.ExternalStepRetry {
 		envs = append(envs, runenv.EnvKeyExternalStepRetry+"=1")
 	}
