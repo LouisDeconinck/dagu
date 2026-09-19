@@ -243,6 +243,11 @@ type SubDAGEnvInheritance struct {
 	Names []string `json:"names,omitempty"`
 }
 
+// ReservedEnvPrefix marks environment variable names Dagu reserves for internal
+// run transport. Names carrying it are never accepted from authored workflows
+// and never cross a run boundary.
+const ReservedEnvPrefix = "_DAGU_"
+
 // CommandEntry represents a single command in a multi-command step.
 // Each entry contains a parsed command with its arguments.
 type CommandEntry struct {

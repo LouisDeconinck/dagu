@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dagucloud/dagu/v2/internal/cmn/config"
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/runctx"
@@ -396,4 +397,90 @@ func TestBuildJQArgs(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "$who", resolved.Commands[0].CmdWithArgs)
 	require.Equal(t, map[string]any{"who": "Alice"}, resolved.ExecutorConfig.Config["args"])
+}
+
+// TestResolveSubDAGInheritedEnv covers which parent values a sub DAG step may
+// carry into a child run. The name list must never reach past the run's
+// environment scope into the Dagu process environment, because that scope is
+// the operator-controlled boundary for host values.
+func TestResolveSubDAGInheritedEnv(t *testing.T) {
+	newCtx := func(t *testing.T, secrets []string) context.Context {
+		t.Helper()
+		ctx := config.WithConfig(context.Background(), &config.Config{
+			Core: config.Core{
+				BaseEnv: config.NewBaseEnv([]string{"HOME=/parent/home"}),
+			},
+		})
+		return runctx.NewContext(
+			ctx,
+			&ir.DAG{Name: "parent", Env: []string{"TODAY=2026-03-05"}},
+			"run-id",
+			"parent.log",
+			runctx.WithSecrets(secrets),
+		)
+	}
+
+	t.Run("ListIgnoresProcessEnv", func(t *testing.T) {
+		t.Setenv("DAGU_TEST_HOST_CREDENTIAL", "host-process-credential")
+		ctx := newCtx(t, nil)
+
+		got := resolveSubDAGInheritedEnv(ctx, &ir.SubDAGEnvInheritance{
+			Names: []string{"DAGU_TEST_HOST_CREDENTIAL"},
+		})
+
+		require.Empty(t, got)
+	})
+
+	t.Run("ListResolvesFromScope", func(t *testing.T) {
+		ctx := newCtx(t, nil)
+		env := NewEnv(ctx, ir.Step{Name: "call_sub"})
+		env.Scope = env.Scope.WithEntries(map[string]string{
+			"GREETING": "hello",
+		}, cmnvalue.EnvSourceStepEnv)
+
+		got := resolveSubDAGInheritedEnv(WithEnv(ctx, env), &ir.SubDAGEnvInheritance{
+			Names: []string{"GREETING"},
+		})
+
+		require.Equal(t, []string{"GREETING=hello"}, got)
+	})
+
+	t.Run("ListCarriesNamedSecret", func(t *testing.T) {
+		ctx := newCtx(t, []string{"API_TOKEN=s3cr3t"})
+
+		got := resolveSubDAGInheritedEnv(ctx, &ir.SubDAGEnvInheritance{
+			Names: []string{"API_TOKEN"},
+		})
+
+		require.Equal(t, []string{"API_TOKEN=s3cr3t"}, got)
+	})
+
+	t.Run("ListSkipsToolManagedNames", func(t *testing.T) {
+		ctx := newCtx(t, nil)
+
+		got := resolveSubDAGInheritedEnv(ctx, &ir.SubDAGEnvInheritance{
+			Names: []string{"PATH", "AQUA_ROOT_DIR"},
+		})
+
+		require.Empty(t, got)
+	})
+
+	t.Run("AllExcludesSecretsAndHostValues", func(t *testing.T) {
+		ctx := newCtx(t, []string{"API_TOKEN=s3cr3t"})
+
+		got := resolveSubDAGInheritedEnv(ctx, &ir.SubDAGEnvInheritance{All: true})
+
+		require.Contains(t, got, "TODAY=2026-03-05")
+		require.NotContains(t, got, "API_TOKEN=s3cr3t")
+		require.NotContains(t, got, "HOME=/parent/home")
+		for _, env := range got {
+			key, _, _ := strings.Cut(env, "=")
+			require.False(t, strings.HasPrefix(strings.ToUpper(key), ir.ReservedEnvPrefix),
+				"reserved name %q must not be carried to a child run", key)
+		}
+	})
+
+	t.Run("NilRequestsNothing", func(t *testing.T) {
+		require.Nil(t, resolveSubDAGInheritedEnv(newCtx(t, nil), nil))
+	})
 }

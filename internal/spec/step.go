@@ -2936,7 +2936,7 @@ func buildSubDAGEnvInheritance(s *step) (*ir.SubDAGEnvInheritance, error) {
 				fmt.Errorf("invalid environment variable name %q", name))
 		}
 		// Names reserved for Dagu internal transport cannot be inherited.
-		if strings.HasPrefix(strings.ToUpper(name), "_DAGU_") {
+		if strings.HasPrefix(strings.ToUpper(name), ir.ReservedEnvPrefix) {
 			return nil, ir.NewValidationError("inherit_env", s.InheritEnv.Value(),
 				fmt.Errorf("%q is reserved for Dagu internal use and cannot be inherited", name))
 		}

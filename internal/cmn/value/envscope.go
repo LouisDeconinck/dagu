@@ -171,6 +171,30 @@ func (e *EnvScope) ToSliceWithoutOrigin(origin string) []string {
 	return result
 }
 
+// ToSliceWithoutOriginOrSources returns variables except entries from one
+// origin or from any of the given sources.
+func (e *EnvScope) ToSliceWithoutOriginOrSources(origin string, sources ...EnvSource) []string {
+	if e == nil {
+		return nil
+	}
+	excluded := make(map[EnvSource]struct{}, len(sources))
+	for _, source := range sources {
+		excluded[source] = struct{}{}
+	}
+	all := e.collectAll(func(entry EnvEntry) bool {
+		if entry.Origin == origin {
+			return false
+		}
+		_, skip := excluded[entry.Source]
+		return !skip
+	})
+	result := make([]string, 0, len(all))
+	for key, value := range all {
+		result = append(result, key+"="+value)
+	}
+	return result
+}
+
 // WithEntriesOrigin returns a new scope with source and origin metadata.
 func (e *EnvScope) WithEntriesOrigin(entries map[string]string, source EnvSource, origin string) *EnvScope {
 	if len(entries) == 0 {

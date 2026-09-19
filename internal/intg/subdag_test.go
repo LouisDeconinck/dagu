@@ -985,12 +985,12 @@ func TestSubDAG_InheritEnv(t *testing.T) {
 
 	t.Run("Selective", func(t *testing.T) {
 		th := test.SetupCommand(t)
-		t.Setenv("GH_USER", "octocat")
 
 		th.CreateDAGFile(t, "parent_inherit_selective.yaml", `
 env:
   - TODAY: "2026-03-05"
-  - NOT_LISTED: secret-value
+  - GH_USER: octocat
+  - NOT_LISTED: not-requested
 steps:
   - name: call_sub
     action: dag.run
@@ -1013,11 +1013,11 @@ steps:
 			ExpectedOut: []string{"DAG run finished"},
 		})
 
-		// TODAY comes from the parent env, GH_USER from the process environment.
-		// An in-process child also sees unlisted parent values like NOT_LISTED
-		// through the implicit local env scope; inherit_env only controls the
-		// explicit set forwarded to remote workers.
-		require.Equal(t, "TODAY=2026-03-05\nGH_USER=octocat\nNOT_LISTED=secret-value", readChildResult(t, th, "parent_inherit_selective", dagRunID))
+		// Listed names resolve from the parent run environment. An in-process
+		// child also sees unlisted parent values like NOT_LISTED through the
+		// implicit local env scope; inherit_env only controls the explicit set
+		// forwarded to a child that runs on another host.
+		require.Equal(t, "TODAY=2026-03-05\nGH_USER=octocat\nNOT_LISTED=not-requested", readChildResult(t, th, "parent_inherit_selective", dagRunID))
 	})
 
 	t.Run("All", func(t *testing.T) {
@@ -1027,7 +1027,7 @@ steps:
 		th.CreateDAGFile(t, "parent_inherit_all.yaml", `
 env:
   - TODAY: "2026-03-05"
-  - NOT_LISTED: secret-value
+  - NOT_LISTED: not-requested
 steps:
   - name: call_sub
     action: dag.run
@@ -1050,18 +1050,19 @@ steps:
 			ExpectedOut: []string{"DAG run finished"},
 		})
 
-		// GH_USER is not part of the parent run environment, so inherit_env: true
-		// does not forward it; only the list form reaches process env vars.
-		require.Equal(t, "TODAY=2026-03-05\nGH_USER=\nNOT_LISTED=secret-value", readChildResult(t, th, "parent_inherit_all", dagRunID))
+		// GH_USER is a host process value, so inherit_env: true never forwards
+		// it. Only a name that is part of the parent run environment can be
+		// listed explicitly.
+		require.Equal(t, "TODAY=2026-03-05\nGH_USER=\nNOT_LISTED=not-requested", readChildResult(t, th, "parent_inherit_all", dagRunID))
 	})
 
 	t.Run("Parallel", func(t *testing.T) {
 		th := test.SetupCommand(t)
-		t.Setenv("GH_USER", "octocat")
 
 		th.CreateDAGFile(t, "parent_inherit_parallel.yaml", `
 env:
   - TODAY: "2026-03-05"
+  - GH_USER: octocat
 steps:
   - name: call_sub
     action: dag.run

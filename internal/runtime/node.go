@@ -1531,32 +1531,35 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 	return runParams, nil
 }
 
+// isNonInheritableEnvKey reports whether a name is never carried to a child
+// run. Reserved internal transport names would collide with the child's own
+// transport values, and tool-managed names point at the parent host's resolved
+// toolset.
+func isNonInheritableEnvKey(key string) bool {
+	return strings.HasPrefix(strings.ToUpper(key), ir.ReservedEnvPrefix) ||
+		dagutools.IsManagedEnvKey(key)
+}
+
 // resolveSubDAGInheritedEnv resolves the "KEY=value" pairs a child run receives
-// through the step's opt-in inherit_env field. All inherits the parent's run
-// environment (the same set an in-process child receives implicitly); a name
-// list resolves each entry against the environment scope visible to the calling
-// step and then falls back to the parent process environment.
+// through the step's opt-in inherit_env field.
+//
+// The whole-environment form carries the parent run's own values only: secrets,
+// host process values, and runtime-profile values are excluded because they are
+// either sensitive or meaningless on the host that runs the child.
+//
+// The name-list form resolves each entry against the environment scope visible
+// to the calling step. It never reads the Dagu process environment directly,
+// because that would bypass the operator-controlled base environment allowlist.
 func resolveSubDAGInheritedEnv(ctx context.Context, inherit *ir.SubDAGEnvInheritance) []string {
 	if inherit == nil {
 		return nil
 	}
 	if inherit.All {
-		all := GetDAGContext(ctx).InheritedEnvs()
-		toolsActive := false
-		for _, env := range all {
-			key, _, ok := strings.Cut(env, "=")
-			if ok && strings.EqualFold(key, dagutools.EnvManifest) {
-				toolsActive = true
-				break
-			}
-		}
+		all := GetDAGContext(ctx).PassableEnvs()
 		envs := make([]string, 0, len(all))
 		for _, env := range all {
 			key, _, _ := strings.Cut(env, "=")
-			// Reserved internal transport and host-local tool environment
-			// values are never inherited.
-			if strings.HasPrefix(strings.ToUpper(key), "_DAGU_") ||
-				(toolsActive && dagutools.IsManagedEnvKey(key)) {
+			if isNonInheritableEnvKey(key) {
 				continue
 			}
 			envs = append(envs, env)
@@ -1566,11 +1569,10 @@ func resolveSubDAGInheritedEnv(ctx context.Context, inherit *ir.SubDAGEnvInherit
 	scope := GetEnv(ctx).Scope
 	var envs []string
 	for _, name := range inherit.Names {
-		if value, ok := scope.Get(name); ok {
-			envs = append(envs, name+"="+value)
+		if isNonInheritableEnvKey(name) {
 			continue
 		}
-		if value, ok := os.LookupEnv(name); ok {
+		if value, ok := scope.Get(name); ok {
 			envs = append(envs, name+"="+value)
 			continue
 		}

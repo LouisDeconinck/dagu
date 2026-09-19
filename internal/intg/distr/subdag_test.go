@@ -665,7 +665,7 @@ func TestSubDAG_InheritEnvDistributed(t *testing.T) {
 		f := newTestFixture(t, `
 env:
   - TODAY: "2026-03-05"
-  - NOT_LISTED: secret-value
+  - NOT_LISTED: not-requested
 steps:
   - name: run-child
     action: dag.run
@@ -694,7 +694,7 @@ steps:
 		f := newTestFixture(t, `
 env:
   - TODAY: "2026-03-05"
-  - NOT_LISTED: secret-value
+  - NOT_LISTED: not-requested
 steps:
   - name: run-child
     action: dag.run
@@ -716,7 +716,40 @@ steps:
 		agent := f.dagWrapper.Agent()
 		agent.RunSuccess(t)
 
-		require.Equal(t, "TODAY=2026-03-05 NL=secret-value", readChildResult(t, f))
+		require.Equal(t, "TODAY=2026-03-05 NL=not-requested", readChildResult(t, f))
+	})
+
+	t.Run("selectiveCarriesNamedSecret", func(t *testing.T) {
+		t.Setenv("PARENT_API_TOKEN", "s3cr3t")
+		f := newTestFixture(t, `
+secrets:
+  - name: API_TOKEN
+    provider: env
+    key: PARENT_API_TOKEN
+steps:
+  - name: run-child
+    action: dag.run
+    with:
+      dag: env-child
+    inherit_env: [API_TOKEN]
+
+---
+name: env-child
+worker_selector:
+  type: test-worker
+steps:
+  - name: report
+    run: echo "TOKEN=${API_TOKEN}"
+    output: RESULT
+`, withLabels(map[string]string{"type": "test-worker"}))
+		defer f.cleanup()
+
+		agent := f.dagWrapper.Agent()
+		agent.RunSuccess(t)
+
+		// An explicitly named secret is forwarded. It reaches the child as an
+		// ordinary execution value, so the child does not mask it.
+		require.Equal(t, "TOKEN=s3cr3t", readChildResult(t, f))
 	})
 
 	t.Run("defaultNoInheritance", func(t *testing.T) {
