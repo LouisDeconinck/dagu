@@ -1053,6 +1053,9 @@ func buildStepRepeatPolicy(_ stepBuildContext, s *step) (ir.RepeatPolicy, error)
 	result.LimitStr = rp.Limit.Str()
 
 	if rp.Condition != "" {
+		if err := validateMatchPattern(rp.Expected); err != nil {
+			return ir.RepeatPolicy{}, fmt.Errorf("repeat_policy.expected is invalid: %w", err)
+		}
 		result.Condition = &ir.Condition{
 			Condition: rp.Condition,
 			Expected:  rp.Expected,
@@ -2854,6 +2857,11 @@ func buildStepRouter(_ stepBuildContext, s *step, result *ir.Step) error {
 		if pattern == "" {
 			return ir.NewValidationError("routes", nil,
 				fmt.Errorf("route pattern cannot be empty"))
+		}
+
+		if err := validateMatchPattern(pattern); err != nil {
+			return ir.NewValidationError("routes", pattern,
+				fmt.Errorf("route pattern %q is invalid: %w", pattern, err))
 		}
 
 		if len(targets) == 0 {
