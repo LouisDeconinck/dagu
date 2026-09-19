@@ -188,3 +188,27 @@ func TestStepLogArchiveStreams(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []byte("PK\x03\x04"), data[:4])
 }
+
+func TestStepLogFormValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, contentType, header string
+		wantStatus                      int
+	}{
+		{name: "header wins", body: "token=form-token", contentType: "application/x-www-form-urlencoded", header: "Bearer header-token", wantStatus: http.StatusOK},
+		{name: "malformed form", body: "token=%xx", contentType: "application/x-www-form-urlencoded", wantStatus: http.StatusBadRequest},
+		{name: "wrong content type", body: "token=form-token", contentType: "text/plain", wantStatus: http.StatusUnsupportedMediaType},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler := stepLogDownloadFormAuth("/api/v1")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, tc.header, r.Header.Get("Authorization"))
+				w.WriteHeader(http.StatusOK)
+			}))
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/dag-runs/example/run/steps/log/download", strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", tc.contentType)
+			request.Header.Set("Authorization", tc.header)
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			require.Equal(t, tc.wantStatus, recorder.Code)
+		})
+	}
+}

@@ -166,6 +166,17 @@ type remoteNodeProxy struct {
 // If yes, it proxies the request to the remote node and returns the remote response.
 // If not, it returns nil, indicating to proceed locally.
 func (h *remoteNodeProxy) proxy(r *http.Request) (*http.Response, error) {
+	if r.Method == http.MethodPost && isStepLogDownload(r, h.apiBasePath) {
+		// Browser credentials are local; the remote uses its configured authentication.
+		r = r.Clone(r.Context())
+		r.Method = http.MethodGet
+		r.Body = http.NoBody
+		r.ContentLength = 0
+		r.Header.Del("Content-Length")
+		r.Header.Del("Content-Type")
+		r.Header.Del("Transfer-Encoding")
+		return h.doRequest(nil, r)
+	}
 	legacyPath, hasLegacyWikiPath := legacyWikiProxyPath(r.URL.Path, h.apiBasePath)
 	if !hasLegacyWikiPath {
 		return h.doRequest(r.Body, r)

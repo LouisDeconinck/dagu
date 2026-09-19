@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -304,6 +305,61 @@ func readLogArchive(t *testing.T, body string) map[string]string {
 	return logs
 }
 
+func postLogForm(t *testing.T, server test.Server, path, token string) (int, http.Header, string) {
+	t.Helper()
+	endpoint := fmt.Sprintf("http://%s:%d%s", server.Config.Server.Host, server.Config.Server.Port, path)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.PostForm(endpoint, url.Values{"token": {token}})
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, resp.Header, string(body)
+}
+
+func TestStepLogFormAuth(t *testing.T) {
+	server := setupBuiltinAuthServer(t, func(cfg *config.Config) { cfg.Server.StrictValidation = true })
+	token := getAdminToken(t, server)
+	for _, path := range []string{
+		"/api/v1/dag-runs/missing/run/steps/log/download",
+		"/api/v1/dag-runs/missing/run/sub-dag-runs/child/steps/log/download",
+	} {
+		code, _, _ := postLogForm(t, server, path+"?token="+url.QueryEscape(token), "")
+		assert.Equal(t, http.StatusUnauthorized, code)
+		for _, credential := range []string{"", "invalid", token} {
+			code, _, body := postLogForm(t, server, path, credential)
+			if credential != token {
+				assert.Contains(t, body, "Unauthorized")
+			}
+			want := http.StatusUnauthorized
+			if credential == token {
+				want = http.StatusNotFound
+			}
+			assert.Equal(t, want, code)
+		}
+	}
+	code, _, _ := postLogForm(t, server, "/api/v1/dags", token)
+	assert.Equal(t, http.StatusUnauthorized, code)
+
+	server.Client().Post("/api/v1/workspaces", api.CreateWorkspaceRequest{Name: "private"}).
+		WithBearerToken(token).ExpectStatus(http.StatusCreated).Send(t)
+	seedLatestDAGRunStatus(t, server, &ir.DAG{Name: "saved", Labels: ir.NewLabels([]string{"workspace=private"})}, "run", ir.Succeeded, seedDAGRunStatusOptions{})
+	path := "/api/v1/dag-runs/saved/run/steps/log/download"
+	code, _, body := postLogForm(t, server, path, token)
+	require.Equal(t, http.StatusOK, code)
+	require.Empty(t, readLogArchive(t, body))
+
+	server.Client().Post("/api/v1/workspaces", api.CreateWorkspaceRequest{Name: "other"}).
+		WithBearerToken(token).ExpectStatus(http.StatusCreated).Send(t)
+	keyRequest := newCreateAPIKeyRequest("other-workspace", api.UserRoleViewer)
+	keyRequest.WorkspaceAccess = &api.WorkspaceAccess{All: false, Grants: []api.WorkspaceGrant{{Workspace: "other", Role: api.UserRoleViewer}}}
+	var key api.CreateAPIKeyResponse
+	server.Client().Post("/api/v1/api-keys", keyRequest).WithBearerToken(token).
+		ExpectStatus(http.StatusCreated).Send(t).Unmarshal(t, &key)
+	code, _, _ = postLogForm(t, server, path, key.Key)
+	assert.Equal(t, http.StatusNotFound, code)
+}
+
 func TestDownloadDAGRunStepLogs(t *testing.T) {
 	server := test.SetupServer(t)
 	const dagName = "step_logs_dag"
@@ -351,6 +407,11 @@ func TestDownloadDAGRunStepLogs(t *testing.T) {
 	assert.Contains(t, logs["001-first/stdout.log"], "out-first")
 	assert.Contains(t, logs["001-first/stderr.log"], "err-first")
 	assert.Contains(t, logs["002-second/stdout.log"], "out-second")
+	code, headers, body := postLogForm(t, server,
+		fmt.Sprintf("/api/v1/dag-runs/%s/%s/steps/log/download", dagName, startBody.DagRunId), "")
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, disposition, headers.Get("Content-Disposition"))
+	require.Equal(t, logs, readLogArchive(t, body))
 
 	_ = server.Client().Get(
 		fmt.Sprintf("/api/v1/dag-runs/%s/%s/steps/log/download", dagName, "non_existent_run"),
@@ -422,6 +483,12 @@ steps:
 	for name := range logs {
 		assert.True(t, strings.HasPrefix(name, "001-child_step/"))
 	}
+
+	code, headers, body := postLogForm(t, server,
+		fmt.Sprintf("/api/v1/dag-runs/%s/%s/sub-dag-runs/%s/steps/log/download", dagName, startBody.DagRunId, subDAGRunID), "")
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, disposition, headers.Get("Content-Disposition"))
+	require.Equal(t, logs, readLogArchive(t, body))
 
 	root := server.Client().Get(fmt.Sprintf("/api/v1/dag-runs/%s/%s/steps/log/download", dagName, startBody.DagRunId)).
 		ExpectStatus(http.StatusOK).Send(t)

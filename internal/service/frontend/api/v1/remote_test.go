@@ -319,3 +319,39 @@ func TestRemoteStepLogDownloadAbort(t *testing.T) {
 	require.PanicsWithValue(t, http.ErrAbortHandler, func() { handler.ServeHTTP(recorder, request) })
 	require.Equal(t, "partial", recorder.Body.String())
 }
+
+func TestRemoteStepLogForm(t *testing.T) {
+	for _, suffix := range []string{"/steps/log/download", "/sub-dag-runs/child/steps/log/download"} {
+		t.Run(suffix, func(t *testing.T) {
+			remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, http.MethodGet, r.Method)
+				assert.Equal(t, "/api/v1/dag-runs/example/run"+suffix, r.URL.Path)
+				assert.Empty(t, r.URL.RawQuery)
+				body, err := io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				assert.Empty(t, body)
+				assert.Zero(t, r.ContentLength)
+				assert.Equal(t, "Bearer remote-token", r.Header.Get("Authorization"))
+				assert.Equal(t, "identity", r.Header.Get("Accept-Encoding"))
+				w.Header().Set("Content-Type", stepLogArchiveContentType)
+				w.Header().Set("Content-Disposition", `attachment; filename="remote.zip"`)
+				_, _ = w.Write([]byte("archive"))
+			}))
+			defer remote.Close()
+			resolver := remotenode.NewResolver([]config.RemoteNode{{Name: "edge", APIBaseURL: remote.URL + "/api/v1", AuthType: "token", AuthToken: "remote-token"}}, nil)
+			a := &API{
+				config:             &config.Config{Server: config.Server{BasePath: "/dagu", APIBasePath: "/api/v1", StrictValidation: true, Auth: config.Auth{Mode: config.AuthModeBuiltin}}},
+				authService:        remoteSyncAuthService{user: &auth.User{Role: auth.RoleAdmin, WorkspaceAccess: auth.AllWorkspaceAccess()}},
+				remoteNodeResolver: resolver,
+			}
+			router := chi.NewRouter()
+			require.NoError(t, a.ConfigureRoutes(t.Context(), router, time.Second))
+			request := httptest.NewRequest(http.MethodPost, "/dagu/api/v1/dag-runs/example/run"+suffix+"?remoteNode=edge", strings.NewReader("token=caller-token"))
+			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			require.Equal(t, "archive", recorder.Body.String())
+		})
+	}
+}
