@@ -1376,6 +1376,20 @@ steps:
 		assert.Contains(t, err.Error(), "reserved")
 	})
 
+	t.Run("RunManagedName", func(t *testing.T) {
+		t.Parallel()
+		for _, name := range []string{"DAG_RUN_WORK_DIR", "DAG_PARAMS_JSON", "PWD"} {
+			_, err := LoadYAML(context.Background(), []byte(`
+steps:
+  - id: fanout
+    call: child
+    pass_env: [`+name+`]
+`))
+			require.Error(t, err, name)
+			assert.Contains(t, err.Error(), "managed by Dagu", name)
+		}
+	})
+
 	t.Run("RequiresSubDAG", func(t *testing.T) {
 		t.Parallel()
 		_, err := LoadYAML(context.Background(), []byte(`

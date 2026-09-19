@@ -413,10 +413,16 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 		})
 		return runctx.NewContext(
 			ctx,
-			&ir.DAG{Name: "parent", Env: []string{"TODAY=2026-03-05"}},
+			&ir.DAG{
+				Name:       "parent",
+				Env:        []string{"TODAY=2026-03-05"},
+				ParamsJSON: `{"a":1}`,
+			},
 			"run-id",
-			"parent.log",
+			"/parent/host/parent.log",
 			runctx.WithSecrets(secrets),
+			runctx.WithWorkDir("/parent/host/workdir"),
+			runctx.WithArtifactDir("/parent/host/artifacts"),
 		)
 	}
 
@@ -473,11 +479,20 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 		require.Contains(t, got, "TODAY=2026-03-05")
 		require.NotContains(t, got, "API_TOKEN=s3cr3t")
 		require.NotContains(t, got, "HOME=/parent/home")
-		for _, env := range got {
-			key, _, _ := strings.Cut(env, "=")
-			require.False(t, strings.HasPrefix(strings.ToUpper(key), ir.ReservedEnvPrefix),
-				"reserved name %q must not be carried to a child run", key)
-		}
+		// Run-managed values describe the parent run and its host. A child that
+		// does not set its own would otherwise keep the parent's, which for a
+		// remote child is a path that does not exist on its machine.
+		require.Equal(t, []string{"TODAY=2026-03-05"}, got)
+	})
+
+	t.Run("ListRejectsRunManagedNames", func(t *testing.T) {
+		ctx := newCtx(t, nil)
+
+		got := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{
+			Names: []string{"DAG_RUN_WORK_DIR", "DAG_PARAMS_JSON", "PWD"},
+		})
+
+		require.Empty(t, got)
 	})
 
 	t.Run("NilRequestsNothing", func(t *testing.T) {

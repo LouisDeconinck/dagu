@@ -1531,21 +1531,24 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 	return runParams, nil
 }
 
-// isNonPassableEnvKey reports whether a name is never carried to a child
-// run. Reserved internal transport names would collide with the child's own
-// transport values, and tool-managed names point at the parent host's resolved
+// isNonPassableEnvKey reports whether a name is never carried to a child run.
+// Reserved internal transport names would collide with the child's own
+// transport values, run-managed names describe the parent run and the host it
+// executes on, and tool-managed names point at the parent host's resolved
 // toolset.
 func isNonPassableEnvKey(key string) bool {
 	return strings.HasPrefix(strings.ToUpper(key), ir.ReservedEnvPrefix) ||
+		runenv.IsReservedRunEnvKey(key) ||
 		dagutools.IsManagedEnvKey(key)
 }
 
 // resolveSubDAGPassEnv resolves the "KEY=value" pairs a child run receives
 // through the step's opt-in pass_env field.
 //
-// The whole-environment form carries the parent run's own values only: secrets,
-// host process values, and runtime-profile values are excluded because they are
-// either sensitive or meaningless on the host that runs the child.
+// The whole-environment form carries values the workflow itself declared.
+// Secrets, host process values, Dagu-managed run values, and runtime-profile
+// values are excluded because they are either sensitive or describe the parent
+// run and the host executing it rather than the child.
 //
 // The name-list form resolves each entry against the environment scope visible
 // to the calling step. It never reads the Dagu process environment directly,

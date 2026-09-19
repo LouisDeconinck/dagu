@@ -305,18 +305,25 @@ Rules:
   Duplicate names collapse to one.
 - Names beginning with `_DAGU_` (any case) are reserved for Dagu internal
   transport and are rejected.
+- Names Dagu manages for a run or a step are rejected. A child run resolves its
+  own, and the parent's describe the parent run and the host executing it:
+  `DAG_NAME`, `DAG_RUN_ID`, `DAG_RUN_LOG_FILE`, `DAG_RUN_STEP_NAME`,
+  `DAG_RUN_STEP_STDOUT_FILE`, `DAG_RUN_STEP_STDERR_FILE`, `DAG_RUN_STATUS`,
+  `DAG_RUN_WORK_DIR`, `DAG_RUN_ARTIFACTS_DIR`, `DAG_WIKI_DIR`, `DAG_DOCS_DIR`,
+  `DAG_PARAMS_JSON`, `DAGU_PARAMS_JSON`, `DAG_PUSHBACK*`, `PWD`, and the
+  internal retry markers.
 - A listed name resolves against the environment scope visible to the calling
   step. Resolution never reads the Dagu process environment directly, so a host
   process value reaches a child only when the operator's base environment policy
   already admits it into the run. A name that does not resolve produces a
   warning and contributes no value.
-- `pass_env: true` carries the run's own values only. It never carries secrets,
-  host process values, or runtime-profile values, because those are either
-  sensitive or describe the machine running the parent rather than the machine
-  running the child.
-- Neither form carries names reserved for Dagu internal transport (`_DAGU_*`) or
-  host-local tool environment values managed by the `tools` feature (`PATH`,
-  `AQUA_*`, `DAGU_TOOLS_MANIFEST`).
+- `pass_env: true` carries the values the workflow itself declared. It never
+  carries secrets, host process values, Dagu-managed run values, or
+  runtime-profile values, because those are either sensitive or describe the
+  machine running the parent rather than the machine running the child.
+- Neither form carries names reserved for Dagu internal transport (`_DAGU_*`),
+  names Dagu manages for a run or a step, or host-local tool environment values
+  managed by the `tools` feature (`PATH`, `AQUA_*`, `DAGU_TOOLS_MANIFEST`).
 - Passed values enter the child run environment scope as execution-scoped
   values. They sit above inherited process environment and DAG `env`
   declarations, and below protected Dagu-managed run environment values and

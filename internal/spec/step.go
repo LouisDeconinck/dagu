@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/cmdutil"
+	"github.com/dagucloud/dagu/v2/internal/cmn/runenv"
 	"github.com/dagucloud/dagu/v2/internal/cmn/signal"
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
 	"github.com/dagucloud/dagu/v2/internal/executor/registry"
@@ -2939,6 +2940,12 @@ func buildSubDAGPassEnv(s *step) (*ir.SubDAGPassEnv, error) {
 		if strings.HasPrefix(strings.ToUpper(name), ir.ReservedEnvPrefix) {
 			return nil, ir.NewValidationError("pass_env", s.PassEnv.Value(),
 				fmt.Errorf("%q is reserved for Dagu internal use and cannot be passed", name))
+		}
+		// Run-managed names describe the parent run and the host executing it,
+		// so the child must resolve its own rather than receive them.
+		if runenv.IsReservedRunEnvKey(name) {
+			return nil, ir.NewValidationError("pass_env", s.PassEnv.Value(),
+				fmt.Errorf("%q is managed by Dagu for each run and cannot be passed", name))
 		}
 		if _, dup := seen[name]; dup {
 			continue

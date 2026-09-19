@@ -421,6 +421,11 @@ func TestSubDAGPassedEnv(t *testing.T) {
 			file:        "invalid_pass_env_reserved_name.yaml",
 			stderrParts: []string{"pass_env", "_DAGU_INTERNAL_THING"},
 		},
+		{
+			name:        "rejected for a run-managed name",
+			file:        "invalid_pass_env_run_managed_name.yaml",
+			stderrParts: []string{"pass_env", "DAG_RUN_WORK_DIR"},
+		},
 	}
 	for _, tc := range invalidCases {
 		t.Run(tc.name, func(t *testing.T) {
