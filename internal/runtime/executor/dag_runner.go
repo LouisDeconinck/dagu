@@ -263,11 +263,14 @@ func (e *SubDAGExecutor) Retry(ctx context.Context, runParams RunParams, stepNam
 	if err := e.cancellationErr(ctx); err != nil {
 		return nil, err
 	}
+	// Only an explicit child retry path carries the parent's bypass scope.
+	// Automatic retries of a newly started child have no retry path.
+	bypassPreconditions := runctx.GetContext(ctx).BypassPreconditions && path.Step != ""
 	return e.subWorkflowRunner.Retry(runCtx, SubWorkflowRetryRequest{
 		SubWorkflowRequest:  req,
 		StepName:            stepName,
 		IncludeDownstream:   runctx.GetContext(ctx).IncludeDownstream,
-		BypassPreconditions: runctx.GetContext(ctx).BypassPreconditions,
+		BypassPreconditions: bypassPreconditions,
 	})
 }
 
