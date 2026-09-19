@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -172,7 +173,8 @@ func (e *EnvScope) ToSliceWithoutOrigin(origin string) []string {
 }
 
 // ToSliceWithoutOriginOrSources returns variables except entries from one
-// origin or from any of the given sources.
+// origin or from any of the given sources. The result is sorted so callers that
+// transmit or persist it produce a stable representation.
 func (e *EnvScope) ToSliceWithoutOriginOrSources(origin string, sources ...EnvSource) []string {
 	if e == nil {
 		return nil
@@ -192,6 +194,7 @@ func (e *EnvScope) ToSliceWithoutOriginOrSources(origin string, sources ...EnvSo
 	for key, value := range all {
 		result = append(result, key+"="+value)
 	}
+	sort.Strings(result)
 	return result
 }
 

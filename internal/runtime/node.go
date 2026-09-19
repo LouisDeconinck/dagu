@@ -1569,7 +1569,13 @@ func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) []stri
 		}
 		return envs
 	}
-	scope := GetEnv(ctx).Scope
+	// Read the step scope only when one exists. Asking for it unconditionally
+	// would build a fallback scope backed by the raw process environment, which
+	// is the boundary this field must not cross.
+	scope := GetDAGContext(ctx).EnvScope
+	if stepEnv, ok := LookupEnv(ctx); ok {
+		scope = stepEnv.Scope
+	}
 	var envs []string
 	for _, name := range passEnv.Names {
 		if isNonPassableEnvKey(name) {
@@ -1577,12 +1583,19 @@ func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) []stri
 				tag.String("env", name))
 			continue
 		}
-		if value, ok := scope.Get(name); ok {
-			envs = append(envs, name+"="+value)
+		entry, ok := scope.GetEntry(name)
+		if !ok {
+			logger.Warn(ctx, "pass_env variable not found in the parent environment",
+				tag.String("env", name))
 			continue
 		}
-		logger.Warn(ctx, "pass_env variable not found in the parent environment",
-			tag.String("env", name))
+		if entry.Source == cmnvalue.EnvSourceSecret {
+			// The child receives the value as an ordinary run value, so it does
+			// not mask it, and a dispatched child run records it on disk.
+			logger.Warn(ctx, "pass_env is passing a secret value to a child run; the child does not mask it",
+				tag.String("env", name))
+		}
+		envs = append(envs, name+"="+entry.Value)
 	}
 	return envs
 }

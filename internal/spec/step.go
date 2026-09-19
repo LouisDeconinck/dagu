@@ -2907,10 +2907,6 @@ func buildStepApproval(_ stepBuildContext, s *step, result *ir.Step) error {
 	return nil
 }
 
-// envVarNamePattern is the accepted environment variable name syntax for
-// pass_env list entries.
-var envVarNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
 // buildSubDAGPassEnv parses the optional pass_env field into its IR
 // representation. Returns nil when no values are passed.
 func buildSubDAGPassEnv(s *step) (*ir.SubDAGPassEnv, error) {
@@ -2932,7 +2928,7 @@ func buildSubDAGPassEnv(s *step) (*ir.SubDAGPassEnv, error) {
 	seen := make(map[string]struct{}, len(names))
 	for _, name := range names {
 		name = strings.TrimSpace(name)
-		if !envVarNamePattern.MatchString(name) {
+		if !cmnvalue.ValidEnvName(name) {
 			return nil, ir.NewValidationError("pass_env", s.PassEnv.Value(),
 				fmt.Errorf("invalid environment variable name %q", name))
 		}

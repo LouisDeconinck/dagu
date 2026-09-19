@@ -301,6 +301,8 @@ Rules:
   through queue persistence.
 - `pass_env` is evaluated when the child run is created. Every represented child
   run of a `parallel` step receives the same requested configuration.
+- Resolved values are ordered by name so a dispatched child run produces the
+  same record on every resolution.
 - Each list entry must match `^[A-Za-z_][A-Za-z0-9_]*$` after trimming.
   Duplicate names collapse to one.
 - Names beginning with `_DAGU_` (any case) are reserved for Dagu internal
@@ -333,10 +335,11 @@ Rules:
 
 Secrets:
 
-- A secret named explicitly in a `pass_env` list is passed. It reaches the child
-  as an ordinary execution value, so the child does not classify it as a secret
-  and does not mask it in that run's logs or outputs. For a child run dispatched
-  to a worker, the value is also written to the coordinator's dispatch record.
+- A secret named explicitly in a `pass_env` list is passed, and the parent run
+  logs a warning when it does. It reaches the child as an ordinary execution
+  value, so the child does not classify it as a secret and does not mask it in
+  that run's logs or outputs. For a child run dispatched to a worker, the value
+  is also written to the coordinator's dispatch record.
 - Declaring the secret in the child's own `secrets:` field is preferred. A child
   that declares a secret resolves it through the secret provider and keeps it
   masked.

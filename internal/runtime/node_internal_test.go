@@ -495,6 +495,21 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 		require.Empty(t, got)
 	})
 
+	t.Run("AllIsOrderedForStableTransport", func(t *testing.T) {
+		ctx := config.WithConfig(context.Background(), &config.Config{})
+		ctx = runctx.NewContext(ctx,
+			&ir.DAG{Name: "parent", Env: []string{"B=2", "A=1", "C=3", "D=4", "E=5"}},
+			"run-id", "parent.log")
+
+		first := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true})
+		require.Equal(t, []string{"A=1", "B=2", "C=3", "D=4", "E=5"}, first)
+		// The value is serialized into the dispatch record and sent to a worker,
+		// so repeated resolution must produce the same representation.
+		for range 20 {
+			require.Equal(t, first, resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true}))
+		}
+	})
+
 	t.Run("NilRequestsNothing", func(t *testing.T) {
 		require.Nil(t, resolveSubDAGPassEnv(newCtx(t, nil), nil))
 	})
