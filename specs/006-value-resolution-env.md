@@ -290,8 +290,11 @@ therefore does not restrict what an in-process child observes.
 Forms:
 
 - `pass_env: true` passes the parent run's own environment values as they exist
-  when the step starts the child run.
-- `pass_env: [NAME, ...]` passes only the listed environment names.
+  when the step starts the child run. It reads the run scope, so it does not
+  carry step-scoped values such as step `env` declarations or step outputs.
+- `pass_env: [NAME, ...]` passes only the listed environment names. It reads the
+  scope visible to the calling step, so a listed name may resolve to a step
+  `env` declaration or a predecessor step output as well as a run value.
 - Omitting `pass_env`, or setting it to `false`, passes nothing beyond params.
 
 Rules:

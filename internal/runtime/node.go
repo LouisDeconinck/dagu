@@ -1538,7 +1538,7 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 // toolset.
 func isNonPassableEnvKey(key string) bool {
 	return strings.HasPrefix(strings.ToUpper(key), ir.ReservedEnvPrefix) ||
-		runenv.IsReservedRunEnvKey(key) ||
+		runenv.IsNonTransferableRunEnvKey(key) ||
 		dagutools.IsManagedEnvKey(key)
 }
 

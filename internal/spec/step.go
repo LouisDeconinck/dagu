@@ -2939,7 +2939,7 @@ func buildSubDAGPassEnv(s *step) (*ir.SubDAGPassEnv, error) {
 		}
 		// Run-managed names describe the parent run and the host executing it,
 		// so the child must resolve its own rather than receive them.
-		if runenv.IsReservedRunEnvKey(name) {
+		if runenv.IsNonTransferableRunEnvKey(name) {
 			return nil, ir.NewValidationError("pass_env", s.PassEnv.Value(),
 				fmt.Errorf("%q is managed by Dagu for each run and cannot be passed", name))
 		}

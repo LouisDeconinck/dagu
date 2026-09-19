@@ -495,6 +495,22 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 		require.Empty(t, got)
 	})
 
+	t.Run("AllSkipsStepScopedValues", func(t *testing.T) {
+		ctx := newCtx(t, nil)
+		env := NewEnv(ctx, ir.Step{Name: "call_sub"})
+		env.Scope = env.Scope.WithEntries(map[string]string{
+			"STEP_ONLY": "step-value",
+		}, cmnvalue.EnvSourceStepEnv)
+		ctx = WithEnv(ctx, env)
+
+		// The whole-environment form reads the run scope, so step-scoped values
+		// reach a child only when named explicitly.
+		require.NotContains(t, resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true}),
+			"STEP_ONLY=step-value")
+		require.Equal(t, []string{"STEP_ONLY=step-value"},
+			resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{Names: []string{"STEP_ONLY"}}))
+	})
+
 	t.Run("AllIsOrderedForStableTransport", func(t *testing.T) {
 		ctx := config.WithConfig(context.Background(), &config.Config{})
 		ctx = runctx.NewContext(ctx,
