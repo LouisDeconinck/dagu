@@ -1570,6 +1570,8 @@ func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) []stri
 	var envs []string
 	for _, name := range passEnv.Names {
 		if isNonPassableEnvKey(name) {
+			logger.Warn(ctx, "pass_env variable is reserved or host-local and was not passed",
+				tag.String("env", name))
 			continue
 		}
 		if value, ok := scope.Get(name); ok {
