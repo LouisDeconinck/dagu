@@ -1955,11 +1955,11 @@
           "deprecated": true,
           "description": "Deprecated name of a DAG to execute as a sub dag-run. Use action: dag.run with with.dag."
         },
-        "inherit_env": {
+        "pass_env": {
           "oneOf": [
             {
               "type": "boolean",
-              "description": "true inherits the parent run environment in the sub dag-run; false (default) inherits nothing extra."
+              "description": "true passes the parent run's own environment values, excluding secrets and host process values; false (default) passes nothing extra."
             },
             {
               "type": "array",
@@ -1967,10 +1967,10 @@
                 "type": "string",
                 "pattern": "^\\s*[A-Za-z_][A-Za-z0-9_]*\\s*$"
               },
-              "description": "Names of parent environment variables to inherit in the sub dag-run."
+              "description": "Names of parent environment variables to pass to the sub dag-run. Each name must already resolve in the parent run environment."
             }
           ],
-          "description": "Opt-in parent environment inheritance for a sub-DAG step. Not supported for dag.enqueue."
+          "description": "Opt-in parent environment values handed to a sub dag-run. Not supported for dag.enqueue."
         },
         "params": {
           "oneOf": [

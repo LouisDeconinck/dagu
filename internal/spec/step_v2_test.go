@@ -1268,7 +1268,7 @@ handler_on:
 	assert.Equal(t, []string{"success"}, dag.HandlerOn.Success.Commands[0].Args)
 }
 
-func TestStepSchemaV2_InheritEnv(t *testing.T) {
+func TestStepSchemaV2_PassEnv(t *testing.T) {
 	t.Parallel()
 
 	t.Run("All", func(t *testing.T) {
@@ -1279,12 +1279,12 @@ steps:
     action: dag.run
     with:
       dag: child
-    inherit_env: true
+    pass_env: true
 `))
 		require.NoError(t, err)
 		require.NotNil(t, dag.Steps[0].SubDAG)
-		require.NotNil(t, dag.Steps[0].SubDAG.InheritEnv)
-		assert.True(t, dag.Steps[0].SubDAG.InheritEnv.All)
+		require.NotNil(t, dag.Steps[0].SubDAG.PassEnv)
+		assert.True(t, dag.Steps[0].SubDAG.PassEnv.All)
 	})
 
 	t.Run("List", func(t *testing.T) {
@@ -1293,12 +1293,12 @@ steps:
 steps:
   - id: fanout
     call: child
-    inherit_env: [TODAY, SINCE, GH_USER]
+    pass_env: [TODAY, SINCE, GH_USER]
 `))
 		require.NoError(t, err)
-		require.NotNil(t, dag.Steps[0].SubDAG.InheritEnv)
-		assert.False(t, dag.Steps[0].SubDAG.InheritEnv.All)
-		assert.Equal(t, []string{"TODAY", "SINCE", "GH_USER"}, dag.Steps[0].SubDAG.InheritEnv.Names)
+		require.NotNil(t, dag.Steps[0].SubDAG.PassEnv)
+		assert.False(t, dag.Steps[0].SubDAG.PassEnv.All)
+		assert.Equal(t, []string{"TODAY", "SINCE", "GH_USER"}, dag.Steps[0].SubDAG.PassEnv.Names)
 	})
 
 	t.Run("DuplicatesRemoved", func(t *testing.T) {
@@ -1307,10 +1307,10 @@ steps:
 steps:
   - id: fanout
     call: child
-    inherit_env: [TODAY, " TODAY ", TODAY]
+    pass_env: [TODAY, " TODAY ", TODAY]
 `))
 		require.NoError(t, err)
-		assert.Equal(t, []string{"TODAY"}, dag.Steps[0].SubDAG.InheritEnv.Names)
+		assert.Equal(t, []string{"TODAY"}, dag.Steps[0].SubDAG.PassEnv.Names)
 	})
 
 	t.Run("Disabled", func(t *testing.T) {
@@ -1319,10 +1319,10 @@ steps:
 steps:
   - id: fanout
     call: child
-    inherit_env: false
+    pass_env: false
 `))
 		require.NoError(t, err)
-		assert.Nil(t, dag.Steps[0].SubDAG.InheritEnv)
+		assert.Nil(t, dag.Steps[0].SubDAG.PassEnv)
 	})
 
 	t.Run("Parallel", func(t *testing.T) {
@@ -1333,12 +1333,12 @@ steps:
     action: dag.run
     with:
       dag: child
-    inherit_env: [TODAY]
+    pass_env: [TODAY]
     parallel: ${ORGS}
 `))
 		require.NoError(t, err)
-		require.NotNil(t, dag.Steps[0].SubDAG.InheritEnv)
-		assert.Equal(t, []string{"TODAY"}, dag.Steps[0].SubDAG.InheritEnv.Names)
+		require.NotNil(t, dag.Steps[0].SubDAG.PassEnv)
+		assert.Equal(t, []string{"TODAY"}, dag.Steps[0].SubDAG.PassEnv.Names)
 	})
 
 	t.Run("InvalidType", func(t *testing.T) {
@@ -1347,7 +1347,7 @@ steps:
 steps:
   - id: fanout
     call: child
-    inherit_env: TODAY
+    pass_env: TODAY
 `))
 		require.Error(t, err)
 	})
@@ -1358,7 +1358,7 @@ steps:
 steps:
   - id: fanout
     call: child
-    inherit_env: ["BAD-NAME"]
+    pass_env: ["BAD-NAME"]
 `))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid environment variable name")
@@ -1370,7 +1370,7 @@ steps:
 steps:
   - id: fanout
     call: child
-    inherit_env: [_DAGU_INTERNAL_STATE]
+    pass_env: [_DAGU_INTERNAL_STATE]
 `))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "reserved")
@@ -1382,10 +1382,10 @@ steps:
 steps:
   - id: hello
     run: echo hi
-    inherit_env: [TODAY]
+    pass_env: [TODAY]
 `))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "inherit_env")
+		assert.Contains(t, err.Error(), "pass_env")
 	})
 
 	t.Run("EnqueueRejected", func(t *testing.T) {
@@ -1396,10 +1396,10 @@ steps:
     action: dag.enqueue
     with:
       dag: child
-    inherit_env: [TODAY]
+    pass_env: [TODAY]
 `))
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "inherit_env is not supported for dag.enqueue")
+		assert.Contains(t, err.Error(), "pass_env is not supported for dag.enqueue")
 	})
 
 	t.Run("EnqueueRejectedDisabled", func(t *testing.T) {
@@ -1411,10 +1411,10 @@ steps:
     action: dag.enqueue
     with:
       dag: child
-    inherit_env: `+value+`
+    pass_env: `+value+`
 `))
-			require.Error(t, err, "inherit_env: %s", value)
-			assert.Contains(t, err.Error(), "inherit_env is not supported for dag.enqueue")
+			require.Error(t, err, "pass_env: %s", value)
+			assert.Contains(t, err.Error(), "pass_env is not supported for dag.enqueue")
 		}
 	})
 }

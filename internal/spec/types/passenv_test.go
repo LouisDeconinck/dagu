@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestInheritEnvValue_UnmarshalYAML(t *testing.T) {
+func TestPassEnvValue_UnmarshalYAML(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -79,7 +79,7 @@ func TestInheritEnvValue_UnmarshalYAML(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var v InheritEnvValue
+			var v PassEnvValue
 			err := v.UnmarshalYAML([]byte(tt.yaml))
 			if tt.wantErr {
 				assert.Error(t, err)

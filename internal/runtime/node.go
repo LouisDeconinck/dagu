@@ -1365,7 +1365,7 @@ func (n *Node) BuildSubDAGRuns(ctx context.Context, subDAG *ir.SubDAG) ([]SubDAG
 }
 
 func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]executor.RunParams, error) {
-	inheritedEnv := resolveSubDAGInheritedEnv(ctx, subDAG.InheritEnv)
+	passedEnv := resolveSubDAGPassEnv(ctx, subDAG.PassEnv)
 	parallel := n.Step().Parallel
 
 	// Single sub DAG execution (non-parallel)
@@ -1393,7 +1393,7 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 			Params:         params,
 			DAGName:        dagName,
 			WorkerSelector: workerSelector,
-			InheritedEnv:   inheritedEnv,
+			PassedEnv:      passedEnv,
 		}}, nil
 	}
 
@@ -1519,7 +1519,7 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 			ParallelItem:   parallelItem,
 			DAGName:        dagName,
 			WorkerSelector: workerSelector,
-			InheritedEnv:   inheritedEnv,
+			PassedEnv:      passedEnv,
 		}
 	}
 
@@ -1531,17 +1531,17 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 	return runParams, nil
 }
 
-// isNonInheritableEnvKey reports whether a name is never carried to a child
+// isNonPassableEnvKey reports whether a name is never carried to a child
 // run. Reserved internal transport names would collide with the child's own
 // transport values, and tool-managed names point at the parent host's resolved
 // toolset.
-func isNonInheritableEnvKey(key string) bool {
+func isNonPassableEnvKey(key string) bool {
 	return strings.HasPrefix(strings.ToUpper(key), ir.ReservedEnvPrefix) ||
 		dagutools.IsManagedEnvKey(key)
 }
 
-// resolveSubDAGInheritedEnv resolves the "KEY=value" pairs a child run receives
-// through the step's opt-in inherit_env field.
+// resolveSubDAGPassEnv resolves the "KEY=value" pairs a child run receives
+// through the step's opt-in pass_env field.
 //
 // The whole-environment form carries the parent run's own values only: secrets,
 // host process values, and runtime-profile values are excluded because they are
@@ -1550,16 +1550,16 @@ func isNonInheritableEnvKey(key string) bool {
 // The name-list form resolves each entry against the environment scope visible
 // to the calling step. It never reads the Dagu process environment directly,
 // because that would bypass the operator-controlled base environment allowlist.
-func resolveSubDAGInheritedEnv(ctx context.Context, inherit *ir.SubDAGEnvInheritance) []string {
-	if inherit == nil {
+func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) []string {
+	if passEnv == nil {
 		return nil
 	}
-	if inherit.All {
+	if passEnv.All {
 		all := GetDAGContext(ctx).PassableEnvs()
 		envs := make([]string, 0, len(all))
 		for _, env := range all {
 			key, _, _ := strings.Cut(env, "=")
-			if isNonInheritableEnvKey(key) {
+			if isNonPassableEnvKey(key) {
 				continue
 			}
 			envs = append(envs, env)
@@ -1568,15 +1568,15 @@ func resolveSubDAGInheritedEnv(ctx context.Context, inherit *ir.SubDAGEnvInherit
 	}
 	scope := GetEnv(ctx).Scope
 	var envs []string
-	for _, name := range inherit.Names {
-		if isNonInheritableEnvKey(name) {
+	for _, name := range passEnv.Names {
+		if isNonPassableEnvKey(name) {
 			continue
 		}
 		if value, ok := scope.Get(name); ok {
 			envs = append(envs, name+"="+value)
 			continue
 		}
-		logger.Warn(ctx, "inherit_env variable not found in the parent environment",
+		logger.Warn(ctx, "pass_env variable not found in the parent environment",
 			tag.String("env", name))
 	}
 	return envs

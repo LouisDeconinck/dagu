@@ -229,17 +229,17 @@ func (s *Step) String() string {
 type SubDAG struct {
 	Name   string `json:"name,omitempty"`
 	Params string `json:"params,omitempty"`
-	// InheritEnv is the opt-in parent environment inheritance config.
-	// Nil preserves the default of no explicitly requested inheritance.
-	InheritEnv *SubDAGEnvInheritance `json:"inheritEnv,omitempty"`
+	// PassEnv selects parent environment values to hand to the child run.
+	// Nil preserves the default of passing nothing beyond params.
+	PassEnv *SubDAGPassEnv `json:"passEnv,omitempty"`
 }
 
-// SubDAGEnvInheritance describes which parent environment variables a sub DAG
-// run receives.
-type SubDAGEnvInheritance struct {
-	// All inherits the whole parent run environment.
+// SubDAGPassEnv describes which parent environment values a sub DAG run
+// receives beyond its own definition.
+type SubDAGPassEnv struct {
+	// All passes the parent run's own environment values.
 	All bool `json:"all,omitempty"`
-	// Names lists the parent environment variables to inherit.
+	// Names lists the parent environment variables to pass.
 	Names []string `json:"names,omitempty"`
 }
 

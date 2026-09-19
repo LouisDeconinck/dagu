@@ -94,9 +94,9 @@ type step struct {
 	Call string `yaml:"call,omitempty"`
 	// Params specifies the parameters for the sub dag-run.
 	Params any `yaml:"params,omitempty"`
-	// InheritEnv specifies which parent environment variables the sub dag-run
-	// receives. Accepts a list of variable names or true to inherit all.
-	InheritEnv types.InheritEnvValue `yaml:"inherit_env,omitempty"`
+	// PassEnv specifies which parent environment variables the sub dag-run
+	// receives. Accepts a list of variable names or true to pass them all.
+	PassEnv types.PassEnvValue `yaml:"pass_env,omitempty"`
 	// Parallel specifies parallel execution configuration.
 	// Can be:
 	// - Direct array reference: parallel: ${ITEMS}
@@ -1989,13 +1989,13 @@ func validateSubDAG(result *ir.Step) error {
 			fmt.Errorf("action %q does not support call field", result.ExecutorConfig.Type),
 		)
 	}
-	// Queued child runs read their own DAG environment when dequeued; inherited
+	// Queued child runs read their own DAG environment when dequeued; passed
 	// values cannot be carried through queue persistence.
-	if result.SubDAG.InheritEnv != nil && result.ExecutorConfig.Type == ir.ExecutorTypeDAGEnqueue {
+	if result.SubDAG.PassEnv != nil && result.ExecutorConfig.Type == ir.ExecutorTypeDAGEnqueue {
 		return ir.NewValidationError(
-			"inherit_env",
-			result.SubDAG.InheritEnv,
-			fmt.Errorf("inherit_env is not supported for dag.enqueue"),
+			"pass_env",
+			result.SubDAG.PassEnv,
+			fmt.Errorf("pass_env is not supported for dag.enqueue"),
 		)
 	}
 	return nil
@@ -2907,38 +2907,38 @@ func buildStepApproval(_ stepBuildContext, s *step, result *ir.Step) error {
 }
 
 // envVarNamePattern is the accepted environment variable name syntax for
-// inherit_env list entries.
+// pass_env list entries.
 var envVarNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// buildSubDAGEnvInheritance parses the optional inherit_env field into its IR
-// representation. Returns nil when inheritance is disabled.
-func buildSubDAGEnvInheritance(s *step) (*ir.SubDAGEnvInheritance, error) {
-	// Queued child runs read their own DAG environment when dequeued; inherited
+// buildSubDAGPassEnv parses the optional pass_env field into its IR
+// representation. Returns nil when no values are passed.
+func buildSubDAGPassEnv(s *step) (*ir.SubDAGPassEnv, error) {
+	// Queued child runs read their own DAG environment when dequeued; passed
 	// values cannot be carried through queue persistence. Reject any explicit
-	// inherit_env value on dag.enqueue, including a disabling one.
-	if s.Type == ir.ExecutorTypeDAGEnqueue && !s.InheritEnv.IsZero() {
-		return nil, ir.NewValidationError("inherit_env", s.InheritEnv.Value(),
-			fmt.Errorf("inherit_env is not supported for dag.enqueue"))
+	// pass_env value on dag.enqueue, including a disabling one.
+	if s.Type == ir.ExecutorTypeDAGEnqueue && !s.PassEnv.IsZero() {
+		return nil, ir.NewValidationError("pass_env", s.PassEnv.Value(),
+			fmt.Errorf("pass_env is not supported for dag.enqueue"))
 	}
-	if !s.InheritEnv.Enabled() {
+	if !s.PassEnv.Enabled() {
 		return nil, nil
 	}
-	if s.InheritEnv.All() {
-		return &ir.SubDAGEnvInheritance{All: true}, nil
+	if s.PassEnv.All() {
+		return &ir.SubDAGPassEnv{All: true}, nil
 	}
-	names := s.InheritEnv.Names()
+	names := s.PassEnv.Names()
 	result := make([]string, 0, len(names))
 	seen := make(map[string]struct{}, len(names))
 	for _, name := range names {
 		name = strings.TrimSpace(name)
 		if !envVarNamePattern.MatchString(name) {
-			return nil, ir.NewValidationError("inherit_env", s.InheritEnv.Value(),
+			return nil, ir.NewValidationError("pass_env", s.PassEnv.Value(),
 				fmt.Errorf("invalid environment variable name %q", name))
 		}
-		// Names reserved for Dagu internal transport cannot be inherited.
+		// Names reserved for Dagu internal transport cannot be passed.
 		if strings.HasPrefix(strings.ToUpper(name), ir.ReservedEnvPrefix) {
-			return nil, ir.NewValidationError("inherit_env", s.InheritEnv.Value(),
-				fmt.Errorf("%q is reserved for Dagu internal use and cannot be inherited", name))
+			return nil, ir.NewValidationError("pass_env", s.PassEnv.Value(),
+				fmt.Errorf("%q is reserved for Dagu internal use and cannot be passed", name))
 		}
 		if _, dup := seen[name]; dup {
 			continue
@@ -2946,7 +2946,7 @@ func buildSubDAGEnvInheritance(s *step) (*ir.SubDAGEnvInheritance, error) {
 		seen[name] = struct{}{}
 		result = append(result, name)
 	}
-	return &ir.SubDAGEnvInheritance{Names: result}, nil
+	return &ir.SubDAGPassEnv{Names: result}, nil
 }
 
 // buildStepSubDAG parses the child ir.DAG definition and sets up the step to run a sub DAG.
@@ -2955,9 +2955,9 @@ func buildStepSubDAG(ctx stepBuildContext, s *step, result *ir.Step) error {
 
 	// if the call field is not set, return nil.
 	if name == "" {
-		if s.InheritEnv.Enabled() {
-			return ir.NewValidationError("inherit_env", s.InheritEnv.Value(),
-				fmt.Errorf("inherit_env requires a sub DAG call"))
+		if s.PassEnv.Enabled() {
+			return ir.NewValidationError("pass_env", s.PassEnv.Value(),
+				fmt.Errorf("pass_env requires a sub DAG call"))
 		}
 		return nil
 	}
@@ -2991,12 +2991,12 @@ func buildStepSubDAG(ctx stepBuildContext, s *step, result *ir.Step) error {
 		paramsStr = strings.Join(paramsToJoin, " ")
 	}
 
-	inheritEnv, err := buildSubDAGEnvInheritance(s)
+	passEnv, err := buildSubDAGPassEnv(s)
 	if err != nil {
 		return err
 	}
 
-	result.SubDAG = &ir.SubDAG{Name: name, Params: paramsStr, InheritEnv: inheritEnv}
+	result.SubDAG = &ir.SubDAG{Name: name, Params: paramsStr, PassEnv: passEnv}
 
 	// Set executor type based on whether parallel execution is configured
 	if result.Parallel != nil {

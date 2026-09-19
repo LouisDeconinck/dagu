@@ -676,8 +676,9 @@ func inProcessLoadOptions(
 
 func inProcessExtraEnvs(rCtx runctx.Context, req executor.SubWorkflowRequest) []string {
 	envs := inheritedEnvForLocalRunner(rCtx.InheritedEnvs())
-	// Explicitly inherited values win over the implicit inherited set.
-	envs = append(envs, req.InheritedEnv...)
+	// A local child already receives the parent run scope implicitly. Values the
+	// step passed explicitly are applied after it so they win on conflict.
+	envs = append(envs, req.PassedEnv...)
 	if req.ParallelItem != "" {
 		envs = append(envs, ir.ParallelItemVariable+"="+req.ParallelItem)
 	}

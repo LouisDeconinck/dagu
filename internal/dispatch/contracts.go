@@ -49,9 +49,9 @@ type DispatchTask struct {
 	Step         string
 	Params       string
 	ParallelItem string
-	// InheritedEnv carries resolved "KEY=value" pairs the parent opted to share
-	// with the child run via the step's inherit_env field.
-	InheritedEnv   []string
+	// PassedEnv carries resolved "KEY=value" pairs the parent opted to share
+	// with the child run via the step's pass_env field.
+	PassedEnv      []string
 	QueueName      string
 	WorkerID       string
 	TargetWorkerID string

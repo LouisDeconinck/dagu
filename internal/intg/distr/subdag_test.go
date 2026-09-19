@@ -637,7 +637,7 @@ steps:
 	})
 }
 
-func TestSubDAG_InheritEnvDistributed(t *testing.T) {
+func TestSubDAG_PassEnvDistributed(t *testing.T) {
 	readChildResult := func(t *testing.T, f *testFixture) string {
 		t.Helper()
 		parentStatus, err := f.latestStatus()
@@ -671,7 +671,7 @@ steps:
     action: dag.run
     with:
       dag: env-child
-    inherit_env: [TODAY, GH_USER]
+    pass_env: [TODAY, GH_USER]
 
 ---
 name: env-child
@@ -700,7 +700,7 @@ steps:
     action: dag.run
     with:
       dag: env-child
-    inherit_env: true
+    pass_env: true
 
 ---
 name: env-child
@@ -731,7 +731,7 @@ steps:
     action: dag.run
     with:
       dag: env-child
-    inherit_env: [API_TOKEN]
+    pass_env: [API_TOKEN]
 
 ---
 name: env-child
@@ -789,7 +789,7 @@ steps:
     with:
       dag: env-child
       params: "ITEM_ID=${ITEM.id}"
-    inherit_env: [TODAY]
+    pass_env: [TODAY]
     parallel:
       items:
         - id: a

@@ -197,11 +197,11 @@ func WithExternalStepRetry(enabled bool) TaskOption {
 	}
 }
 
-// WithInheritedEnv sets the resolved parent environment values the child run
-// receives through the step's inherit_env field.
-func WithInheritedEnv(envs []string) TaskOption {
+// WithPassedEnv sets the resolved parent environment values the child run
+// receives through the step's pass_env field.
+func WithPassedEnv(envs []string) TaskOption {
 	return func(task *dispatch.DispatchTask) {
-		task.InheritedEnv = append([]string(nil), envs...)
+		task.PassedEnv = append([]string(nil), envs...)
 	}
 }
 

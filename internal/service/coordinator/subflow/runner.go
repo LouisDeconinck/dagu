@@ -383,8 +383,8 @@ func (r *Runner) taskOptions(
 	if req.ParallelItem != "" {
 		options = append(options, executor.WithParallelItem(req.ParallelItem))
 	}
-	if len(req.InheritedEnv) > 0 {
-		options = append(options, executor.WithInheritedEnv(req.InheritedEnv))
+	if len(req.PassedEnv) > 0 {
+		options = append(options, executor.WithPassedEnv(req.PassedEnv))
 	}
 	if baseConfig := subWorkflowBaseConfig(req); len(baseConfig) > 0 {
 		options = append(options, executor.WithBaseConfig(string(baseConfig), subWorkflowBaseWorkspace(req)))

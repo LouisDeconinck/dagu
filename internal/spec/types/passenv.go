@@ -9,23 +9,23 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// InheritEnvValue represents the opt-in parent environment inheritance setting
-// for a sub-DAG step.
+// PassEnvValue represents the opt-in set of parent environment values a
+// sub-DAG step hands to the child run it starts.
 //
 // YAML examples:
 //
-//	inherit_env: true                  # inherit the whole parent run environment
-//	inherit_env: [TODAY, GH_USER]      # inherit only the listed variables
-//	inherit_env: false                 # inherit nothing (default)
-type InheritEnvValue struct {
+//	pass_env: true                  # pass the parent run environment
+//	pass_env: [TODAY, GH_USER]      # pass only the listed variables
+//	pass_env: false                 # pass nothing (default)
+type PassEnvValue struct {
 	raw   any      // Original value for error reporting
 	isSet bool     // Whether the field was set in YAML
-	all   bool     // Whether to inherit the whole parent run environment
-	names []string // Variable names to inherit
+	all   bool     // Whether to pass the whole parent run environment
+	names []string // Variable names to pass
 }
 
 // UnmarshalYAML implements BytesUnmarshaler for goccy/go-yaml.
-func (s *InheritEnvValue) UnmarshalYAML(data []byte) error {
+func (s *PassEnvValue) UnmarshalYAML(data []byte) error {
 	s.isSet = true
 
 	var raw any
@@ -63,16 +63,16 @@ func (s *InheritEnvValue) UnmarshalYAML(data []byte) error {
 }
 
 // IsZero returns true if the value was not set in YAML.
-func (s InheritEnvValue) IsZero() bool { return !s.isSet }
+func (s PassEnvValue) IsZero() bool { return !s.isSet }
 
-// Enabled returns true when the value requests inheritance (all or names).
-func (s InheritEnvValue) Enabled() bool { return s.isSet && (s.all || len(s.names) > 0) }
+// Enabled returns true when the value requests passing values (all or names).
+func (s PassEnvValue) Enabled() bool { return s.isSet && (s.all || len(s.names) > 0) }
 
-// All returns true when the value requests inheriting every parent variable.
-func (s InheritEnvValue) All() bool { return s.all }
+// All returns true when the value requests passing every parent variable.
+func (s PassEnvValue) All() bool { return s.all }
 
 // Names returns the listed variable names.
-func (s InheritEnvValue) Names() []string { return s.names }
+func (s PassEnvValue) Names() []string { return s.names }
 
 // Value returns the original raw value for error reporting.
-func (s InheritEnvValue) Value() any { return s.raw }
+func (s PassEnvValue) Value() any { return s.raw }

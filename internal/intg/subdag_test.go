@@ -960,7 +960,7 @@ steps:
 	})
 }
 
-func TestSubDAG_InheritEnv(t *testing.T) {
+func TestSubDAG_PassEnv(t *testing.T) {
 	readChildResult := func(t *testing.T, th test.Command, parentName, dagRunID string) string {
 		t.Helper()
 		ctx := context.Background()
@@ -995,11 +995,11 @@ steps:
   - name: call_sub
     action: dag.run
     with:
-      dag: sub_inherit_env
-    inherit_env: [TODAY, GH_USER]
+      dag: sub_pass_env
+    pass_env: [TODAY, GH_USER]
 `)
 
-		th.CreateDAGFile(t, "sub_inherit_env.yaml", fmt.Sprintf(`
+		th.CreateDAGFile(t, "sub_pass_env.yaml", fmt.Sprintf(`
 steps:
   - name: report
     run: |
@@ -1015,7 +1015,7 @@ steps:
 
 		// Listed names resolve from the parent run environment. An in-process
 		// child also sees unlisted parent values like NOT_LISTED through the
-		// implicit local env scope; inherit_env only controls the explicit set
+		// implicit local env scope; pass_env only controls the explicit set
 		// forwarded to a child that runs on another host.
 		require.Equal(t, "TODAY=2026-03-05\nGH_USER=octocat\nNOT_LISTED=not-requested", readChildResult(t, th, "parent_inherit_selective", dagRunID))
 	})
@@ -1032,11 +1032,11 @@ steps:
   - name: call_sub
     action: dag.run
     with:
-      dag: sub_inherit_env
-    inherit_env: true
+      dag: sub_pass_env
+    pass_env: true
 `)
 
-		th.CreateDAGFile(t, "sub_inherit_env.yaml", fmt.Sprintf(`
+		th.CreateDAGFile(t, "sub_pass_env.yaml", fmt.Sprintf(`
 steps:
   - name: report
     run: |
@@ -1050,7 +1050,7 @@ steps:
 			ExpectedOut: []string{"DAG run finished"},
 		})
 
-		// GH_USER is a host process value, so inherit_env: true never forwards
+		// GH_USER is a host process value, so pass_env: true never forwards
 		// it. Only a name that is part of the parent run environment can be
 		// listed explicitly.
 		require.Equal(t, "TODAY=2026-03-05\nGH_USER=\nNOT_LISTED=not-requested", readChildResult(t, th, "parent_inherit_all", dagRunID))
@@ -1067,9 +1067,9 @@ steps:
   - name: call_sub
     action: dag.run
     with:
-      dag: sub_inherit_env_parallel
+      dag: sub_pass_env_parallel
       params: "ITEM_ID=${ITEM.id}"
-    inherit_env: [TODAY, GH_USER]
+    pass_env: [TODAY, GH_USER]
     parallel:
       items:
         - id: a
@@ -1077,7 +1077,7 @@ steps:
 
 ---
 
-name: sub_inherit_env_parallel
+name: sub_pass_env_parallel
 params:
   - ITEM_ID
 steps:
