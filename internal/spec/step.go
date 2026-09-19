@@ -1755,6 +1755,10 @@ func buildSingleCommand(val string, result *ir.Step) error {
 	if trimmed == "" {
 		return ir.NewValidationError("command", raw, ErrStepCommandIsEmpty)
 	}
+	if literalJQFilter(*result) {
+		result.Commands = []ir.CommandEntry{{CmdWithArgs: raw}}
+		return nil
+	}
 
 	// Harness uses command as a prompt, so preserve multiline text as a single
 	// command entry instead of reclassifying it as an inline script.
@@ -1792,6 +1796,12 @@ func buildSingleCommand(val string, result *ir.Step) error {
 	}
 
 	return nil
+}
+
+// Explicit arguments make jq filters literal source instead of workflow expressions.
+func literalJQFilter(step ir.Step) bool {
+	_, hasArgs := step.ExecutorConfig.Config["args"]
+	return step.ExecutorConfig.Type == "jq" && hasArgs
 }
 
 // buildMultipleCommands parses an array of commands and populates the Step.Commands field.

@@ -1060,6 +1060,10 @@ func (n *Node) evaluateCommandArgs(ctx context.Context) error {
 }
 
 func resolveStepCommandArgs(ctx context.Context, step ir.Step) (ir.Step, error) {
+	// Explicit jq arguments keep filter source literal; config values resolve separately.
+	if _, hasArgs := step.ExecutorConfig.Config["args"]; step.ExecutorConfig.Type == "jq" && hasArgs {
+		return step, nil
+	}
 	command := registry.CommandResolution(ctx, step)
 
 	if len(step.Commands) > 0 {
