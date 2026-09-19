@@ -360,12 +360,15 @@ Transient values:
 - Passed values are resolved when the parent step creates the child run, and are
   not persisted with the child run. A retry or restart that re-runs the parent
   step resolves them again.
-- A child run resumed directly from its own persisted state, such as by
-  approving a human task inside it, does not receive them. Because an
-  unresolved reference is preserved literally rather than failing, a step that
-  runs after such a resume reads `${NAME}` as text instead of the passed value.
-  A workflow that must survive resume should take the value as a child param or
-  declare it in the child, not rely on `pass_env`.
+- A child run resumed directly from its own persisted state does not receive
+  them. This covers approving an `approval` gate on a step inside the child,
+  pushing such a step back, and resuming an agent session inside the child.
+  Because an unresolved reference is preserved literally rather than failing, a
+  step that runs after such a resume reads `${NAME}` as text instead of the
+  passed value. A workflow that must survive one of these resumes should take
+  the value as a child param or declare it in the child, not rely on `pass_env`.
+  A human task cannot occur here, because Spec 031 rejects a child DAG that
+  contains one.
 
 ### Environment References
 
