@@ -5,6 +5,7 @@ package runtime
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -380,7 +381,10 @@ func (n *Node) captureOutput(ctx context.Context) error {
 		capturedOutputs = value
 	}
 
-	if step.HasOutputSchema() && !step.HasStructuredOutput() {
+	// A failed step leaves schemaOutput empty because the schema error is
+	// suppressed above in favor of the step's own error. Publishing it would
+	// make the output resolve as present and empty rather than absent.
+	if step.HasOutputSchema() && !step.HasStructuredOutput() && schemaOutput != "" {
 		n.setOutputValue(schemaOutput)
 		capturedOutputs = schemaOutput
 	}
@@ -407,7 +411,7 @@ func (n *Node) publishCapturedStepOutputs(ctx context.Context, payload string) e
 	}
 
 	var decoded any
-	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+	if err := decodeOutputJSON(payload, &decoded); err != nil {
 		return fmt.Errorf("failed to decode captured step outputs: %w", err)
 	}
 	// A payload that is not an object carries no addressable names, so an
@@ -419,7 +423,7 @@ func (n *Node) publishCapturedStepOutputs(ctx context.Context, payload string) e
 
 	if raw := n.State().StepOutputsValue; raw != nil && *raw != "" {
 		published := make(map[string]any)
-		if err := json.Unmarshal([]byte(*raw), &published); err != nil {
+		if err := decodeOutputJSON(*raw, &published); err != nil {
 			return fmt.Errorf("failed to decode step outputs before publishing captured outputs: %w", err)
 		}
 		maps.Copy(merged, published)
@@ -447,7 +451,13 @@ func (n *Node) evaluateOutputSchema(ctx context.Context, raw string) (string, er
 		return "", err
 	}
 
-	data, err := json.Marshal(decoded)
+	// The validator reports a json.Number as a string, so validation must run on
+	// the plain decode above and the precision-preserving decode must follow it.
+	// Collapsing the two would fail any schema typing an integer past float64.
+	if err := decodeOutputJSON(trimmed, &decoded); err != nil {
+		return "", fmt.Errorf("failed to decode stdout JSON for output_schema: %w", err)
+	}
+	data, err := marshalCaptured(decoded)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize validated output_schema value: %w", err)
 	}
@@ -506,7 +516,7 @@ func (n *Node) evaluateStructuredOutput(ctx context.Context, stdout string, stdo
 		result[key] = value
 	}
 
-	data, err := json.Marshal(result)
+	data, err := marshalCaptured(result)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize structured output: %w", err)
 	}
@@ -600,7 +610,7 @@ func (n *Node) resolveStructuredOutputEntry(ctx context.Context, key string, ent
 }
 
 func serializeOutputsValue(ctx context.Context, values map[string]any) (string, error) {
-	data, err := json.Marshal(values)
+	data, err := marshalCaptured(values)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize outputs: %w", err)
 	}
@@ -667,12 +677,43 @@ func (n *Node) readStructuredOutputSource(ctx context.Context, key string, entry
 	}
 }
 
+// marshalCaptured serializes captured output, leaving the characters a step
+// produced intact instead of escaping <, > and & as JSON escape sequences.
+func marshalCaptured(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+func decodeOutputJSON(raw string, target any) error {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if decoder.Decode(new(any)) != io.EOF {
+		return fmt.Errorf("expected one JSON value")
+	}
+	// Numbers keep their literal only where a float64 would round them.
+	switch t := target.(type) {
+	case *any:
+		*t = cmnvalue.NormalizeJSONNumbers(*t)
+	case *map[string]any:
+		cmnvalue.NormalizeJSONNumbers(*t)
+	}
+	return nil
+}
+
 func decodeStructuredOutputValue(ctx context.Context, key, raw, selectPath, decode string) (any, error) {
 	var decoded any
 
 	switch decode {
 	case ir.StepOutputDecodeJSON:
-		if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		if err := decodeOutputJSON(raw, &decoded); err != nil {
 			return nil, fmt.Errorf("%s: failed to decode JSON: %w", key, err)
 		}
 	case ir.StepOutputDecodeYAML:
