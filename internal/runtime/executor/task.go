@@ -121,6 +121,14 @@ func WithIncludeDownstream(enabled bool) TaskOption {
 	}
 }
 
+// WithBypassPreconditions requests that steps selected by a targeted retry
+// skip their preconditions.
+func WithBypassPreconditions(enabled bool) TaskOption {
+	return func(task *dispatch.DispatchTask) {
+		task.BypassPreconditions = enabled
+	}
+}
+
 // WithLabels sets additional labels (comma-separated) for the task.
 func WithLabels(labels string) TaskOption {
 	return func(task *dispatch.DispatchTask) {

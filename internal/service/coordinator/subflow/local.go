@@ -349,11 +349,12 @@ func (r *Local) Retry(ctx context.Context, req executor.SubWorkflowRetryRequest)
 	defer cleanup()
 
 	opts := rtagent.Options{
-		RetryTarget:       retryTarget,
-		StepRetry:         req.StepName,
-		IncludeDownstream: req.IncludeDownstream,
-		TriggerType:       inProcessRetryTriggerType(retryTarget),
-		WorkDir:           workspaceDir,
+		RetryTarget:         retryTarget,
+		StepRetry:           req.StepName,
+		IncludeDownstream:   req.IncludeDownstream,
+		BypassPreconditions: req.BypassPreconditions,
+		TriggerType:         inProcessRetryTriggerType(retryTarget),
+		WorkDir:             workspaceDir,
 	}
 	if req.Workspace != nil {
 		opts.WorkspaceSeed = &executor.WorkspaceSeed{

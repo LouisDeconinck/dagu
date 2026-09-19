@@ -56,6 +56,9 @@ type Node struct {
 	done         atomic.Bool
 	retryPolicy  RetryPolicy
 	cmdEvaluated atomic.Bool
+	// bypassPreconditions skips step precondition evaluation for this node.
+	// Step-retry plans set it when the retry asks to bypass preconditions.
+	bypassPreconditions bool
 
 	outputSchemaOnce sync.Once
 	outputSchema     *jsonschema.Resolved
@@ -1693,9 +1696,29 @@ func (n *Node) setupRepeatPolicy(ctx context.Context) error {
 	return nil
 }
 
+// SetBypassPreconditions marks the node to skip step precondition evaluation
+// when it executes. It is in-memory only and does not persist into node state.
+func (n *Node) SetBypassPreconditions(bypass bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.bypassPreconditions = bypass
+}
+
+// BypassPreconditions reports whether the node skips step precondition
+// evaluation.
+func (n *Node) BypassPreconditions() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.bypassPreconditions
+}
+
 func (node *Node) evalPreconditions(ctx context.Context) error {
 	conditions := node.Step().Preconditions
 	if len(conditions) == 0 {
+		return nil
+	}
+	if node.BypassPreconditions() {
+		logger.Infof(ctx, "Bypassing preconditions for \"%s\"", node.Name())
 		return nil
 	}
 	logger.Infof(ctx, "Checking preconditions for \"%s\"", node.Name())
