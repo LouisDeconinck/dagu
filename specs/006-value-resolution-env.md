@@ -343,22 +343,15 @@ Rules:
 
 Secrets:
 
-- A secret named explicitly in a `pass_env` list is passed, and the child run
-  classifies it as a secret. Steps read the real value, and the child masks that
-  value wherever it reports one: step output, step log files, persisted run
-  outputs, status and history records, router diagnostics, and message content
-  sent to an external model.
-- A passed secret enters the child scope at execution-scoped precedence, so the
-  child's own `secrets:` declaration and its selected runtime profile secrets
-  still win by name.
-- A step that consumes a passed secret is not eligible for build reuse, the same
-  as a step consuming a secret the run declared itself.
-- For a child run dispatched to a worker, the value is written to the
-  coordinator's dispatch record. Masking governs what a run reports, not what
-  the dispatch layer stores.
-- Declaring the secret in the child's own `secrets:` field remains preferred. A
-  child that declares a secret resolves it through the secret provider, which
-  keeps the value out of the dispatch record entirely.
+- `pass_env` never passes a secret. A name the workflow declares under
+  `secrets:` is rejected when the workflow is built. A name that reaches the run
+  scope as a secret another way, such as through a runtime profile, fails the
+  step when it runs.
+- The child declares the secret under its own `secrets:` instead. It is then
+  resolved through the secret provider in the child run, which keeps the value
+  masked there and keeps it out of the coordinator's dispatch record. A child
+  dispatched to a worker resolves it through the coordinator, which authorizes
+  the request against that run's lease.
 
 Transient values:
 

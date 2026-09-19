@@ -1376,6 +1376,23 @@ steps:
 		assert.Contains(t, err.Error(), "reserved")
 	})
 
+	t.Run("DeclaredSecret", func(t *testing.T) {
+		t.Parallel()
+		_, err := LoadYAML(context.Background(), []byte(`
+secrets:
+  - name: API_TOKEN
+    provider: env
+    key: SOURCE_TOKEN
+steps:
+  - id: fanout
+    call: child
+    pass_env: [API_TOKEN]
+`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "API_TOKEN")
+		assert.Contains(t, err.Error(), "secret")
+	})
+
 	t.Run("RunManagedName", func(t *testing.T) {
 		t.Parallel()
 		for _, name := range []string{"DAG_RUN_WORK_DIR", "DAG_PARAMS_JSON", "PWD"} {

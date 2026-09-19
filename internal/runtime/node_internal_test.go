@@ -403,6 +403,13 @@ func TestBuildJQArgs(t *testing.T) {
 // carry into a child run. The name list must never reach past the run's
 // environment scope into the Dagu process environment, because that scope is
 // the operator-controlled boundary for host values.
+func mustPassEnv(t *testing.T, ctx context.Context, passEnv *ir.SubDAGPassEnv) []string {
+	t.Helper()
+	envs, err := resolveSubDAGPassEnv(ctx, passEnv)
+	require.NoError(t, err)
+	return envs
+}
+
 func TestResolveSubDAGPassEnv(t *testing.T) {
 	newCtx := func(t *testing.T, secrets []string) context.Context {
 		t.Helper()
@@ -430,9 +437,11 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 		t.Setenv("DAGU_TEST_HOST_CREDENTIAL", "host-process-credential")
 		ctx := newCtx(t, nil)
 
-		got, _ := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{
+		got, err := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{
 			Names: []string{"DAGU_TEST_HOST_CREDENTIAL"},
 		})
+
+		require.NoError(t, err)
 
 		require.Empty(t, got)
 	})
@@ -444,32 +453,38 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 			"GREETING": "hello",
 		}, cmnvalue.EnvSourceStepEnv)
 
-		got, _ := resolveSubDAGPassEnv(WithEnv(ctx, env), &ir.SubDAGPassEnv{
+		got, err := resolveSubDAGPassEnv(WithEnv(ctx, env), &ir.SubDAGPassEnv{
 			Names: []string{"GREETING"},
 		})
+
+		require.NoError(t, err)
 
 		require.Equal(t, []string{"GREETING=hello"}, got)
 	})
 
-	t.Run("ListCarriesNamedSecretOnTheSecretChannel", func(t *testing.T) {
+	t.Run("ListRejectsSecret", func(t *testing.T) {
 		ctx := newCtx(t, []string{"API_TOKEN=s3cr3t"})
 
-		got, gotSecrets := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{
-			Names: []string{"API_TOKEN", "TODAY"},
+		got, err := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{
+			Names: []string{"API_TOKEN"},
 		})
 
-		// The child needs the real value to use it, but must learn it is a
-		// secret so it masks the value wherever it reports one.
-		require.Equal(t, []string{"API_TOKEN=s3cr3t"}, gotSecrets)
-		require.Equal(t, []string{"TODAY=2026-03-05"}, got)
+		// Passing it would put the value in the dispatch record and give the
+		// child something it cannot know to mask.
+		require.Error(t, err)
+		require.ErrorContains(t, err, "API_TOKEN")
+		require.ErrorContains(t, err, "secret")
+		require.Nil(t, got)
 	})
 
 	t.Run("ListSkipsToolManagedNames", func(t *testing.T) {
 		ctx := newCtx(t, nil)
 
-		got, _ := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{
+		got, err := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{
 			Names: []string{"PATH", "AQUA_ROOT_DIR"},
 		})
+
+		require.NoError(t, err)
 
 		require.Empty(t, got)
 	})
@@ -477,7 +492,9 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 	t.Run("AllExcludesSecretsAndHostValues", func(t *testing.T) {
 		ctx := newCtx(t, []string{"API_TOKEN=s3cr3t"})
 
-		got, _ := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true})
+		got, err := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true})
+
+		require.NoError(t, err)
 
 		require.Contains(t, got, "TODAY=2026-03-05")
 		require.NotContains(t, got, "API_TOKEN=s3cr3t")
@@ -491,9 +508,11 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 	t.Run("ListRejectsRunManagedNames", func(t *testing.T) {
 		ctx := newCtx(t, nil)
 
-		got, _ := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{
+		got, err := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{
 			Names: []string{"DAG_RUN_WORK_DIR", "DAG_PARAMS_JSON", "PWD"},
 		})
+
+		require.NoError(t, err)
 
 		require.Empty(t, got)
 	})
@@ -523,10 +542,10 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 
 		// The whole-environment form reads the run scope, so step-scoped values
 		// reach a child only when named explicitly.
-		all, _ := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true})
-		require.NotContains(t, all, "STEP_ONLY=step-value")
-		named, _ := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{Names: []string{"STEP_ONLY"}})
-		require.Equal(t, []string{"STEP_ONLY=step-value"}, named)
+		require.NotContains(t, mustPassEnv(t, ctx, &ir.SubDAGPassEnv{All: true}),
+			"STEP_ONLY=step-value")
+		require.Equal(t, []string{"STEP_ONLY=step-value"},
+			mustPassEnv(t, ctx, &ir.SubDAGPassEnv{Names: []string{"STEP_ONLY"}}))
 	})
 
 	t.Run("AllIsOrderedForStableTransport", func(t *testing.T) {
@@ -535,17 +554,20 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 			&ir.DAG{Name: "parent", Env: []string{"B=2", "A=1", "C=3", "D=4", "E=5"}},
 			"run-id", "parent.log")
 
-		first, _ := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true})
+		first, err := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true})
+
+		require.NoError(t, err)
 		require.Equal(t, []string{"A=1", "B=2", "C=3", "D=4", "E=5"}, first)
 		// The value is serialized into the dispatch record and sent to a worker,
 		// so repeated resolution must produce the same representation.
-		again, _ := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true})
+		again, err := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true})
+		require.NoError(t, err)
 		require.Equal(t, first, again)
 	})
 
 	t.Run("NilRequestsNothing", func(t *testing.T) {
-		envs, secrets := resolveSubDAGPassEnv(newCtx(t, nil), nil)
+		envs, err := resolveSubDAGPassEnv(newCtx(t, nil), nil)
+		require.NoError(t, err)
 		require.Nil(t, envs)
-		require.Nil(t, secrets)
 	})
 }

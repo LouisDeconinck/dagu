@@ -123,10 +123,6 @@ type RunParams struct {
 	// PassedEnv holds resolved "KEY=value" pairs the parent opted to share
 	// with the child run via the step's pass_env field.
 	PassedEnv []string
-	// PassedSecretEnv holds the same for values the parent holds as secrets.
-	// They are kept apart so the child classifies them as secrets and masks
-	// them in its own output.
-	PassedSecretEnv []string
 }
 
 // ChatMessageHandler is an interface for executors that handle chat session messages.

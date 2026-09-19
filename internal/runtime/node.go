@@ -1365,7 +1365,10 @@ func (n *Node) BuildSubDAGRuns(ctx context.Context, subDAG *ir.SubDAG) ([]SubDAG
 }
 
 func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]executor.RunParams, error) {
-	passedEnv, passedSecretEnv := resolveSubDAGPassEnv(ctx, subDAG.PassEnv)
+	passedEnv, err := resolveSubDAGPassEnv(ctx, subDAG.PassEnv)
+	if err != nil {
+		return nil, err
+	}
 	parallel := n.Step().Parallel
 
 	// Single sub DAG execution (non-parallel)
@@ -1389,12 +1392,11 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 		}
 		dagRunID := GenerateSubDAGRunIDForTarget(ctx, dagName, params, repeated)
 		return []executor.RunParams{{
-			RunID:           dagRunID,
-			Params:          params,
-			DAGName:         dagName,
-			WorkerSelector:  workerSelector,
-			PassedEnv:       passedEnv,
-			PassedSecretEnv: passedSecretEnv,
+			RunID:          dagRunID,
+			Params:         params,
+			DAGName:        dagName,
+			WorkerSelector: workerSelector,
+			PassedEnv:      passedEnv,
 		}}, nil
 	}
 
@@ -1515,13 +1517,12 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 			dagRunID = GenerateSubDAGRunIDForTarget(ctx, dagName, finalParams+"\x00"+parallelItem, repeated)
 		}
 		runParamsByID[dagRunID] = executor.RunParams{
-			RunID:           dagRunID,
-			Params:          finalParams,
-			ParallelItem:    parallelItem,
-			DAGName:         dagName,
-			WorkerSelector:  workerSelector,
-			PassedEnv:       passedEnv,
-			PassedSecretEnv: passedSecretEnv,
+			RunID:          dagRunID,
+			Params:         finalParams,
+			ParallelItem:   parallelItem,
+			DAGName:        dagName,
+			WorkerSelector: workerSelector,
+			PassedEnv:      passedEnv,
 		}
 	}
 
@@ -1549,9 +1550,7 @@ func isNonPassableEnvKey(key string) bool {
 }
 
 // resolveSubDAGPassEnv resolves the "KEY=value" pairs a child run receives
-// through the step's opt-in pass_env field. Values the parent holds as secrets
-// are returned separately so the child can classify them as secrets too and
-// keep masking them, rather than receiving them as ordinary run values.
+// through the step's opt-in pass_env field.
 //
 // The whole-environment form carries values the workflow itself declared.
 // Secrets, host process values, Dagu-managed run values, and runtime-profile
@@ -1561,13 +1560,17 @@ func isNonPassableEnvKey(key string) bool {
 // The name-list form resolves each entry against the environment scope visible
 // to the calling step. It never reads the Dagu process environment directly,
 // because that would bypass the operator-controlled base environment allowlist.
-func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) (envs, secretEnvs []string) {
+//
+// Resolving a name to a secret fails the step. Passing one would write the
+// value to the coordinator dispatch record and hand the child a value it cannot
+// know to mask, so the child must declare the secret itself instead.
+func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) ([]string, error) {
 	if passEnv == nil {
 		return nil, nil
 	}
 	if passEnv.All {
 		all := GetDAGContext(ctx).PassableEnvs()
-		envs = make([]string, 0, len(all))
+		envs := make([]string, 0, len(all))
 		for _, env := range all {
 			key, _, _ := strings.Cut(env, "=")
 			if isNonPassableEnvKey(key) {
@@ -1584,6 +1587,7 @@ func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) (envs,
 	if stepEnv, ok := LookupEnv(ctx); ok {
 		scope = stepEnv.Scope
 	}
+	var envs []string
 	for _, name := range passEnv.Names {
 		if isNonPassableEnvKey(name) {
 			logger.Warn(ctx, "pass_env variable is reserved or host-local and was not passed",
@@ -1597,12 +1601,13 @@ func resolveSubDAGPassEnv(ctx context.Context, passEnv *ir.SubDAGPassEnv) (envs,
 			continue
 		}
 		if entry.Source == cmnvalue.EnvSourceSecret {
-			secretEnvs = append(secretEnvs, name+"="+entry.Value)
-			continue
+			return nil, fmt.Errorf(
+				"pass_env cannot pass %q because it is a secret in this run; declare it in the child DAG's secrets instead",
+				name)
 		}
 		envs = append(envs, name+"="+entry.Value)
 	}
-	return envs, secretEnvs
+	return envs, nil
 }
 
 func resolveWorkerSelector(

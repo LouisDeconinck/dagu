@@ -2900,7 +2900,7 @@ func buildStepApproval(_ stepBuildContext, s *step, result *ir.Step) error {
 
 // buildSubDAGPassEnv parses the optional pass_env field into its IR
 // representation. Returns nil when no values are passed.
-func buildSubDAGPassEnv(s *step) (*ir.SubDAGPassEnv, error) {
+func buildSubDAGPassEnv(ctx stepBuildContext, s *step) (*ir.SubDAGPassEnv, error) {
 	// Queued child runs read their own DAG environment when dequeued; passed
 	// values cannot be carried through queue persistence. Reject any explicit
 	// pass_env value on dag.enqueue, including a disabling one.
@@ -2934,6 +2934,13 @@ func buildSubDAGPassEnv(s *step) (*ir.SubDAGPassEnv, error) {
 			return nil, ir.NewValidationError("pass_env", s.PassEnv.Value(),
 				fmt.Errorf("%q is managed by Dagu for each run and cannot be passed", name))
 		}
+		// A secret the run declares is rejected here so the workflow fails to
+		// build rather than at the step. A secret reaching the scope another
+		// way, such as through a runtime profile, is caught when the step runs.
+		if declaresSecret(ctx.dag, name) {
+			return nil, ir.NewValidationError("pass_env", s.PassEnv.Value(),
+				fmt.Errorf("%q is a secret; declare it in the child DAG's secrets instead of passing it", name))
+		}
 		if _, dup := seen[name]; dup {
 			continue
 		}
@@ -2941,6 +2948,19 @@ func buildSubDAGPassEnv(s *step) (*ir.SubDAGPassEnv, error) {
 		result = append(result, name)
 	}
 	return &ir.SubDAGPassEnv{Names: result}, nil
+}
+
+// declaresSecret reports whether the DAG declares a secret bound to name.
+func declaresSecret(dag *ir.DAG, name string) bool {
+	if dag == nil {
+		return false
+	}
+	for _, secret := range dag.Secrets {
+		if secret.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // buildStepSubDAG parses the child ir.DAG definition and sets up the step to run a sub DAG.
@@ -2985,7 +3005,7 @@ func buildStepSubDAG(ctx stepBuildContext, s *step, result *ir.Step) error {
 		paramsStr = strings.Join(paramsToJoin, " ")
 	}
 
-	passEnv, err := buildSubDAGPassEnv(s)
+	passEnv, err := buildSubDAGPassEnv(ctx, s)
 	if err != nil {
 		return err
 	}

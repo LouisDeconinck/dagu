@@ -719,41 +719,6 @@ steps:
 		require.Equal(t, "TODAY=2026-03-05 NL=not-requested", readChildResult(t, f))
 	})
 
-	t.Run("selectiveCarriesNamedSecret", func(t *testing.T) {
-		t.Setenv("PARENT_API_TOKEN", "s3cr3t")
-		f := newTestFixture(t, `
-secrets:
-  - name: API_TOKEN
-    provider: env
-    key: PARENT_API_TOKEN
-steps:
-  - name: run-child
-    action: dag.run
-    with:
-      dag: env-child
-    pass_env: [API_TOKEN]
-
----
-name: env-child
-worker_selector:
-  type: test-worker
-steps:
-  - name: report
-    run: echo "prefix-${API_TOKEN}-suffix"
-    output: RESULT
-`, withLabels(map[string]string{"type": "test-worker"}))
-		defer f.cleanup()
-
-		agent := f.dagWrapper.Agent()
-		agent.RunSuccess(t)
-
-		// The worker receives the value on the secret channel, so the child
-		// substitutes the real value and masks only the secret itself.
-		result := readChildResult(t, f)
-		require.Equal(t, "prefix-*******-suffix", result)
-		require.NotContains(t, result, "s3cr3t")
-	})
-
 	t.Run("defaultNoInheritance", func(t *testing.T) {
 		f := newTestFixture(t, `
 env:

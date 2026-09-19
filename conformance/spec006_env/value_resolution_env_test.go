@@ -406,23 +406,6 @@ func TestSubDAGPassedEnv(t *testing.T) {
 		dagu.ExpectFileContent("passed-named.txt", "[from-parent]")
 	})
 
-	t.Run("named secret is usable in the child and masked in its output", func(t *testing.T) {
-		t.Parallel()
-
-		dagu := harness.NewRunner(t)
-		result := dagu.RunWithEnv(
-			[]string{"SOURCE_PASS_SECRET=supersecret123"},
-			"start",
-			"pass_env_named_secret.yaml",
-		)
-		result.ExpectExitCode(0)
-		// The child surfaces the value through its own output, which the parent
-		// renders. The child wraps it, so masked output still proves the real
-		// value was substituted: only the secret itself is redacted.
-		require.Contains(t, result.Stdout(), "prefix-*******-suffix")
-		require.NotContains(t, result.Stdout(), "supersecret123")
-	})
-
 	invalidCases := []struct {
 		name        string
 		file        string
@@ -437,6 +420,11 @@ func TestSubDAGPassedEnv(t *testing.T) {
 			name:        "rejected for a reserved name",
 			file:        "invalid_pass_env_reserved_name.yaml",
 			stderrParts: []string{"pass_env", "_DAGU_INTERNAL_THING"},
+		},
+		{
+			name:        "rejected for a secret",
+			file:        "invalid_pass_env_secret.yaml",
+			stderrParts: []string{"pass_env", "API_TOKEN", "secret"},
 		},
 		{
 			name:        "rejected for a run-managed name",
