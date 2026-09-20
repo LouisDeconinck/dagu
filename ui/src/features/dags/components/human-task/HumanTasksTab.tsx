@@ -19,7 +19,10 @@ import type { JSONSchema } from '../../../../lib/schema-utils';
 import { buildParamSchemaUiSchema } from '../dag-execution/paramSchemaForm';
 import { schemaFormTemplates } from '../dag-execution/schemaFormTemplates';
 import { schemaFormWidgets } from '../dag-execution/schemaFormWidgets';
+import { ArtifactFilePreview } from '../artifacts/ArtifactFilePreview';
 import { I18nText } from '@/i18n/I18nText';
+import { useI18n } from '@/i18n/I18nProvider';
+import { Tab, Tabs } from '@/components/ui/tabs';
 
 type DAGRunDetails = components['schemas']['DAGRunDetails'];
 type HumanTaskNode = components['schemas']['Node'];
@@ -68,10 +71,19 @@ function HumanTaskCard({
 }) {
   const client = useClient();
   const remoteNode = useRemoteNode();
+  const { ts } = useI18n();
   const [formData, setFormData] = React.useState<FormData>({});
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const task = node.step.humanTask!;
+  const artifacts = task.artifacts ?? [];
+  const [selectedArtifact, setSelectedArtifact] = React.useState<string | null>(
+    null
+  );
+  const activeArtifact =
+    selectedArtifact && artifacts.includes(selectedArtifact)
+      ? selectedArtifact
+      : (artifacts[0] ?? null);
   const schema = (task.form ?? undefined) as JSONSchema | undefined;
   const hasForm = !!schema && Object.keys(schema).length > 0;
   const completionDisabled = !canExecute || submitting || !node.step.id;
@@ -130,6 +142,45 @@ function HumanTaskCard({
         <div className="text-sm font-semibold">{node.step.name}</div>
         <div className="whitespace-pre-wrap text-base">{task.prompt}</div>
       </div>
+
+      {artifacts.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-sm font-semibold">
+            <I18nText text={'Artifacts'} />
+          </div>
+          {dagRun.artifactsAvailable ? (
+            <>
+              {artifacts.length > 1 && (
+                <Tabs role="tablist" aria-label={ts('Task artifacts')}>
+                  {artifacts.map((artifact) => (
+                    <Tab
+                      key={artifact}
+                      role="tab"
+                      aria-selected={activeArtifact === artifact}
+                      isActive={activeArtifact === artifact}
+                      onClick={() => setSelectedArtifact(artifact)}
+                    >
+                      {artifact}
+                    </Tab>
+                  ))}
+                </Tabs>
+              )}
+              <ArtifactFilePreview
+                dagRunName={dagRun.name}
+                dagRunId={dagRun.dagRunId}
+                path={activeArtifact}
+                remoteNode={remoteNode}
+              />
+            </>
+          ) : (
+            <div className="rounded-lg border border-dashed border-border bg-muted/20 p-6 text-sm text-muted-foreground">
+              <I18nText
+                text={'Referenced artifacts are not available for this DAG run yet.'}
+              />
+            </div>
+          )}
+        </div>
+      )}
 
       {error && (
         <Alert variant="destructive">

@@ -16,6 +16,7 @@ import { useClient } from '@/hooks/api';
 import { HumanTasksTab } from '../HumanTasksTab';
 
 const postMock = vi.hoisted(() => vi.fn());
+const artifactPreviewMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/hooks/api', () => ({
   useClient: vi.fn(),
@@ -29,8 +30,31 @@ vi.mock('@/contexts/RemoteNodeContext', () => ({
   useRemoteNode: () => 'worker-a',
 }));
 
+vi.mock('../../artifacts/ArtifactFilePreview', () => ({
+  ArtifactFilePreview: ({
+    dagRunName,
+    dagRunId,
+    path,
+    remoteNode,
+  }: {
+    dagRunName: string;
+    dagRunId: string;
+    path: string | null;
+    remoteNode: string;
+  }) => {
+    artifactPreviewMock({ dagRunName, dagRunId, path, remoteNode });
+    return (
+      <div data-testid="artifact-preview">
+        {`${dagRunName}:${dagRunId}:${remoteNode}:${path}`}
+      </div>
+    );
+  },
+}));
+
 function humanTaskRun(
-  form?: Record<string, unknown>
+  form?: Record<string, unknown>,
+  artifacts?: string[],
+  artifactsAvailable = true
 ): components['schemas']['DAGRunDetails'] {
   return {
     name: 'deploy',
@@ -43,7 +67,7 @@ function humanTaskRun(
     autoRetryCount: 0,
     startedAt: '',
     finishedAt: '',
-    artifactsAvailable: false,
+    artifactsAvailable,
     log: '',
     nodes: [
       {
@@ -53,6 +77,7 @@ function humanTaskRun(
           humanTask: {
             prompt: 'Confirm the production release.',
             form,
+            artifacts,
           },
         },
         stdout: '',
@@ -80,6 +105,104 @@ afterEach(() => {
 });
 
 describe('HumanTasksTab', () => {
+  it('previews a referenced artifact with the current DAG-run context', () => {
+    render(
+      <HumanTasksTab
+        dagRun={humanTaskRun(undefined, ['changes.diff'])}
+        onChanged={vi.fn()}
+      />
+    );
+
+    expect(screen.getByTestId('artifact-preview')).toHaveTextContent(
+      'deploy:run-1:worker-a:changes.diff'
+    );
+    expect(
+      screen.getByRole('button', { name: 'Complete task' })
+    ).toBeEnabled();
+  });
+
+  it('switches between referenced artifacts', () => {
+    render(
+      <HumanTasksTab
+        dagRun={humanTaskRun(undefined, ['changes.diff', 'report.html'])}
+        onChanged={vi.fn()}
+      />
+    );
+
+    expect(screen.getByRole('tab', { name: 'changes.diff' })).toBeVisible();
+    fireEvent.click(screen.getByRole('tab', { name: 'report.html' }));
+
+    expect(screen.getByTestId('artifact-preview')).toHaveTextContent(
+      'deploy:run-1:worker-a:report.html'
+    );
+    expect(screen.getByRole('tab', { name: 'report.html' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    );
+  });
+
+  it('keeps the selected artifact when refreshed run data has the same paths', () => {
+    const { rerender } = render(
+      <HumanTasksTab
+        dagRun={humanTaskRun(undefined, ['changes.diff', 'report.html'])}
+        onChanged={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'report.html' }));
+    rerender(
+      <HumanTasksTab
+        dagRun={humanTaskRun(undefined, ['changes.diff', 'report.html'])}
+        onChanged={vi.fn()}
+      />
+    );
+
+    expect(screen.getByTestId('artifact-preview')).toHaveTextContent(
+      'deploy:run-1:worker-a:report.html'
+    );
+  });
+
+  it('does not pass a removed artifact to the preview during a refresh', () => {
+    const { rerender } = render(
+      <HumanTasksTab
+        dagRun={humanTaskRun(undefined, ['changes.diff', 'report.html'])}
+        onChanged={vi.fn()}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('tab', { name: 'report.html' }));
+    artifactPreviewMock.mockClear();
+    rerender(
+      <HumanTasksTab
+        dagRun={humanTaskRun(undefined, ['changes.diff'])}
+        onChanged={vi.fn()}
+      />
+    );
+
+    expect(artifactPreviewMock).not.toHaveBeenCalledWith(
+      expect.objectContaining({ path: 'report.html' })
+    );
+    expect(screen.getByTestId('artifact-preview')).toHaveTextContent(
+      'deploy:run-1:worker-a:changes.diff'
+    );
+  });
+
+  it('explains that referenced artifacts are unavailable instead of erroring', () => {
+    render(
+      <HumanTasksTab
+        dagRun={humanTaskRun(undefined, ['changes.diff'], false)}
+        onChanged={vi.fn()}
+      />
+    );
+
+    expect(screen.queryByTestId('artifact-preview')).toBeNull();
+    expect(
+      screen.getByText(
+        'Referenced artifacts are not available for this DAG run yet.'
+      )
+    ).toBeVisible();
+  });
+
   it('completes a task without a form using an empty object', async () => {
     const onChanged = vi.fn();
     render(<HumanTasksTab dagRun={humanTaskRun()} onChanged={onChanged} />);

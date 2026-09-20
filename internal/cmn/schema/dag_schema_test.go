@@ -1007,6 +1007,83 @@ steps:
             type: object
 `,
 		},
+		{
+			name: "ArtifactsList",
+			spec: `
+steps:
+  - id: review
+    action: human.task
+    with:
+      prompt: Review the generated reports
+      artifacts:
+        - changes.diff
+        - reports/test-report.html
+`,
+			valid: true,
+		},
+		{
+			name: "RejectArtifactsNonString",
+			spec: `
+steps:
+  - id: review
+    action: human.task
+    with:
+      prompt: Review
+      artifacts:
+        - changes.diff
+        - 1
+`,
+		},
+		{
+			name: "RejectAbsoluteArtifactPath",
+			spec: `
+steps:
+  - id: review
+    action: human.task
+    with:
+      prompt: Review
+      artifacts:
+        - /etc/passwd
+`,
+		},
+		{
+			name: "RejectArtifactParentSegment",
+			spec: `
+steps:
+  - id: review
+    action: human.task
+    with:
+      prompt: Review
+      artifacts:
+        - reports/../../secret
+`,
+		},
+		{
+			name: "AllowsUnresolvedReferenceArtifact",
+			spec: `
+steps:
+  - id: review
+    action: human.task
+    with:
+      prompt: Review
+      artifacts:
+        - "${params.OUT}/report.html"
+`,
+			valid: true,
+		},
+		{
+			name: "RejectArtifactsDuplicate",
+			spec: `
+steps:
+  - id: review
+    action: human.task
+    with:
+      prompt: Review
+      artifacts:
+        - changes.diff
+        - changes.diff
+`,
+		},
 	}
 
 	for _, tt := range tests {
