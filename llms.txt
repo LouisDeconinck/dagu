@@ -44,6 +44,7 @@ Load only the reference file that matches the task.
 - `human.task` is a processless root-DAG step with an explicit `id`, a required `with.prompt`, and an optional flat scalar form. A root DAG containing one can run locally or on a distributed worker. Every declared form property is a step output, published when submitted or defaulted, and available as `${steps.<step_id>.outputs.<name>}`.
 - `stdout.artifact` / `stderr.artifact` store command stdout/stderr directly as relative artifact paths, for example `stdout: {artifact: reports/report.md}`. Artifact outputs auto-enable artifacts unless `artifacts.enabled: false` is explicitly set, which is invalid.
 - `${step_id.stdout}` is a log file path, not stdout content.
+- Step `stdin:` pipes a file to the command's standard input, so `stdin: ${step_id.stdout}` replaces `cat "${step_id.stdout}" | command`. Only command and shell steps accept it.
 - Use `${context.*}` for run metadata in DAG YAML, for example `${context.dag.name}`, `${context.run.id}`, or `${context.paths.artifacts_dir}`. Unavailable context values remain unresolved text instead of becoming empty strings.
 - In a build step, `${inputs.<name>}` is the final input path and `${outputs.<name>}` is a fresh attempt staging path. Write file results only to the staging path; dependencies read the committed path as `${steps.<step_id>.outputs.<name>}`.
 - Do not read attempt-only `${step_id.stdout}`, `${step_id.stderr}`, or `${step_id.exit_code}` from potentially reusable producers. This also applies to `${step_id.output.<name>}` and `${step_id.outputs.<name>}`, including their whole-value `${step_id.output}` and `${step_id.outputs}` forms. Path-output steps cannot use `continue_on.mark_success`.
@@ -249,6 +250,7 @@ steps:
 Fields:
 
 - `run` - command string or multi-line shell script
+- `stdin` - optional file path piped to the command's standard input, for example `stdin: ${fetch.stdout}`
 - `with.shell` - shell interpreter, for example `/bin/bash`
 - `with.shell_args` - shell interpreter arguments
 - `with.shell_packages` - optional packages to install before execution
@@ -261,6 +263,9 @@ Notes:
 - Dagu sends pipes, redirects, `&&`, and `;` to the selected shell. It does not split that shell syntax into separate Dagu commands.
 - DAG-level `shell` and `shell_args` provide defaults for inherited `run` steps. Use `with.shell` and `with.shell_args` when one step needs a different shell invocation.
 - Dagu resolves `${...}` references before the shell runs. For large or arbitrary text, prefer `printenv VAR_NAME`, reading `${step_id.stdout}` as a file, or `action: template.render`.
+- `stdin` resolves `${...}` references before the command runs; `${step_id.stdout}` gives the path to that step's captured stdout file. A leading `~` expands, relative paths resolve against the step working directory, and the host process environment is not a fallback for `$NAME`.
+- A `stdin` path that resolves to nothing, or that still carries a reference, fails the step rather than silently leaving standard input empty.
+- `stdin` needs an action that can consume standard input. A DAG-level `container:` makes every inherited step a container step, and `ssh` feeds the remote shell its script over standard input, so neither accepts `stdin`.
 - Use scoped Dagu references for named values: `${consts.NAME}`, `${params.NAME}`, and `${env.NAME}`. Use shell `$NAME` only when the target shell should read the variable at execution time.
 - When large command output should become an artifact, write it to stdout/stderr and attach the stream directly instead of redirecting inside shell:
 
@@ -691,6 +696,29 @@ steps:
 ```
 
 Use `with.data` for inline JSON or `with.input` for a JSON file path. Do not set both.
+
+`with.args` binds named variables available as `$<key>` in the filter. Values keep their YAML type; string values, including nested strings, resolve Dagu references once through executor-config resolution. Reference-derived numeric strings need `tonumber` for numeric comparisons.
+
+Supplying `args`, including `{}`, makes the entire filter literal jq source. Pass Dagu references through `args`; steps without `args` retain their existing filter interpolation. Keys `name` and `$name` both bind `$name` and cannot be supplied together.
+
+```yaml
+params:
+  - MIN_PRICE: '4'
+steps:
+  - id: filter
+    action: jq.filter
+    with:
+      filter: '.items[] | select(.price > ($min_price | tonumber)) | .name'
+      data:
+        items:
+          - {name: apple, price: 5}
+          - {name: pear, price: 3}
+      raw: true
+      args:
+        min_price: ${params.MIN_PRICE}
+```
+
+Output: `apple`
 
 ## template.render
 
@@ -1192,10 +1220,10 @@ Stop and restart a DAG run: `dagu restart <dag-name> [--run-id/-r <id>]`
 Retry a previous DAG run using the same run ID.
 
 ```sh
-dagu retry <dag> --run-id/-r <id> [--step <name>] [--downstream] [--worker-id <id>]
+dagu retry <dag> --run-id/-r <id> [--step <name>] [--downstream] [--bypass-preconditions] [--worker-id <id>]
 ```
 
-`--step` retries only the selected step. Add `--downstream` to also reset every reachable descendant; unrelated branches keep their current status. `--downstream` requires `--step`.
+`--step` retries only the selected step. Add `--downstream` to also reset every reachable descendant; unrelated branches keep their current status. `--downstream` requires `--step`. Add `--bypass-preconditions` to skip step precondition evaluation for this retry; it also requires `--step` and a local CLI context. DAG-level preconditions and lifecycle handlers still apply. With `--sub-run-id <child-id>`, the bypass also reaches the selected child retry, including children dispatched to workers.
 
 ### dagu human-task complete
 
