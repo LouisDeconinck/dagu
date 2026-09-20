@@ -435,7 +435,25 @@ steps:
     run: ./deploy --window '${steps.review.outputs.window}' --ticket '${steps.review.outputs.ticket}'
 ```
 
-`with.prompt` is required and supports normal Dagu value references. `with.form` is optional; omit it for an acknowledgement-only task that accepts no input.
+`with.prompt` is required and supports normal Dagu value references. `with.form` is optional; omit it for an acknowledgement-only task that accepts no input. `with.artifacts` is optional and lists artifact-relative paths to show the operator as review context:
+
+```yaml
+steps:
+  - id: test
+    run: ./run-tests.sh
+    stdout:
+      artifact: reports/test-report.html
+
+  - id: review
+    depends: [test]
+    action: human.task
+    with:
+      prompt: The test report is attached. Approve the release?
+      artifacts:
+        - reports/test-report.html
+```
+
+Artifact paths reject absolute paths, `~`, and `..` segments. They are value-resolved when the task opens, like the prompt, and the resolved path is re-checked under the same rules, so a parameter cannot inject `..`. Referencing an artifact does not enable artifact storage; a step must still write it. A missing artifact never blocks completion.
 
 The form is a flat object JSON Schema:
 
