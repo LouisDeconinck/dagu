@@ -1568,16 +1568,19 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 			return nil, err
 		}
 
+		// Items that resolve to the same child run but carry different item
+		// values are separate runs, so give them separate ids before asking
+		// whether anything actually coalesces.
 		dagRunID := GenerateSubDAGRunIDForTarget(ctx, dagName, finalParams, repeated)
+		if idx, ok := indexByID[dagRunID]; ok && runParams[idx].ParallelItem != parallelItem {
+			dagRunID = GenerateSubDAGRunIDForTarget(ctx, dagName, finalParams+"\x00"+parallelItem, repeated)
+		}
 		if idx, ok := indexByID[dagRunID]; ok &&
 			!maps.Equal(runParams[idx].WorkerSelector, workerSelector) {
 			return nil, fmt.Errorf(
 				"parallel items resolve to the same sub-DAG run %q with different worker selectors",
 				dagRunID,
 			)
-		}
-		if idx, ok := indexByID[dagRunID]; ok && runParams[idx].ParallelItem != parallelItem {
-			dagRunID = GenerateSubDAGRunIDForTarget(ctx, dagName, finalParams+"\x00"+parallelItem, repeated)
 		}
 		runParam := executor.RunParams{
 			RunID:          dagRunID,

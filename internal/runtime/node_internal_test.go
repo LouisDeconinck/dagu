@@ -275,7 +275,10 @@ func TestBuildSubDAGRunsAddressesPreviousAttemptRuns(t *testing.T) {
 	require.Equal(t, firstAttempt, buildIDs(t, retried))
 }
 
-func TestBuildChildRunParams_SelectorConflict(t *testing.T) {
+// Routing each item to its own worker is the point of an item-scoped worker
+// selector, so items that share explicit params must still become separate
+// child runs rather than colliding on the selector they differ by.
+func TestBuildChildRunParams_ItemScopedSelectorFansOut(t *testing.T) {
 	t.Parallel()
 
 	subDAG := &ir.SubDAG{Name: "child", Params: "MODE=batch"}
@@ -291,9 +294,15 @@ func TestBuildChildRunParams_SelectorConflict(t *testing.T) {
 	ctx := NewContextForTest(context.Background(), dag, "root-run", "")
 	ctx = WithEnv(ctx, NewEnv(ctx, step))
 
-	_, err := NewNode(step, NodeState{}).buildChildRunParams(ctx, subDAG)
-	require.ErrorContains(t, err, "same sub-DAG run")
-	require.ErrorContains(t, err, "different worker selectors")
+	runs, err := NewNode(step, NodeState{}).buildChildRunParams(ctx, subDAG)
+	require.NoError(t, err)
+	require.Len(t, runs, 2)
+
+	require.Equal(t, "serverA", runs[0].ParallelItem)
+	require.Equal(t, map[string]string{"host": "serverA"}, runs[0].WorkerSelector)
+	require.Equal(t, "serverB", runs[1].ParallelItem)
+	require.Equal(t, map[string]string{"host": "serverB"}, runs[1].WorkerSelector)
+	require.NotEqual(t, runs[0].RunID, runs[1].RunID)
 }
 
 func TestBuildChildRunParams_PreservesItemsWithSharedExplicitParams(t *testing.T) {
