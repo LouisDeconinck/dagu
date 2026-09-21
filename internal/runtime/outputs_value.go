@@ -10,6 +10,7 @@ import (
 )
 
 // OutputValuesFromNodes extracts typed DAG/action outputs from runtime nodes.
+// Payloads that are not objects are skipped; see NodeData.OutputsValueMap.
 func OutputValuesFromNodes(nodes []NodeData) map[string]any {
 	outputs := make(map[string]any)
 	for _, node := range nodes {
@@ -21,7 +22,9 @@ func OutputValuesFromNodes(nodes []NodeData) map[string]any {
 	return outputs
 }
 
-// OutputValuesFromExecNodes extracts typed DAG/action outputs from persisted nodes.
+// OutputValuesFromExecNodes extracts typed DAG/action outputs from persisted
+// nodes. Payloads that are not objects are skipped; see
+// NodeData.OutputsValueMap.
 func OutputValuesFromExecNodes(nodes []*ir.Node) map[string]any {
 	outputs := make(map[string]any)
 	for _, node := range nodes {

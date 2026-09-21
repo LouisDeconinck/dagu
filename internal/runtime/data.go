@@ -450,6 +450,10 @@ func (d *Data) StepInfo() cmnvalue.StepInfo {
 	return info
 }
 
+// OutputsValueMap returns the step's published outputs as name and value
+// pairs. A step that publishes a payload which is not an object, such as the
+// array of per-child outputs a parallel step publishes, contributes nothing:
+// such a payload has no names to merge under.
 func (d NodeData) OutputsValueMap() map[string]any {
 	if d.State.OutputsValue == nil {
 		return nil

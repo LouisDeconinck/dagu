@@ -1,0 +1,37 @@
+working_dir: .
+steps:
+  - id: fanout
+    action: dag.run
+    continue_on: failed
+    with:
+      dag: child-ordered
+      params:
+        - NAME: ${ITEM.name}
+        - MODE: ${ITEM.mode}
+    parallel:
+      max_concurrent: 3
+      items:
+        - {name: alpha, mode: ok}
+        - {name: beta, mode: fail}
+        - {name: gamma, mode: ok}
+  - name: consume
+    depends: fanout
+    run: |
+      printf '%s\n' "${fanout.outputs}" > parallel-outputs-channel.txt
+      printf 'first=%s\n' "${fanout.outputs[0].RESULT}" > parallel-outputs-refs.txt
+      printf 'second=%s\n' "${fanout.outputs[1].RESULT}" >> parallel-outputs-refs.txt
+
+---
+
+name: child-ordered
+params:
+  - NAME: ""
+  - MODE: ""
+working_dir: .
+steps:
+  - id: emit
+    run: printf '%s\n' "$NAME"
+    output: RESULT
+  - id: gate
+    depends: emit
+    run: test "$MODE" = ok

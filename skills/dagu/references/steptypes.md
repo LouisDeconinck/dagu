@@ -406,7 +406,7 @@ steps:
 
 Each child invocation receives the current item as `ITEM`.
 
-A completed `parallel` step publishes a JSON array of each successful child run's output variables on its step outputs channel, so a later step can read `${fan_out.outputs}` or `${fan_out.outputs[0].NAME}`.
+A completed `parallel` step publishes a JSON array of each successful child run's output variables on its step outputs channel, so a later step in the same DAG can read `${fan_out.outputs}` or `${fan_out.outputs[0].NAME}`. Entries follow `parallel.items` order with failed children removed, so index `N` is the Nth successful child rather than the Nth item, and a successful child that published nothing contributes an empty object. The array does not merge into the run's collected outputs or into a parent run's `${step.outputs}`.
 
 ## ssh.run / sftp.upload / sftp.download
 

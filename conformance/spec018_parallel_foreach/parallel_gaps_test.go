@@ -92,3 +92,26 @@ func TestParallelPartial(t *testing.T) {
 	status.ExpectExitCode(0)
 	require.Contains(t, status.Stdout(), "Partially Succeeded")
 }
+
+// The step outputs channel carries one entry per successful child DAG run in
+// parallel item order, and a failed child contributes no entry, so index N
+// addresses the Nth successful child rather than the Nth item.
+func TestParallelOutputsChannel(t *testing.T) {
+	t.Parallel()
+
+	dagu := harness.NewRunner(t)
+	// The failing child makes the fan-out report an error, which the parent
+	// tolerates through continue_on but still surfaces as a non-zero exit.
+	result := dagu.Run("start", "parallel_outputs_channel.yaml")
+	result.ExpectExitCode(1)
+
+	dagu.ExpectFileContains(
+		"parallel-outputs-channel.txt",
+		`[{"RESULT":"alpha"},{"RESULT":"gamma"}]`,
+	)
+	dagu.ExpectFileContains(
+		"parallel-outputs-refs.txt",
+		"first=alpha",
+		"second=gamma",
+	)
+}

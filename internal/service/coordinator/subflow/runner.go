@@ -630,6 +630,9 @@ func outputVariablesFromNodes(nodes []*ir.Node) map[string]string {
 	return outputs
 }
 
+// outputValuesFromNodes merges every node's published outputs into the run's
+// outputs. A payload that is not an object, such as the array a parallel step
+// publishes, has no names to merge under and does not reach the parent run.
 func outputValuesFromNodes(nodes []*ir.Node) map[string]any {
 	outputs := make(map[string]any)
 	for _, node := range nodes {

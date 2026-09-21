@@ -319,7 +319,7 @@ For `action: dag.run`, the payload object has these required fields:
 | `summary.succeeded` | Number of represented child DAG runs counted as successful. |
 | `summary.failed` | Number of represented child DAG runs not counted as successful. |
 | `results` | Child run result objects. |
-| `outputs` | Output maps from successful child DAG runs. |
+| `outputs` | Output variable maps from successful child DAG runs. |
 
 Rules:
 
@@ -331,13 +331,30 @@ Rules:
 - A failed child DAG run contributes to `summary.failed` and must not contribute
   an output map to `outputs`.
 
-- Consumers must not infer item slot identity from `results` or `outputs` array
-  position unless a later spec adds an explicit ordering guarantee.
+- `results` follows `parallel.items` order. A child DAG run that more than one
+  item produces takes the position of the first of those items, so duplicate
+  coalescing drops entries without reordering the ones that remain.
+
+- `outputs` follows the `results` order with the entries for child DAG runs not
+  counted as successful removed, so `outputs[N]` addresses the Nth successful
+  child DAG run rather than the Nth item.
 
 - A finished `parallel` step also publishes its collected child outputs on the
   step outputs channel as a JSON array of per-child output maps, so
-  `${step.outputs}` resolves after the step finishes. Each entry merges the
-  child run's output variables and declared outputs.
+  `${step.outputs}` resolves after the step finishes. The array follows the
+  `outputs` ordering rule above, and a successful child DAG run that published
+  nothing contributes an empty object. When no child DAG run is counted as
+  successful, the step publishes nothing on the channel.
+
+- An entry in the published array merges the child run's output variables with
+  its declared outputs, so it carries more than the matching `outputs` entry in
+  the aggregate payload, which carries output variables alone.
+
+- The published array is readable through `${step.outputs}` and
+  `${step.outputs[N].NAME}` within the DAG that declares the step. It does not
+  merge into the run's collected outputs or into a parent run's
+  `${step.outputs}` map, because those carry name and value pairs and the array
+  has no names to merge under.
 
 For a `parallel` step using `action: dag.enqueue`, the payload object has these
 required fields, including when expansion or duplicate coalescing leaves exactly
