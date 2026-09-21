@@ -314,12 +314,46 @@ func TestBuildChildRunParams_PreservesItemsWithSharedExplicitParams(t *testing.T
 	require.NoError(t, err)
 	require.Len(t, runs, 2)
 
-	items := []string{runs[0].ParallelItem, runs[1].ParallelItem}
-	sort.Strings(items)
-	require.Equal(t, []string{"one", "two"}, items)
+	require.Equal(t, "one", runs[0].ParallelItem)
+	require.Equal(t, "two", runs[1].ParallelItem)
 	require.Equal(t, "MODE=batch", runs[0].Params)
 	require.Equal(t, "MODE=batch", runs[1].Params)
 	require.NotEqual(t, runs[0].RunID, runs[1].RunID)
+}
+
+// Child runs must follow parallel.items order, and a duplicate item must keep
+// the position of its first occurrence. The build is repeated because the
+// defect this guards against was a Go map range, which only reorders on some
+// iterations.
+func TestBuildChildRunParams_PreservesItemOrder(t *testing.T) {
+	t.Parallel()
+
+	subDAG := &ir.SubDAG{Name: "child"}
+	step := ir.Step{
+		Name:   "run-child",
+		SubDAG: subDAG,
+		Parallel: &ir.ParallelConfig{
+			Items: []ir.ParallelItem{
+				{Value: "alpha"},
+				{Value: "beta"},
+				{Value: "alpha"},
+				{Value: "gamma"},
+			},
+		},
+	}
+	ctx := NewContextForTest(context.Background(), &ir.DAG{Name: "root", Steps: []ir.Step{step}}, "root-run", "")
+	ctx = WithEnv(ctx, NewEnv(ctx, step))
+
+	for range 10 {
+		runs, err := NewNode(step, NodeState{}).buildChildRunParams(ctx, subDAG)
+		require.NoError(t, err)
+
+		got := make([]string, 0, len(runs))
+		for _, run := range runs {
+			got = append(got, run.Params)
+		}
+		require.Equal(t, []string{"alpha", "beta", "gamma"}, got)
+	}
 }
 
 // TestSetupExecutor_HarnessCommandPreservesLiteralCodeFences verifies that

@@ -1517,7 +1517,11 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 		return nil, fmt.Errorf("parallel execution exceeds maximum limit: %d items (max: %d)", len(items), maxParallelItems)
 	}
 
-	runParamsByID := make(map[string]executor.RunParams)
+	// Child runs keep the order of the item that first produced them, so the
+	// aggregate output arrays and the persisted sub-run list address items the
+	// same way on every run. The index map only coalesces duplicate items.
+	var runParams []executor.RunParams
+	indexByID := make(map[string]int)
 	repeated := n.IsRepeated()
 
 	if repeated {
@@ -1565,17 +1569,17 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 		}
 
 		dagRunID := GenerateSubDAGRunIDForTarget(ctx, dagName, finalParams, repeated)
-		if existing, ok := runParamsByID[dagRunID]; ok &&
-			!maps.Equal(existing.WorkerSelector, workerSelector) {
+		if idx, ok := indexByID[dagRunID]; ok &&
+			!maps.Equal(runParams[idx].WorkerSelector, workerSelector) {
 			return nil, fmt.Errorf(
 				"parallel items resolve to the same sub-DAG run %q with different worker selectors",
 				dagRunID,
 			)
 		}
-		if existing, ok := runParamsByID[dagRunID]; ok && existing.ParallelItem != parallelItem {
+		if idx, ok := indexByID[dagRunID]; ok && runParams[idx].ParallelItem != parallelItem {
 			dagRunID = GenerateSubDAGRunIDForTarget(ctx, dagName, finalParams+"\x00"+parallelItem, repeated)
 		}
-		runParamsByID[dagRunID] = executor.RunParams{
+		runParam := executor.RunParams{
 			RunID:          dagRunID,
 			Params:         finalParams,
 			ParallelItem:   parallelItem,
@@ -1583,11 +1587,12 @@ func (n *Node) buildChildRunParams(ctx context.Context, subDAG *ir.SubDAG) ([]ex
 			WorkerSelector: workerSelector,
 			PassedEnv:      passedEnv,
 		}
-	}
-
-	var runParams []executor.RunParams
-	for _, params := range runParamsByID {
-		runParams = append(runParams, params)
+		if idx, ok := indexByID[dagRunID]; ok {
+			runParams[idx] = runParam
+			continue
+		}
+		indexByID[dagRunID] = len(runParams)
+		runParams = append(runParams, runParam)
 	}
 
 	return runParams, nil
