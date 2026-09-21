@@ -354,12 +354,10 @@ func TestParallelExecution_WithOutput(t *testing.T) {
 
 // TestParallelExecution_ChildOutputsPropagation verifies that a parallel step
 // publishes each successful child run's output variables as a JSON array on
-// the step outputs channel, so downstream steps can read ${fan_out.outputs}.
+// the step outputs channel, in parallel item order, so downstream steps can
+// read ${fan_out.outputs}.
 func TestParallelExecution_ChildOutputsPropagation(t *testing.T) {
 	items := []string{"alpha", "beta"}
-	if runtime.GOOS == "windows" {
-		items = items[:1]
-	}
 	dagContent := fmt.Sprintf(`steps:
   - id: fan_out
     action: dag.run
@@ -407,10 +405,54 @@ steps:
 
 	collectNode := dagStatus.Nodes[1]
 	require.Equal(t, ir.NodeSucceeded, collectNode.Status)
+	if runtime.GOOS == "windows" {
+		// Resolved values inside a double-quoted span are re-quoted with POSIX
+		// escapes, which Windows shells pass through literally, so the echoed
+		// payload is not valid JSON there.
+		return
+	}
 	aggregated := test.StatusOutputValue(t, &dagStatus, "AGGREGATED")
 	var referenced []map[string]any
 	require.NoError(t, json.Unmarshal([]byte(aggregated), &referenced))
 	require.Equal(t, expected, referenced)
+}
+
+// A parallel step whose collected child outputs do not fit the run's output
+// budget still succeeds; only the step outputs channel stays empty.
+func TestParallelExecution_ChildOutputsExceedLimit(t *testing.T) {
+	dagContent := `max_output_size: 200
+steps:
+  - id: fan_out
+    action: dag.run
+    with:
+      dag: child-big-out
+    parallel:
+      items:
+        - ITEM: "alpha"
+        - ITEM: "beta"
+` + `---
+name: child-big-out
+params:
+  - ITEM: ""
+steps:
+  - run: printf '%0300d' 0
+    output: BIG_RESULT
+`
+
+	th := test.Setup(t)
+	dag := th.DAG(t, dagContent)
+	agent := dag.Agent()
+	require.NoError(t, agent.Run(agent.Context))
+	dag.AssertLatestStatus(t, ir.Succeeded)
+
+	dagStatus, statusErr := dag.DAGRunMgr.GetLatestStatus(dag.Context, dag.DAG)
+	require.NoError(t, statusErr)
+	require.Len(t, dagStatus.Nodes, 1)
+
+	parallelNode := dagStatus.Nodes[0]
+	require.Equal(t, ir.NodeSucceeded, parallelNode.Status)
+	require.Empty(t, parallelNode.Error)
+	require.Nil(t, parallelNode.OutputsValue)
 }
 
 func TestParallelExecution_RetryBackoffDoesNotBlockScheduling(t *testing.T) {

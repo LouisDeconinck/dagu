@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,6 +64,15 @@ func (e *invalidDeclaredSideChannelExecutor) GetOutputs() map[string]any {
 
 func (e *invalidDeclaredSideChannelExecutor) PublishesDeclaredOutputs() bool {
 	return true
+}
+
+type outputsValueSideChannelExecutor struct {
+	emptySideChannelExecutor
+	value any
+}
+
+func (e *outputsValueSideChannelExecutor) GetOutputsValue() any {
+	return e.value
 }
 
 func TestStepExecutorReturnsWrappedSetupError(t *testing.T) {
@@ -152,6 +162,57 @@ func TestStepExecutorRecordsDeclaredOutputSerializationError(t *testing.T) {
 	err := NewStepExecutor().Execute(newTestStepExecutorContext(), node)
 	require.ErrorContains(t, err, "failed to serialize outputs")
 	require.Same(t, err, node.Error())
+}
+
+// A raw outputs payload the step cannot publish, because it is larger than the
+// run allows, leaves the channel empty. The step's own work already succeeded,
+// so it must not be reported as failed.
+func TestStepExecutorDropsOversizedOutputsValue(t *testing.T) {
+	executorType := "test-step-executor-oversized-outputs-value"
+	runtimeexec.RegisterExecutor(executorType, func(context.Context, ir.Step) (runtimeexec.Executor, error) {
+		return &outputsValueSideChannelExecutor{
+			value: []map[string]any{{"RESULT": strings.Repeat("x", 128)}},
+		}, nil
+	}, nil, registry.ExecutorCapabilities{})
+	t.Cleanup(func() { runtimeexec.UnregisterExecutor(executorType) })
+
+	node := NewNode(ir.Step{
+		ID:   "fan_out",
+		Name: "fan_out",
+		ExecutorConfig: ir.ExecutorConfig{
+			Type: executorType,
+		},
+	}, NodeState{})
+
+	ctx := NewContext(context.Background(), &ir.DAG{MaxOutputSize: 16}, "run-1", "dag.log")
+	require.NoError(t, NewStepExecutor().Execute(ctx, node))
+	require.NoError(t, node.Error())
+	require.NotEqual(t, ir.NodeFailed, node.Status())
+	require.Nil(t, node.State().OutputsValue)
+}
+
+func TestStepExecutorPublishesOutputsValue(t *testing.T) {
+	executorType := "test-step-executor-outputs-value"
+	runtimeexec.RegisterExecutor(executorType, func(context.Context, ir.Step) (runtimeexec.Executor, error) {
+		return &outputsValueSideChannelExecutor{
+			value: []map[string]any{{"RESULT": "a"}, {"RESULT": "b"}},
+		}, nil
+	}, nil, registry.ExecutorCapabilities{})
+	t.Cleanup(func() { runtimeexec.UnregisterExecutor(executorType) })
+
+	node := NewNode(ir.Step{
+		ID:   "fan_out",
+		Name: "fan_out",
+		ExecutorConfig: ir.ExecutorConfig{
+			Type: executorType,
+		},
+	}, NodeState{})
+
+	require.NoError(t, NewStepExecutor().Execute(newTestStepExecutorContext(), node))
+	state := node.State()
+	require.NotNil(t, state.OutputsValue)
+	require.Equal(t, `[{"RESULT":"a"},{"RESULT":"b"}]`, *state.OutputsValue)
+	require.Nil(t, state.StepOutputsValue)
 }
 
 func TestStepExecutorRecordsTimeoutBeforeCommandStarts(t *testing.T) {

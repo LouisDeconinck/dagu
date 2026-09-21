@@ -237,6 +237,8 @@ func (e *StepExecutor) captureExecutorSideChannels(
 		node.SetToolDefinitions(toolDefs)
 	}
 
+	// An executor publishes through either channel, never both: this branch
+	// returns before the OutputsProvider branch below can run.
 	if valueProvider, ok := cmd.(executor.OutputsValueProvider); ok {
 		payload := valueProvider.GetOutputsValue()
 		if payload == nil {
@@ -245,7 +247,13 @@ func (e *StepExecutor) captureExecutorSideChannels(
 		}
 		serialized, err := serializeOutputsValue(ctx, payload)
 		if err != nil {
-			return "", false, err
+			// The step itself did its work, so an unpublishable payload
+			// leaves the channel empty rather than failing the step.
+			logger.Warn(ctx, "Dropped step outputs payload",
+				tag.Step(node.Name()),
+				tag.Error(err))
+			node.clearOutputsValue()
+			return "", false, nil
 		}
 		node.setOutputsValue(serialized)
 		return "", false, nil
