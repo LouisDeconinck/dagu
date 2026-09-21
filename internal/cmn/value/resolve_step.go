@@ -53,6 +53,16 @@ func resolveDeclaredStepOutput(ctx context.Context, stepName, outputName string,
 	return stringifyResolvedValue(value), true
 }
 
+// jqPath turns the remainder of a step reference into a jq path. A remainder
+// that starts with an index reads as an array constructor on its own, so it
+// needs the explicit identity prefix to address the value being queried.
+func jqPath(path string) string {
+	if strings.HasPrefix(path, "[") {
+		return "." + path
+	}
+	return path
+}
+
 // resolveStepProperty extracts a step's property value with optional slicing.
 func resolveStepProperty(ctx context.Context, stepName, path string, stepMap map[string]StepInfo) (string, bool) {
 	stepInfo, ok := stepMap[stepName]
@@ -66,14 +76,14 @@ func resolveStepProperty(ctx context.Context, stepName, path string, stepMap map
 			logger.Debug(ctx, "Step has no output configured", tag.Step(stepName))
 			return "", false
 		}
-		return resolveJSONPath(ctx, stepName, *stepInfo.Output, strings.TrimPrefix(path, ".output"))
+		return resolveJSONPath(ctx, stepName, *stepInfo.Output, jqPath(strings.TrimPrefix(path, ".output")))
 	}
 	if strings.HasPrefix(path, ".outputs.") || strings.HasPrefix(path, ".outputs[") {
 		if stepInfo.Outputs == nil {
 			logger.Debug(ctx, "Step has no outputs published", tag.Step(stepName))
 			return "", false
 		}
-		return resolveJSONPath(ctx, stepName, *stepInfo.Outputs, strings.TrimPrefix(path, ".outputs"))
+		return resolveJSONPath(ctx, stepName, *stepInfo.Outputs, jqPath(strings.TrimPrefix(path, ".outputs")))
 	}
 
 	property, sliceSpec, err := parseStepReference(path)
