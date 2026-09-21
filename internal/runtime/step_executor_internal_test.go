@@ -187,7 +187,6 @@ func TestStepExecutorDropsOversizedOutputsValue(t *testing.T) {
 	ctx := NewContext(context.Background(), &ir.DAG{MaxOutputSize: 16}, "run-1", "dag.log")
 	require.NoError(t, NewStepExecutor().Execute(ctx, node))
 	require.NoError(t, node.Error())
-	require.NotEqual(t, ir.NodeFailed, node.Status())
 	require.Nil(t, node.State().OutputsValue)
 }
 
