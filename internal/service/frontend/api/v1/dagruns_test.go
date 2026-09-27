@@ -986,6 +986,69 @@ steps:
 	})
 }
 
+// Approving one waiting step resumes the branches it unblocks even while a
+// step on an independent branch still waits for approval.
+func TestApproveDAGRunStepResumesIndependentBranch(t *testing.T) {
+	server := test.SetupServer(t)
+
+	dagSpec := `type: graph
+steps:
+  - id: gate_a
+    run: "exit 0"
+    approval:
+      prompt: "Approve A"
+  - id: gate_b
+    run: "exit 0"
+    approval:
+      prompt: "Approve B"
+  - id: after_a
+    depends: [gate_a]
+    run: "exit 0"
+  - id: after_b
+    depends: [gate_b]
+    run: "exit 0"`
+
+	server.Client().Post("/api/v1/dags", api.CreateNewDAGJSONRequestBody{
+		Name: "approval_independent_branches",
+		Spec: &dagSpec,
+	}).ExpectStatus(http.StatusCreated).Send(t)
+
+	startResp := server.Client().Post("/api/v1/dags/approval_independent_branches/start", api.ExecuteDAGJSONRequestBody{}).
+		ExpectStatus(http.StatusOK).Send(t)
+	var startBody api.ExecuteDAG200JSONResponse
+	startResp.Unmarshal(t, &startBody)
+
+	waitForStoredDAGRunStatus(t, server, "approval_independent_branches", startBody.DagRunId, 10*time.Second, func(status *ir.DAGRunStatus) bool {
+		return status.Status == ir.Waiting &&
+			hasNodeWithStatus(status, "gate_a", ir.NodeWaiting) &&
+			hasNodeWithStatus(status, "gate_b", ir.NodeWaiting)
+	})
+
+	approveResp := server.Client().Post(
+		fmt.Sprintf("/api/v1/dag-runs/approval_independent_branches/%s/steps/gate_a/approve", startBody.DagRunId),
+		api.ApproveStepRequest{},
+	).ExpectStatus(http.StatusOK).Send(t)
+	var approveBody api.ApproveDAGRunStep200JSONResponse
+	approveResp.Unmarshal(t, &approveBody)
+	require.True(t, approveBody.Resumed)
+
+	// The unblocked branch runs to completion while gate_b still waits.
+	waitForStoredDAGRunStatus(t, server, "approval_independent_branches", startBody.DagRunId, 10*time.Second, func(status *ir.DAGRunStatus) bool {
+		return status.Status == ir.Waiting &&
+			hasNodeWithStatus(status, "after_a", ir.NodeSucceeded) &&
+			hasNodeWithStatus(status, "gate_b", ir.NodeWaiting)
+	})
+
+	server.Client().Post(
+		fmt.Sprintf("/api/v1/dag-runs/approval_independent_branches/%s/steps/gate_b/approve", startBody.DagRunId),
+		api.ApproveStepRequest{},
+	).ExpectStatus(http.StatusOK).Send(t)
+
+	waitForStoredDAGRunStatus(t, server, "approval_independent_branches", startBody.DagRunId, 10*time.Second, func(status *ir.DAGRunStatus) bool {
+		return status.Status == ir.Succeeded
+	})
+}
+
 func TestCompleteHumanTask(t *testing.T) {
 	server := test.SetupServer(t)
 

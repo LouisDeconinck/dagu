@@ -387,6 +387,25 @@ func PushBackPending(status *ir.DAGRunStatus) bool {
 	return status != nil && hasPendingPushBack(status.Nodes)
 }
 
+// UnblockedNodeReady reports whether a manual action unblocked a step that a
+// resumed attempt can run while other manual steps keep waiting: a
+// not-started node has every dependency satisfied, and no retryable node
+// would be re-run by the resume (see resumeReady). Approval, push-back, and
+// agent-session resumes use it to continue independent branches.
+func UnblockedNodeReady(status *ir.DAGRunStatus) bool {
+	if status == nil {
+		return false
+	}
+	return !hasRetryableNode(status.Nodes) && hasRunnableNode(status.Nodes)
+}
+
+func hasRunnableNode(nodes []*ir.Node) bool {
+	byName := nodesByName(nodes)
+	return slices.ContainsFunc(nodes, func(node *ir.Node) bool {
+		return nodeRunnable(node, byName)
+	})
+}
+
 // ValidateRetry rejects retry operations that would bypass human-task completion state.
 func ValidateRetry(status *ir.DAGRunStatus, stepName string) error {
 	if status == nil {
