@@ -36,7 +36,9 @@ const {
   const writeState = vi.fn();
   return {
     createRunViewMock: vi.fn(),
-    dagsListState: { results: [] as { name: string }[] },
+    dagsListState: {
+      dags: [] as { fileName: string; dag: { name: string } }[],
+    },
     deleteRunViewMock: vi.fn(),
     updateRunViewMock: vi.fn(),
     readSearchStateMock: readState,
@@ -84,8 +86,8 @@ vi.mock('@/hooks/api', () => ({
         ? undefined
         : path === '/dags/labels'
           ? { labels: [] }
-          : path === '/search/dags'
-            ? { results: dagsListState.results }
+          : path === '/dags'
+            ? { dags: dagsListState.dags }
             : undefined,
   }),
 }));
@@ -195,7 +197,7 @@ beforeEach(() => {
   updateRunViewMock.mockReset();
   deleteRunViewMock.mockReset();
   sharedRunViewState.views = [];
-  dagsListState.results = [];
+  dagsListState.dags = [];
   usePaginatedDAGRunsMock.mockReset();
   usePaginatedDAGRunsMock.mockReturnValue({
     dagRuns: [],
@@ -540,9 +542,11 @@ describe('DAGRuns page', () => {
   });
 
   it('suggests DAG names and applies the selected suggestion as the filter', async () => {
-    dagsListState.results = [
-      { name: 'deploy-api' },
-      { name: 'nightly-backup' },
+    // File names differ from DAG names; runs are filtered by DAG name, so
+    // only DAG names may be suggested.
+    dagsListState.dags = [
+      { fileName: 'deploy', dag: { name: 'deploy-api' } },
+      { fileName: 'backup', dag: { name: 'nightly-backup' } },
     ];
     renderPage();
 
@@ -550,7 +554,7 @@ describe('DAGRuns page', () => {
     fireEvent.focus(input);
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
 
-    // Suggestions arrive from /search/dags once the debounced input is set
+    // Suggestions arrive from /dags once the debounced input is set
     fireEvent.change(input, { target: { value: 'a' } });
     await waitFor(() => {
       expect(screen.getByRole('option', { name: 'deploy-api' })).toBeVisible();
@@ -562,6 +566,9 @@ describe('DAGRuns page', () => {
     fireEvent.change(input, { target: { value: 'deploy' } });
     expect(
       screen.queryByRole('option', { name: 'nightly-backup' })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('option', { name: 'deploy' })
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('option', { name: 'deploy-api' }));
