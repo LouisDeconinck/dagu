@@ -347,7 +347,7 @@ type flushWriter struct {
 func (f flushWriter) Write(p []byte) (int, error) {
 	n, err := f.w.Write(p)
 	if err == nil {
-		_ = http.NewResponseController(f.w).Flush()
+		err = http.NewResponseController(f.w).Flush()
 	}
 	return n, err
 }
