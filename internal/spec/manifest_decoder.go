@@ -91,11 +91,6 @@ func validateManifestAliases(input map[string]any) error {
 			return errors.New("labels and deprecated tags cannot both be set")
 		}
 	}
-	if _, hasDotenv := input["dotenv"]; hasDotenv {
-		if _, hasEnvFile := input["envFile"]; hasEnvFile {
-			return errors.New("dotenv and envFile cannot both be set")
-		}
-	}
 	return nil
 }
 

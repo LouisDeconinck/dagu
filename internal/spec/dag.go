@@ -70,9 +70,6 @@ type dag struct {
 	WorkingDir string `yaml:"working_dir,omitempty"`
 	// Dotenv is the path to the dotenv file (string or []string).
 	Dotenv types.StringOrArray `yaml:"dotenv,omitempty"`
-	// EnvFile is an alias for Dotenv (string or []string), matching the
-	// docker-compose env_file naming. Mutually exclusive with Dotenv.
-	EnvFile types.StringOrArray `yaml:"envFile,omitempty"`
 	// Schedule is the cron schedule to run the DAG.
 	Schedule types.ScheduleValue `yaml:"schedule,omitempty"`
 	// SkipIfSuccessful is the flag to skip the DAG on schedule when it is
@@ -3236,16 +3233,10 @@ func validateHarnessProviderConfig(defs ir.HarnessDefinitions, cfg map[string]an
 }
 
 func buildDotenv(_ buildContext, d *dag) ([]string, error) {
-	dotenv := d.Dotenv
-	if dotenv.IsZero() {
-		// envFile is an alias for dotenv; the manifest decoder rejects
-		// documents that set both.
-		dotenv = d.EnvFile
-	}
-	if dotenv.IsZero() {
+	if d.Dotenv.IsZero() {
 		return []string{".env"}, nil
 	}
-	return dotenv.Values(), nil
+	return d.Dotenv.Values(), nil
 }
 
 func composeSteps(inherited, current []ir.Step) []ir.Step {

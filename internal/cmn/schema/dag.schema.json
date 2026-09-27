@@ -19,9 +19,6 @@
           "llm": { "$ref": "#/definitions/standardLLMConfig" }
         }
       }
-    },
-    {
-      "not": { "required": ["dotenv", "envFile"] }
     }
   ],
   "properties": {
@@ -53,23 +50,6 @@
         }
       ],
       "description": "Specifies .env files to load environment variables from. By default, '.env' is loaded. When files are specified, '.env' is automatically prepended to the list. All files are loaded sequentially with later files overriding earlier values. Set to empty array [] to disable all .env loading. Relative paths are searched in the DAG's working_dir first, then in the DAG file directory."
-    },
-    "envFile": {
-      "examples": [".env"],
-      "oneOf": [
-        {
-          "type": "string",
-          "description": "Path to a .env file to load environment variables from"
-        },
-        {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "description": "List of paths to .env files to load environment variables from. Paths can be absolute, '~'-prefixed, or relative to the DAG's working_dir or the DAG file directory."
-        }
-      ],
-      "description": "Alias for 'dotenv' following docker-compose env_file naming. Identical semantics to 'dotenv'. Cannot be set together with 'dotenv'."
     },
     "working_dir": {
       "examples": ["/var/data/etl"],
