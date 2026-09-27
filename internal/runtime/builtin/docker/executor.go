@@ -379,18 +379,19 @@ func newDocker(ctx context.Context, step ir.Step) (executor.Executor, error) {
 	// Priority 1: Step-level container field (new intuitive syntax)
 	// This is the preferred way to configure containers at step level
 	if step.Container != nil {
-		// Merge step env into container env BEFORE evaluation so that
-		// all variable references (including DAG env/params in step env)
-		// are resolved together with the full runtime scope.
-		ct := *step.Container
-		ct.Env = mergeEnvVars(step.Env, ct.Env)
-
 		// Expand environment variables in container fields at execution time
 		env := runtime.GetEnv(ctx)
-		expanded, err := EvalContainerFields(ctx, ct)
+		expanded, err := EvalContainerFields(ctx, *step.Container)
 		if err != nil {
 			return nil, fmt.Errorf("failed to evaluate container config: %w", err)
 		}
+		// Step env is injected below the container's own declarations, which
+		// include env_file variables (spec 006).
+		stepEnv, err := evalEnvSequentially(ctx, step.Env)
+		if err != nil {
+			return nil, fmt.Errorf("failed to evaluate step env: %w", err)
+		}
+		expanded.Env = mergeEnvVars(stepEnv, expanded.Env)
 		c, err := LoadConfig(env.WorkingDir, expanded, registryAuths)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load step container config: %w", err)

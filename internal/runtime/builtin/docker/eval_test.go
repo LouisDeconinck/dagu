@@ -371,6 +371,28 @@ func TestEvalContainerEnvFile(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "nonexistent.env")
 	})
+
+	// Spec 006 layers the container environment as
+	// step env < env_file < container env.
+	t.Run("StepEnvBelowFileVars", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeEnv(t, dir, ".env", "A=file\nB=file\n")
+
+		exec, err := newDocker(newCtx(t, dir), ir.Step{
+			Name: "test",
+			Env:  []string{"A=step", "C=step"},
+			Container: &ir.Container{
+				Image:   "alpine",
+				EnvFile: []string{".env"},
+				Env:     []string{"B=container"},
+			},
+		})
+		require.NoError(t, err)
+		d, ok := exec.(*docker)
+		require.True(t, ok, "executor is *docker")
+		assert.ElementsMatch(t, []string{"A=file", "B=container", "C=step"}, d.cfg.Container.Env)
+	})
 }
 
 func TestEvalStringSlice(t *testing.T) {
