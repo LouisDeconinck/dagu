@@ -327,7 +327,7 @@ func parseCronExpression(expr string) (cron.Schedule, string, error) {
 // fire time falls inside the current tick, so a relative delay would never
 // be due.
 type intervalSchedule struct {
-	delay time.Duration // whole seconds, at least one minute
+	delay time.Duration // positive whole minutes
 }
 
 func newIntervalSchedule(arg string) (cron.Schedule, error) {
@@ -335,13 +335,12 @@ func newIntervalSchedule(arg string) (cron.Schedule, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The scheduler evaluates schedules once per minute, so a shorter interval
-	// could never fire at its configured frequency.
-	if delay < time.Minute {
-		return nil, fmt.Errorf("interval must be at least one minute")
+	// The scheduler evaluates schedules on whole-minute ticks, so any other
+	// interval would fire on a coarser grid than configured.
+	if delay < time.Minute || delay%time.Minute != 0 {
+		return nil, fmt.Errorf("interval must be a positive whole number of minutes")
 	}
-	// Sub-second precision is truncated as with robfig's Every.
-	return intervalSchedule{delay: delay - delay%time.Second}, nil
+	return intervalSchedule{delay: delay}, nil
 }
 
 // Next returns the next interval boundary strictly after t.

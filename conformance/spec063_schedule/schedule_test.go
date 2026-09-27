@@ -37,6 +37,7 @@ func TestScheduleDescriptors(t *testing.T) {
 	rejectedCases := []string{
 		"invalid_unknown_descriptor.yaml",
 		"invalid_reboot.yaml",
+		"invalid_every_seconds.yaml",
 	}
 	for _, file := range rejectedCases {
 		t.Run(file, func(t *testing.T) {

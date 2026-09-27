@@ -113,8 +113,9 @@ func TestCronDescriptorRejected(t *testing.T) {
 	t.Parallel()
 
 	// "@reboot" is meaningless for a scheduler and unknown descriptors must
-	// fail validation. Intervals under one minute are rejected because the
-	// scheduler only ticks on whole-minute boundaries.
+	// fail validation. Intervals must be whole minutes because the scheduler
+	// only ticks on whole-minute boundaries; "@every 90s" would otherwise
+	// fire every three minutes.
 	cases := []string{
 		"@reboot",
 		"@fortnightly",
@@ -122,6 +123,8 @@ func TestCronDescriptorRejected(t *testing.T) {
 		"@every bogus",
 		"@every 30s",
 		"@every 59s",
+		"@every 90s",
+		"@every 1m30s",
 		"TZ=UTC @every 1s",
 	}
 	for _, tc := range cases {
