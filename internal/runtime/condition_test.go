@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"testing"
@@ -515,6 +516,17 @@ func TestEvalConditions_CommandCheckInterrupted(t *testing.T) {
 
 		err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "kill -KILL $$"}})
 		require.Error(t, err)
+		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
+	})
+
+	// A background descendant keeps the check's stdout pipe open after the
+	// shell exits, so Output only returns once WaitDelay expires; the result is
+	// an evaluation error, not a not-met condition.
+	t.Run("DescendantHoldsOutputPipe", func(t *testing.T) {
+		ctx := newTestContext()
+
+		err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "sleep 30 & echo done"}})
+		require.ErrorIs(t, err, exec.ErrWaitDelay)
 		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
 	})
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/cmdutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/stringutil"
@@ -299,6 +300,12 @@ func runDirectCommand(ctx context.Context, commandToRun string, workingDir strin
 	return nil
 }
 
+// conditionWaitDelay bounds how long Wait keeps reading a check's pipes after
+// the process exits or its context is canceled. A descendant that escaped the
+// process group can keep stdout open, which would otherwise block Output
+// indefinitely.
+const conditionWaitDelay = 3 * time.Second
+
 // prepareConditionCommand groups the check's process and points the context
 // kill at that group, so abort or timeout also reaps children the check
 // spawned and Wait does not block on descriptors they still hold open.
@@ -307,6 +314,7 @@ func prepareConditionCommand(cmd *exec.Cmd) {
 	cmd.Cancel = func() error {
 		return cmdutil.TerminateProcessGroup(cmd, cmdutil.ForceTermination())
 	}
+	cmd.WaitDelay = conditionWaitDelay
 }
 
 // commandCheckError classifies a failed command-check run. A context that is
@@ -317,6 +325,11 @@ func prepareConditionCommand(cmd *exec.Cmd) {
 func commandCheckError(ctx context.Context, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("condition check interrupted: %w", ctxErr)
+	}
+	// A WaitDelay expiry means the check ended with its output pipes still
+	// held open, so its result is unknown rather than an ordinary no.
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return fmt.Errorf("condition check output wait exceeded: %w", err)
 	}
 	// exitCodeFromError reports a negative code only when the process was
 	// terminated by a signal, which is never an ordinary non-zero exit.
