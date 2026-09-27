@@ -21,6 +21,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/build"
 	"github.com/dagucloud/dagu/v2/internal/executor/registry"
 	"github.com/dagucloud/dagu/v2/internal/runctx"
+	"github.com/dagucloud/dagu/v2/internal/runtimeenv"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/cmdutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
@@ -939,12 +940,15 @@ func (r *Runner) setupVariables(ctx context.Context, plan *Plan, node *Node) (co
 
 	// Add container environment variables (step-level takes precedence over DAG-level)
 	// This ensures container env vars are available when evaluating command arguments
-	if ct := node.Step().Container; ct != nil {
+	ct := node.Step().Container
+	if ct == nil && env.DAG != nil {
+		ct = env.DAG.Container
+	}
+	if ct != nil {
 		if err := addResolvedEnvVars(ctx, &env, ct.Env, "container.env.", cmnvalue.ContainerEnvField); err != nil {
 			return ctx, err
 		}
-	} else if dag := env.DAG; dag != nil && dag.Container != nil {
-		if err := addResolvedEnvVars(ctx, &env, dag.Container.Env, "container.env.", cmnvalue.ContainerEnvField); err != nil {
+		if err := addContainerEnvFileVars(ctx, &env, ct); err != nil {
 			return ctx, err
 		}
 	}
@@ -986,6 +990,47 @@ func addResolvedEnvVars(ctx context.Context, env *Env, envList []string, fieldPr
 			return fmt.Errorf("failed to evaluate environment variable %q: %w", v, err)
 		}
 		env.Scope = env.Scope.WithEntry(key, evaluatedValue, cmnvalue.EnvSourceStepEnv)
+	}
+	return nil
+}
+
+// addContainerEnvFileVars adds the variables of the container's env_file
+// entries to the scope without evaluating their values. Keys declared in the
+// container's env keep their values, so env_file variables sit between step
+// env and container env (spec 006).
+func addContainerEnvFileVars(ctx context.Context, env *Env, ct *ir.Container) error {
+	if len(ct.EnvFile) == 0 {
+		return nil
+	}
+
+	paths := make([]string, len(ct.EnvFile))
+	for i, path := range ct.EnvFile {
+		field := cmnvalue.ContainerField(fmt.Sprintf("container.env_file[%d]", i))
+		resolved, err := resolverFromEnv(ctx, *env).String(ctx, path, field)
+		if err != nil {
+			return fmt.Errorf("failed to evaluate container env_file %q: %w", path, err)
+		}
+		paths[i] = resolved
+	}
+	var dagLocation string
+	if env.DAG != nil {
+		dagLocation = env.DAG.Location
+	}
+	vars, err := runtimeenv.LoadEnvFiles(paths, env.WorkingDir, dagLocation)
+	if err != nil {
+		return fmt.Errorf("failed to load container env_file: %w", err)
+	}
+
+	declared := make(map[string]struct{}, len(ct.Env))
+	for _, entry := range ct.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		declared[key] = struct{}{}
+	}
+	for _, entry := range vars {
+		key, value, _ := strings.Cut(entry, "=")
+		if _, ok := declared[key]; !ok {
+			env.Scope = env.Scope.WithEntry(key, value, cmnvalue.EnvSourceStepEnv)
+		}
 	}
 	return nil
 }

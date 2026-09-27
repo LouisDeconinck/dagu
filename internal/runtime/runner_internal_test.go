@@ -160,6 +160,74 @@ func TestSetupVariables_StepEnvEvaluatesSequentiallyWithRuntimeVars(t *testing.T
 	}
 }
 
+// env_file variables of the selected container enter the step scope between
+// step env and container env (spec 006).
+func TestSetupVariablesEnvFile(t *testing.T) {
+	t.Parallel()
+
+	container := &ir.Container{
+		EnvFile: []string{".env"},
+		Env:     []string{"B=container"},
+	}
+	tests := []struct {
+		name         string
+		step         ir.Step
+		dagContainer *ir.Container
+	}{
+		{
+			name: "step container",
+			step: ir.Step{Name: "render", Env: []string{"A=step"}, Container: container},
+		},
+		{
+			name:         "dag container fallback",
+			step:         ir.Step{Name: "render", Env: []string{"A=step"}},
+			dagContainer: container,
+		},
+	}
+
+	setup := func(t *testing.T, step ir.Step, dagContainer *ir.Container, workDir string) (context.Context, error) {
+		t.Helper()
+		plan, err := NewPlan(step)
+		require.NoError(t, err)
+		node := plan.GetNodeByName(step.Name)
+		require.NotNil(t, node)
+
+		ctx := NewContext(
+			context.Background(),
+			&ir.DAG{Name: "test-dag", WorkingDir: workDir, Container: dagContainer},
+			"run-1",
+			filepath.Join(t.TempDir(), "dag.log"),
+		)
+		return New(&Config{}).setupVariables(ctx, plan, node)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			workDir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(workDir, ".env"), []byte("A=file\nB=file\nFILE_ONLY=f\n"), 0o600))
+
+			ctx, err := setup(t, tt.step, tt.dagContainer, workDir)
+			require.NoError(t, err)
+
+			result := AllEnvsMap(ctx)
+			assert.Equal(t, "file", result["A"])
+			assert.Equal(t, "container", result["B"])
+			assert.Equal(t, "f", result["FILE_ONLY"])
+		})
+	}
+
+	t.Run("missing file", func(t *testing.T) {
+		t.Parallel()
+		_, err := setup(t, ir.Step{
+			Name:      "render",
+			Container: &ir.Container{EnvFile: []string{"missing.env"}},
+		}, nil, t.TempDir())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "missing.env")
+	})
+}
+
 func TestPrepareBuildPlanInfersFileDependency(t *testing.T) {
 	t.Parallel()
 

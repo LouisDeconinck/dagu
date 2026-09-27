@@ -7,7 +7,9 @@ package runtimeenv
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/buildenv"
@@ -57,6 +59,53 @@ func Resolve(ctx context.Context, dag *ir.DAG) (Result, error) {
 		return result, errs
 	}
 	return result, nil
+}
+
+// LoadEnvFiles reads dotenv-syntax files and returns their variables as
+// KEY=VALUE entries. Later files override earlier ones. Relative paths are
+// looked up in workingDir, then in the directory of dagLocation. Blank paths
+// are ignored; a missing or unreadable file is an error.
+func LoadEnvFiles(paths []string, workingDir, dagLocation string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+
+	var relativeTos []string
+	if dir := strings.TrimSpace(workingDir); dir != "" {
+		relativeTos = append(relativeTos, dir)
+	}
+	if dagLocation != "" {
+		if dagDir := filepath.Dir(dagLocation); !slices.Contains(relativeTos, dagDir) {
+			relativeTos = append(relativeTos, dagDir)
+		}
+	}
+	resolver := fileutil.NewFileResolver(relativeTos)
+
+	var entries []string
+	indexByKey := make(map[string]int)
+	for _, path := range paths {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		resolved, err := resolver.ResolveFilePathLiteral(path)
+		if err != nil {
+			return nil, fmt.Errorf("env file %q: %w", path, err)
+		}
+		vars, err := godotenv.Read(resolved)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read env file %q: %w", resolved, err)
+		}
+		for _, key := range slices.Sorted(maps.Keys(vars)) {
+			entry := key + "=" + vars[key]
+			if idx, ok := indexByKey[key]; ok {
+				entries[idx] = entry
+				continue
+			}
+			indexByKey[key] = len(entries)
+			entries = append(entries, entry)
+		}
+	}
+	return entries, nil
 }
 
 // ResolveWorkingDir resolves a DAG working directory using values available before execution.

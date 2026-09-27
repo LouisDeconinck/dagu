@@ -10,15 +10,12 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/cmdutil"
-	"github.com/dagucloud/dagu/v2/internal/cmn/fileutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/signal"
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
@@ -26,7 +23,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/runtime"
 	"github.com/dagucloud/dagu/v2/internal/runtime/executor"
-	"github.com/joho/godotenv"
+	"github.com/dagucloud/dagu/v2/internal/runtimeenv"
 )
 
 var (
@@ -565,70 +562,23 @@ func evalStringSlice(ctx context.Context, ss []string, path string, fieldForPath
 }
 
 // loadEnvFileVars reads each env_file entry and returns the env list extended
-// with the file variables. Files use the same dotenv syntax as root dotenv,
-// not docker's literal --env-file format, and their values are not evaluated
-// further. Later files override earlier ones, and explicit env entries
-// override file variables for the same key. Unlike root dotenv, a missing or
-// unreadable file is an error. Relative paths are searched in the step working
-// directory first, then in the DAG file directory, matching dotenv lookup
-// order.
+// with the file variables. File values are not evaluated further, and
+// explicit env entries override file variables for the same key.
 func loadEnvFileVars(ctx context.Context, files, env []string) ([]string, error) {
 	if len(files) == 0 {
 		return env, nil
 	}
 
-	resolver := fileutil.NewFileResolver(envFileSearchDirs(ctx))
-	values := make(map[string]string, len(env))
-	order := make([]string, 0, len(env))
-	add := func(entry string) {
-		key, _, _ := strings.Cut(entry, "=")
-		if _, ok := values[key]; !ok {
-			order = append(order, key)
-		}
-		values[key] = entry
+	rtEnv := runtime.GetEnv(ctx)
+	var dagLocation string
+	if rtEnv.DAG != nil {
+		dagLocation = rtEnv.DAG.Location
 	}
-	for _, file := range files {
-		if strings.TrimSpace(file) == "" {
-			continue
-		}
-		resolved, err := resolver.ResolveFilePathLiteral(file)
-		if err != nil {
-			return nil, fmt.Errorf("env_file %q: %w", file, err)
-		}
-		vars, err := godotenv.Read(resolved)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read env_file %q: %w", resolved, err)
-		}
-		for key, value := range vars {
-			add(key + "=" + value)
-		}
+	fileVars, err := runtimeenv.LoadEnvFiles(files, rtEnv.WorkingDir, dagLocation)
+	if err != nil {
+		return nil, err
 	}
-	for _, entry := range env {
-		add(entry)
-	}
-
-	merged := make([]string, 0, len(order))
-	for _, key := range order {
-		merged = append(merged, values[key])
-	}
-	return merged, nil
-}
-
-// envFileSearchDirs returns the directories used to resolve relative env_file
-// paths: the current working directory first, then the DAG file directory,
-// mirroring dotenv file lookup order.
-func envFileSearchDirs(ctx context.Context) []string {
-	env := runtime.GetEnv(ctx)
-	dirs := make([]string, 0, 2)
-	if dir := strings.TrimSpace(env.WorkingDir); dir != "" {
-		dirs = append(dirs, dir)
-	}
-	if env.DAG != nil && env.DAG.Location != "" {
-		if dagDir := filepath.Dir(env.DAG.Location); !slices.Contains(dirs, dagDir) {
-			dirs = append(dirs, dagDir)
-		}
-	}
-	return dirs
+	return mergeEnvByKey(fileVars, env), nil
 }
 
 // evalEnvSequentially evaluates "KEY=VALUE" env entries in order,
