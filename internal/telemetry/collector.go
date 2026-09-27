@@ -326,6 +326,10 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	// Collect DAG run metrics
 	c.collectDAGRunMetrics(ctx, ch)
 
+	// Current status of each DAG's latest run; independent of ListStatuses so
+	// a failed daily-status query cannot suppress current-health metrics.
+	c.collectDAGRunStatusMetrics(ctx, ch)
+
 	// Collect DAG metrics
 	c.collectDAGMetrics(ctx, ch)
 
@@ -463,9 +467,6 @@ func (c *Collector) collectDAGRunMetrics(ctx context.Context, ch chan<- promethe
 		// Queue wait time histogram per DAG
 		emitHistogram(ch, c.queueWaitTimeDesc, dm.queueWaits, queueWaitBuckets, dagName)
 	}
-
-	// Current status of each DAG's latest run
-	c.collectDAGRunStatusMetrics(ctx, ch)
 
 	// Collect queue metrics
 	c.collectQueueMetrics(ctx, ch)

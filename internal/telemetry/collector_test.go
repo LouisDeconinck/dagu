@@ -5,6 +5,7 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -37,14 +38,17 @@ func (m *mockDAGLister) List(ctx context.Context, params persis.DAGListOptions) 
 type mockDAGRunStore struct {
 	testutil.DAGRunStoreStub
 	mock.Mock
+	options        persis.DAGRunRepositoryOptions
 	latestAttempts map[string]dagrun.Attempt
+	latestQueries  []persis.DAGRunLatestAttemptQuery
 }
 
 func (m *mockDAGRunStore) repository() *persis.DAGRunRepository {
-	return persis.NewDAGRunRepository(m, nil, persis.DAGRunRepositoryOptions{})
+	return persis.NewDAGRunRepository(m, nil, m.options)
 }
 
 func (m *mockDAGRunStore) LatestAttempt(_ context.Context, query persis.DAGRunLatestAttemptQuery) (dagrun.Attempt, error) {
+	m.latestQueries = append(m.latestQueries, query)
 	if attempt, ok := m.latestAttempts[query.Name]; ok {
 		return attempt, nil
 	}
@@ -367,6 +371,9 @@ func TestCollector_Collect_WithDAGRuns(t *testing.T) {
 func TestCollector_Collect_WithDAGRunStatus(t *testing.T) {
 	dagRepository := &mockDAGLister{}
 	dagRunRepository := &mockDAGRunStore{
+		// LatestStatusToday would scope latest-run queries to today unless the
+		// collector passes AllHistory, so NotBefore must stay unset.
+		options: persis.DAGRunRepositoryOptions{LatestStatusToday: true},
 		latestAttempts: map[string]dagrun.Attempt{
 			"dag-a": &testutil.MockAttempt{Status: &ir.DAGRunStatus{Name: "dag-a", Status: ir.Succeeded}},
 			"dag-b": &testutil.MockAttempt{Status: &ir.DAGRunStatus{Name: "dag-b", Status: ir.Failed}},
@@ -436,6 +443,53 @@ func TestCollector_Collect_WithDAGRunStatus(t *testing.T) {
 			}
 		}
 	}
+
+	// Latest-run lookups must request all history, not the today-only window.
+	require.Len(t, dagRunRepository.latestQueries, 3)
+	for _, query := range dagRunRepository.latestQueries {
+		assert.True(t, query.NotBefore.IsZero())
+	}
+}
+
+// A failed ListStatuses must not suppress the current-status gauge, which
+// reads through LatestAttempt instead.
+func TestCollector_Collect_DAGRunStatusSurvivesListStatusesFailure(t *testing.T) {
+	dagRepository := &mockDAGLister{}
+	dagRunRepository := &mockDAGRunStore{
+		latestAttempts: map[string]dagrun.Attempt{
+			"dag-a": &testutil.MockAttempt{Status: &ir.DAGRunStatus{Name: "dag-a", Status: ir.Running}},
+		},
+	}
+	queueStore := &mockQueueStore{}
+
+	dagRepository.On("List", mock.Anything, mock.Anything).Return(
+		pagination.PaginatedResult[persis.DAGListItem]{
+			Items:      []persis.DAGListItem{{DAG: &ir.DAG{Name: "dag-a"}}},
+			TotalCount: 1,
+		},
+		[]string{},
+		nil,
+	)
+	dagRunRepository.On("ListStatuses", mock.Anything, mock.Anything).Return(nil, errors.New("status store unavailable"))
+	queueStore.On("All", mock.Anything).Return([]queue.QueuedItemData{}, nil)
+
+	collector := NewCollector(
+		"1.0.0",
+		dagRepository,
+		dagRunRepository.repository(),
+		queueStore,
+		nil,
+	)
+
+	registry := prometheus.NewRegistry()
+	registry.MustRegister(collector)
+
+	metrics, err := registry.Gather()
+	require.NoError(t, err)
+
+	family, ok := metricFamilyMap(metrics)["dagu_dag_run_status"]
+	require.True(t, ok, "dagu_dag_run_status metric family not found")
+	assertGaugeValue(t, family, map[string]string{"dag": "dag-a", "status": "running"}, 1)
 }
 
 func TestCollector_Collect_WithWorkerHeartbeatMetrics(t *testing.T) {
