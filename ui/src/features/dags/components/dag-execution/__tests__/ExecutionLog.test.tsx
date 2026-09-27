@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Yota Hamada
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActivityLine } from '../ActivityLine';
@@ -28,6 +28,12 @@ const logs = vi.hoisted(() => ({
   head: undefined as { content: string } | undefined,
   sse: null as StepLogSSEResponse | null,
   connected: false,
+  queries: [] as Array<{
+    tail?: number;
+    head?: number;
+    offset?: number;
+    limit?: number;
+  }>,
 }));
 vi.mock('@/contexts/ConfigContext', () => ({
   useConfig: () => ({ apiURL: '/api/v1' }),
@@ -48,12 +54,21 @@ vi.mock('@/hooks/useDAGRunLogsSSE', () => ({
 vi.mock('@/hooks/api', () => ({
   useQuery: (
     _path: string,
-    options?: { params: { query: { head?: number } } }
-  ) => ({
-    data: options?.params.query.head && logs.head ? logs.head : logs.data,
-    mutate: logs.mutate,
-    isLoading: false,
-  }),
+    options?: {
+      params: {
+        query: { head?: number; tail?: number; offset?: number; limit?: number };
+      };
+    } | null
+  ) => {
+    if (options?.params?.query) {
+      logs.queries.push(options.params.query);
+    }
+    return {
+      data: options?.params.query.head && logs.head ? logs.head : logs.data,
+      mutate: logs.mutate,
+      isLoading: false,
+    };
+  },
 }));
 vi.mock('@/hooks/useStepLogSSE', () => ({
   useStepLogSSE: () => ({
@@ -79,6 +94,7 @@ beforeEach(() => {
   logs.head = undefined;
   logs.sse = null;
   logs.connected = false;
+  logs.queries = [];
 });
 
 describe('ActivityLine', () => {
@@ -307,6 +323,110 @@ describe('ExecutionLog ZIP download', () => {
       );
     }
   );
+});
+
+describe('log pagination controls', () => {
+  const pagedData = {
+    content: 'first line',
+    totalLines: 50000,
+    lineCount: 1,
+    hasMore: true,
+  };
+
+  it('requests a custom page size for the run log', () => {
+    logs.data = { ...pagedData };
+    render(<ExecutionLog name="example" dagRunId="run" />, {
+      wrapper: UserPreferencesProvider,
+    });
+    fireEvent.change(screen.getByLabelText('Lines per page'), {
+      target: { value: 'custom' },
+    });
+    const input = screen.getByLabelText('Custom lines per page');
+    fireEvent.change(input, { target: { value: '25000' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(logs.queries[logs.queries.length - 1]).toMatchObject({ tail: 25000 });
+  });
+
+  it('clamps a custom page size to the bounded maximum', () => {
+    logs.data = { ...pagedData };
+    render(<ExecutionLog name="example" dagRunId="run" />, {
+      wrapper: UserPreferencesProvider,
+    });
+    fireEvent.change(screen.getByLabelText('Lines per page'), {
+      target: { value: 'custom' },
+    });
+    const input = screen.getByLabelText('Custom lines per page');
+    fireEvent.change(input, { target: { value: '500000' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(logs.queries[logs.queries.length - 1]).toMatchObject({ tail: 100000 });
+  });
+
+  it('requests the bounded maximum when All lines is selected', () => {
+    logs.data = { ...pagedData };
+    render(<ExecutionLog name="example" dagRunId="run" />, {
+      wrapper: UserPreferencesProvider,
+    });
+    fireEvent.change(screen.getByLabelText('Lines per page'), {
+      target: { value: 'all' },
+    });
+    expect(logs.queries[logs.queries.length - 1]).toMatchObject({ tail: 100000 });
+  });
+
+  it('jumps to a specific page of the run log', () => {
+    // The view-mode switch locks navigation briefly; advance past the timeout.
+    vi.useFakeTimers();
+    try {
+      logs.data = { ...pagedData };
+      render(<ExecutionLog name="example" dagRunId="run" />, {
+        wrapper: UserPreferencesProvider,
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Page View' }));
+      act(() => {
+        vi.advanceTimersByTime(3100);
+      });
+      const pageInput = screen.getByLabelText('Page');
+      fireEvent.change(pageInput, { target: { value: '4' } });
+      fireEvent.keyDown(pageInput, { key: 'Enter' });
+      expect(logs.queries[logs.queries.length - 1]).toMatchObject({ offset: 3001, limit: 1000 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('requests a custom page size for the step log', () => {
+    logs.data = { ...pagedData };
+    render(<StepLog dagName="example" dagRunId="run" stepName="build" />, {
+      wrapper: UserPreferencesProvider,
+    });
+    fireEvent.change(screen.getByLabelText('Lines per page'), {
+      target: { value: 'custom' },
+    });
+    const input = screen.getByLabelText('Custom lines per page');
+    fireEvent.change(input, { target: { value: '25000' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(logs.queries[logs.queries.length - 1]).toMatchObject({ tail: 25000 });
+  });
+
+  it('jumps to a specific page of the step log', () => {
+    // The view-mode switch locks navigation briefly; advance past the timeout.
+    vi.useFakeTimers();
+    try {
+      logs.data = { ...pagedData };
+      render(<StepLog dagName="example" dagRunId="run" stepName="build" />, {
+        wrapper: UserPreferencesProvider,
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Page View' }));
+      act(() => {
+        vi.advanceTimersByTime(3100);
+      });
+      const pageInput = screen.getByLabelText('Page');
+      fireEvent.change(pageInput, { target: { value: '3' } });
+      fireEvent.keyDown(pageInput, { key: 'Enter' });
+      expect(logs.queries[logs.queries.length - 1]).toMatchObject({ offset: 2001, limit: 1000 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('ExecutionLog download feedback', () => {
