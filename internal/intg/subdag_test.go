@@ -960,29 +960,166 @@ steps:
 	})
 }
 
-func TestSubDAG_PassEnv(t *testing.T) {
-	readChildResult := func(t *testing.T, th test.Command, parentName, dagRunID string) string {
-		t.Helper()
-		ctx := context.Background()
-		ref := ir.NewDAGRunRef(parentName, dagRunID)
-		parentAttempt, err := th.DAGRunRepository.FindAttempt(ctx, ref)
-		require.NoError(t, err)
-		parentStatus, err := parentAttempt.ReadStatus(ctx)
-		require.NoError(t, err)
-		require.Equal(t, ir.Succeeded, parentStatus.Status)
-		subNode := parentStatus.Nodes[0]
-		require.Len(t, subNode.SubRuns, 1)
-		subAttempt, err := th.DAGRunRepository.FindSubAttempt(ctx, ref, subNode.SubRuns[0].DAGRunID)
-		require.NoError(t, err)
-		subStatus, err := subAttempt.ReadStatus(ctx)
-		require.NoError(t, err)
-		require.Equal(t, ir.Succeeded, subStatus.Status)
-		require.NotNil(t, subStatus.Nodes[0].OutputVariables)
-		// Windows PowerShell output keeps CRLF line endings in captured output.
-		return strings.ReplaceAll(
-			subStatus.Nodes[0].OutputVariables.Variables()["RESULT"], "\r\n", "\n")
-	}
+// readChildResult returns the first step's RESULT output variable of the first
+// sub-run under the named parent run.
+func readChildResult(t *testing.T, th test.Command, parentName, dagRunID string) string {
+	t.Helper()
+	ctx := context.Background()
+	ref := ir.NewDAGRunRef(parentName, dagRunID)
+	parentAttempt, err := th.DAGRunRepository.FindAttempt(ctx, ref)
+	require.NoError(t, err)
+	parentStatus, err := parentAttempt.ReadStatus(ctx)
+	require.NoError(t, err)
+	require.Equal(t, ir.Succeeded, parentStatus.Status)
+	subNode := parentStatus.Nodes[0]
+	require.Len(t, subNode.SubRuns, 1)
+	subAttempt, err := th.DAGRunRepository.FindSubAttempt(ctx, ref, subNode.SubRuns[0].DAGRunID)
+	require.NoError(t, err)
+	subStatus, err := subAttempt.ReadStatus(ctx)
+	require.NoError(t, err)
+	require.Equal(t, ir.Succeeded, subStatus.Status)
+	require.NotNil(t, subStatus.Nodes[0].OutputVariables)
+	// Windows PowerShell output keeps CRLF line endings in captured output.
+	return strings.ReplaceAll(
+		subStatus.Nodes[0].OutputVariables.Variables()["RESULT"], "\r\n", "\n")
+}
 
+// TestSubDAGParamPrecedence covers issue #2813: values a step passes to a child
+// run explicitly must outrank same-named values inherited from the parent run
+// scope in an in-process (local) child run.
+func TestSubDAGParamPrecedence(t *testing.T) {
+	t.Run("StepParamsBeatParentCLIParam", func(t *testing.T) {
+		th := test.SetupCommand(t)
+
+		th.CreateDAGFile(t, "parent_param_clash.yaml", `
+params:
+  - ENV: dev
+steps:
+  - name: call_sub
+    action: dag.run
+    with:
+      dag: sub_param_clash
+      params: "ENV=staging"
+`)
+
+		th.CreateDAGFile(t, "sub_param_clash.yaml", fmt.Sprintf(`
+params:
+  - ENV
+steps:
+  - name: report
+    run: |
+%s
+    output: RESULT
+`, indentCommandBlock(envReportScript("ENV"), 6)))
+
+		dagRunID := uuid.Must(uuid.NewV7()).String()
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args:        []string{"start", "--run-id", dagRunID, "parent_param_clash", "--", "ENV=production"},
+			ExpectedOut: []string{"DAG run finished"},
+		})
+
+		require.Equal(t, "ENV=staging", readChildResult(t, th, "parent_param_clash", dagRunID))
+	})
+
+	t.Run("StepParamsBeatParentPositionalParam", func(t *testing.T) {
+		th := test.SetupCommand(t)
+
+		th.CreateDAGFile(t, "parent_positional_clash.yaml", `
+steps:
+  - name: call_sub
+    action: dag.run
+    with:
+      dag: sub_positional_clash
+      params: "child-value"
+`)
+
+		th.CreateDAGFile(t, "sub_positional_clash.yaml", `
+steps:
+  - name: report
+    run: echo "${1}"
+    output: RESULT
+`)
+
+		dagRunID := uuid.Must(uuid.NewV7()).String()
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args:        []string{"start", "--run-id", dagRunID, "parent_positional_clash", "--", "parent-value"},
+			ExpectedOut: []string{"DAG run finished"},
+		})
+
+		require.Equal(t, "child-value", readChildResult(t, th, "parent_positional_clash", dagRunID))
+	})
+
+	t.Run("StepParamsBeatParentEnv", func(t *testing.T) {
+		th := test.SetupCommand(t)
+
+		th.CreateDAGFile(t, "parent_env_clash.yaml", `
+env:
+  - ENV: from-parent-env
+steps:
+  - name: call_sub
+    action: dag.run
+    with:
+      dag: sub_env_clash
+      params: "ENV=staging"
+`)
+
+		th.CreateDAGFile(t, "sub_env_clash.yaml", fmt.Sprintf(`
+params:
+  - ENV
+steps:
+  - name: report
+    run: |
+%s
+    output: RESULT
+`, indentCommandBlock(envReportScript("ENV"), 6)))
+
+		dagRunID := uuid.Must(uuid.NewV7()).String()
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args:        []string{"start", "--run-id", dagRunID, "parent_env_clash"},
+			ExpectedOut: []string{"DAG run finished"},
+		})
+
+		require.Equal(t, "ENV=staging", readChildResult(t, th, "parent_env_clash", dagRunID))
+	})
+
+	t.Run("UndeclaredParentEnvVisible", func(t *testing.T) {
+		// spec 006: an in-process child still observes the parent run env for
+		// names it does not declare itself.
+		th := test.SetupCommand(t)
+
+		th.CreateDAGFile(t, "parent_env_visible.yaml", `
+env:
+  - FROM_PARENT: hello-parent
+steps:
+  - name: call_sub
+    action: dag.run
+    with:
+      dag: sub_env_visible
+      params: "ENV=staging"
+`)
+
+		th.CreateDAGFile(t, "sub_env_visible.yaml", fmt.Sprintf(`
+params:
+  - ENV
+steps:
+  - name: report
+    run: |
+%s
+    output: RESULT
+`, indentCommandBlock(envReportScript("ENV", "FROM_PARENT"), 6)))
+
+		dagRunID := uuid.Must(uuid.NewV7()).String()
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args:        []string{"start", "--run-id", dagRunID, "parent_env_visible"},
+			ExpectedOut: []string{"DAG run finished"},
+		})
+
+		require.Equal(t, "ENV=staging\nFROM_PARENT=hello-parent",
+			readChildResult(t, th, "parent_env_visible", dagRunID))
+	})
+}
+
+func TestSubDAG_PassEnv(t *testing.T) {
 	t.Run("Selective", func(t *testing.T) {
 		th := test.SetupCommand(t)
 
