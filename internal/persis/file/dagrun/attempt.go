@@ -667,6 +667,13 @@ func (att *Attempt) Hidden() bool {
 // Hide renames the attempt directory to hide it from normal operations.
 // It prefixes the directory name with a dot to make it hidden.
 func (att *Attempt) Hide(ctx context.Context) error {
+	// Resolve the child mirror while the canonical path still parses as an
+	// attempt dir; the dot prefix added below would make it opaque, and a
+	// disk-loaded attempt has no mirror cached yet.
+	if _, err := att.childRecordMirror(ctx); err != nil {
+		logger.Warn(ctx, "Failed to resolve child dag-run record", tag.Error(err))
+	}
+
 	att.mu.Lock()
 	defer att.mu.Unlock()
 
@@ -770,7 +777,9 @@ func (att *Attempt) WriteOutputs(ctx context.Context, outputs *ir.DAGRunOutputs)
 		return fmt.Errorf("failed to write outputs file: %w", err)
 	}
 
-	if mirror := att.childRecordMirror(); mirror != nil {
+	if mirror, err := att.childRecordMirror(ctx); err != nil {
+		logger.Warn(ctx, "Failed to resolve child dag-run record", tag.Error(err))
+	} else if mirror != nil {
 		if err := mirror.WriteOutputs(ctx, outputs); err != nil {
 			logger.Warn(ctx, "Failed to write child dag-run outputs", tag.Error(err))
 		}
@@ -830,7 +839,9 @@ func (att *Attempt) WriteStepMessages(ctx context.Context, stepName string, mess
 		return fmt.Errorf("failed to write messages file: %w", err)
 	}
 
-	if mirror := att.childRecordMirror(); mirror != nil {
+	if mirror, err := att.childRecordMirror(ctx); err != nil {
+		logger.Warn(ctx, "Failed to resolve child dag-run record", tag.Error(err))
+	} else if mirror != nil {
 		if err := mirror.WriteStepMessages(ctx, stepName, messages); err != nil {
 			logger.Warn(ctx, "Failed to write child dag-run step messages", tag.Error(err))
 		}

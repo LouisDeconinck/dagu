@@ -111,8 +111,9 @@ func parseChildAttemptStatusFile(statusFile string) (childAttemptInfo, bool) {
 
 // childRecordAttemptLocked resolves the mirror attempt for a nested child
 // attempt. It must be called with att.mu held. It returns nil when the attempt
-// is a top-level record or the status does not belong to it.
-func (att *Attempt) childRecordAttemptLocked(ctx context.Context, status ir.DAGRunStatus) (*Attempt, error) {
+// is a top-level record or the status does not belong to it. A missing mirror
+// run record is created only when create is true.
+func (att *Attempt) childRecordAttemptLocked(ctx context.Context, status ir.DAGRunStatus, create bool) (*Attempt, error) {
 	if att.childRecord.resolved {
 		return att.childRecord.attempt, nil
 	}
@@ -131,6 +132,11 @@ func (att *Attempt) childRecordAttemptLocked(ctx context.Context, status ir.DAGR
 	if err != nil {
 		if !errors.Is(err, dagrun.ErrDAGRunIDNotFound) {
 			return nil, err
+		}
+		if !create {
+			// The record may still appear through a later status write, so
+			// leave the mirror unresolved rather than caching nil.
+			return nil, nil
 		}
 		run, err = dataRoot.CreateDAGRun(persis.NewUTC(info.attemptTime), status.DAGRunID)
 		if err != nil {
@@ -160,7 +166,7 @@ func (att *Attempt) childRecordAttemptLocked(ctx context.Context, status ir.DAGR
 // writeChildRecordLocked appends the status to the child DAG's own run record.
 // It must be called with att.mu held after the canonical write succeeded.
 func (att *Attempt) writeChildRecordLocked(ctx context.Context, status ir.DAGRunStatus) error {
-	mirror, err := att.childRecordAttemptLocked(ctx, status)
+	mirror, err := att.childRecordAttemptLocked(ctx, status, true)
 	if err != nil || mirror == nil {
 		return err
 	}
@@ -172,11 +178,30 @@ func (att *Attempt) writeChildRecordLocked(ctx context.Context, status ir.DAGRun
 	return mirror.Write(ctx, status)
 }
 
-// childRecordMirror returns the resolved mirror attempt, if any.
-func (att *Attempt) childRecordMirror() *Attempt {
+// childRecordMirror returns the mirror attempt for a nested child record,
+// resolving it from the persisted status when needed, for example after the
+// attempt was loaded back from disk. The mirror run record is never created
+// here: it first appears when a status is written.
+func (att *Attempt) childRecordMirror(ctx context.Context) (*Attempt, error) {
 	att.mu.RLock()
-	defer att.mu.RUnlock()
-	return att.childRecord.attempt
+	if att.childRecord.resolved {
+		mirror := att.childRecord.attempt
+		att.mu.RUnlock()
+		return mirror, nil
+	}
+	att.mu.RUnlock()
+
+	if _, ok := parseChildAttemptStatusFile(att.file); !ok {
+		return nil, nil
+	}
+	status, err := att.ReadStatus(ctx)
+	if err != nil || status == nil {
+		return nil, err
+	}
+
+	att.mu.Lock()
+	defer att.mu.Unlock()
+	return att.childRecordAttemptLocked(ctx, *status, false)
 }
 
 // closeChildRecordLocked closes the mirror record. It must be called with
