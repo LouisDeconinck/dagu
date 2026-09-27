@@ -410,6 +410,18 @@ var (
 		isBool:    true,
 	}
 
+	pruneArtifactsOlderThanFlag = commandLineFlag{
+		name:         "older-than",
+		shorthand:    "t",
+		defaultValue: "24h",
+		usage:        "Only remove artifact entries older than duration (e.g. 10d, 24h, 1w). A minimum of 1h is enforced",
+	}
+
+	pruneArtifactsRootFlag = commandLineFlag{
+		name:  "root",
+		usage: "Artifact root to prune (default: configured paths.artifact_dir). Entries a surviving run references are kept either way",
+	}
+
 	psDAGFlag = commandLineFlag{
 		name:      "dag",
 		shorthand: "d",
