@@ -524,13 +524,13 @@ func EvalContainerFields(ctx context.Context, ct ir.Container) (ir.Container, er
 	if ct.Env, err = evalEnvSequentially(ctx, ct.Env); err != nil {
 		return ct, fmt.Errorf("failed to evaluate env: %w", err)
 	}
-	if ct.EnvFile, err = evalStringSlice(ctx, ct.EnvFile, "container.envFile", func(path string) cmnvalue.Field {
+	if ct.EnvFile, err = evalStringSlice(ctx, ct.EnvFile, "container.env_file", func(path string) cmnvalue.Field {
 		return cmnvalue.ContainerField(path)
 	}); err != nil {
-		return ct, fmt.Errorf("failed to evaluate envFile: %w", err)
+		return ct, fmt.Errorf("failed to evaluate env_file: %w", err)
 	}
 	if ct.Env, err = loadEnvFileVars(ctx, ct.EnvFile, ct.Env); err != nil {
-		return ct, fmt.Errorf("failed to load envFile: %w", err)
+		return ct, fmt.Errorf("failed to load env_file: %w", err)
 	}
 	if ct.Command, err = evalStringSlice(ctx, ct.Command, "container.command", func(path string) cmnvalue.Field {
 		return cmnvalue.DirectCommandField(path, cmnvalue.CommandContext{Target: cmnvalue.CommandTargetDocker})
@@ -563,7 +563,7 @@ func evalStringSlice(ctx context.Context, ss []string, path string, fieldForPath
 	return result, nil
 }
 
-// loadEnvFileVars reads each envFile entry and returns the env list extended
+// loadEnvFileVars reads each env_file entry and returns the env list extended
 // with the file variables. Later files override earlier ones, and explicit env
 // entries override file variables for the same key, mirroring how docker
 // applies --env-file values before -e/--env flags. A missing or unreadable
@@ -591,11 +591,11 @@ func loadEnvFileVars(ctx context.Context, files, env []string) ([]string, error)
 		}
 		resolved, err := resolver.ResolveFilePathLiteral(file)
 		if err != nil {
-			return nil, fmt.Errorf("envFile %q: %w", file, err)
+			return nil, fmt.Errorf("env_file %q: %w", file, err)
 		}
 		vars, err := godotenv.Read(resolved)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read envFile %q: %w", resolved, err)
+			return nil, fmt.Errorf("failed to read env_file %q: %w", resolved, err)
 		}
 		for key, value := range vars {
 			add(key + "=" + value)
@@ -612,7 +612,7 @@ func loadEnvFileVars(ctx context.Context, files, env []string) ([]string, error)
 	return merged, nil
 }
 
-// envFileSearchDirs returns the directories used to resolve relative envFile
+// envFileSearchDirs returns the directories used to resolve relative env_file
 // paths: the current working directory first, then the DAG file directory,
 // mirroring dotenv file lookup order.
 func envFileSearchDirs(ctx context.Context) []string {

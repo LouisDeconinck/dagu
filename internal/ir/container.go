@@ -28,7 +28,7 @@ type Container struct {
 	// EnvFile lists .env files to load into the container environment
 	// (docker --env-file semantics). File variables have lower precedence than
 	// Env entries. Serialized to JSON like Env for DAGDefinition persistence.
-	EnvFile []string `yaml:"envFile,omitempty" json:"envFile,omitempty"`
+	EnvFile []string `yaml:"env_file,omitempty" json:"env_file,omitempty"`
 	// Volumes specifies the volumes to mount in the container.
 	Volumes []string `yaml:"volumes,omitempty"` // Map of volume names to volume definitions
 	// User is the user to run the container as.

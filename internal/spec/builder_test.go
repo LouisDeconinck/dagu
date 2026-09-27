@@ -2765,13 +2765,13 @@ steps:
 		yaml := `
 container:
   image: alpine
-  envFile: .env.dag
+  env_file: .env.dag
 steps:
   - name: step1
     run: echo test
     container:
       image: alpine
-      envFile:
+      env_file:
         - .env.base
         - .env.local
 `
@@ -3893,7 +3893,7 @@ steps:
 
 	t.Run("LoadEnvAdjacentDotEnvFile", func(t *testing.T) {
 		// A .env file next to the DAG file is loaded even when the DAG does not
-		// declare dotenv or envFile.
+		// declare dotenv.
 		tempDir := t.TempDir()
 		dagFile := filepath.Join(tempDir, "adjacent.yaml")
 		require.NoError(t, os.WriteFile(dagFile, []byte(`

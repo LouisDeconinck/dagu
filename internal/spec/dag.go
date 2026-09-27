@@ -298,7 +298,7 @@ type container struct {
 	Env any `yaml:"env,omitempty"` // Can be a map or struct
 	// EnvFile lists .env files whose variables are injected into the container
 	// environment (docker --env-file semantics). Accepts a string or []string.
-	EnvFile types.StringOrArray `yaml:"envFile,omitempty"`
+	EnvFile types.StringOrArray `yaml:"env_file,omitempty"`
 	// Volumes specifies the volumes to mount in the container.
 	Volumes []string `yaml:"volumes,omitempty"` // Map of volume names to volume definitions
 	// User is the user to run the container as.
