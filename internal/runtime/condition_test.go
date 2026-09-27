@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"testing"
@@ -508,35 +507,33 @@ func TestEvalConditions_CommandCheckInterrupted(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
 	})
-
-	// A process that dies by signal without context cancellation is terminated
-	// rather than exited, so it is not an ordinary not-met result either.
-	t.Run("SignalKilled", func(t *testing.T) {
-		ctx := newTestContext()
-
-		err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "kill -KILL $$"}})
-		require.Error(t, err)
-		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
-	})
-
-	// A background descendant keeps the check's stdout pipe open after the
-	// shell exits, so Output only returns once WaitDelay expires; the result is
-	// an evaluation error, not a not-met condition.
-	t.Run("DescendantHoldsOutputPipe", func(t *testing.T) {
-		ctx := newTestContext()
-
-		err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "sleep 30 & echo done"}})
-		require.ErrorIs(t, err, exec.ErrWaitDelay)
-		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
-	})
 }
 
-// A non-zero exit and a command that cannot be started remain ordinary
-// not-met conditions.
+// The exit status alone decides a command check, so a background descendant
+// that outlives the check neither delays nor changes the result.
+func TestEvalConditions_CommandCheckIgnoresDescendants(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("uses POSIX shell snippets")
+	}
+
+	// The deadline ends before the descendant does, so waiting on it would
+	// turn the result into an interruption.
+	ctx, cancel := context.WithTimeout(newTestContext(), 2*time.Second)
+	defer cancel()
+
+	err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "sleep 5 & exit 0"}})
+	require.NoError(t, err)
+}
+
+// A non-zero exit, a death by signal outside abort or timeout, and a command
+// that cannot be started remain ordinary not-met conditions.
 func TestEvalConditions_CommandCheckNotMet(t *testing.T) {
 	ctx := newTestContext()
 
 	err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "exit 3"}})
+	require.ErrorIs(t, err, runtime.ErrConditionNotMet)
+
+	err = evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "kill -KILL $$"}})
 	require.ErrorIs(t, err, runtime.ErrConditionNotMet)
 
 	err = evalConditions(ctx, nil, []*ir.Condition{{Condition: "./definitely-missing-condition-command"}})

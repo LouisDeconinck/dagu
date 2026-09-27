@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/cmdutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/stringutil"
@@ -248,8 +247,7 @@ func runShellCommand(ctx context.Context, shell []string, commandToRun string, w
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
-	_, err := cmd.Output()
-	if err != nil {
+	if err := cmd.Run(); err != nil {
 		return commandCheckError(ctx, err)
 	}
 	return nil
@@ -293,48 +291,31 @@ func runDirectCommand(ctx context.Context, commandToRun string, workingDir strin
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
-	_, err := cmd.Output()
-	if err != nil {
+	if err := cmd.Run(); err != nil {
 		return commandCheckError(ctx, err)
 	}
 	return nil
 }
 
-// conditionWaitDelay bounds how long Wait keeps reading a check's pipes after
-// the process exits or its context is canceled. A descendant that escaped the
-// process group can keep stdout open, which would otherwise block Output
-// indefinitely.
-const conditionWaitDelay = 3 * time.Second
-
 // prepareConditionCommand groups the check's process and points the context
 // kill at that group, so abort or timeout also reaps children the check
-// spawned and Wait does not block on descriptors they still hold open.
+// spawned. Stdout and stderr stay unset: the result is the exit status alone,
+// and without output pipes a lingering descendant cannot delay it.
 func prepareConditionCommand(cmd *exec.Cmd) {
 	cmdutil.SetupCommand(cmd)
 	cmd.Cancel = func() error {
 		return cmdutil.TerminateProcessGroup(cmd, cmdutil.ForceTermination())
 	}
-	cmd.WaitDelay = conditionWaitDelay
 }
 
 // commandCheckError classifies a failed command-check run. A context that is
-// canceled or past its deadline, or a process terminated by a signal, means the
-// check was interrupted by abort or timeout rather than answered no, so the
-// error propagates as an evaluation error for the owning DAG or step. A normal
-// non-zero exit and a process that never started remain not-met results.
+// canceled or past its deadline means the check was interrupted by abort or
+// timeout rather than answered no, so the error propagates as an evaluation
+// error for the owning DAG or step. Any other failure, including a non-zero
+// exit and a process that never started, is a not-met result.
 func commandCheckError(ctx context.Context, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("condition check interrupted: %w", ctxErr)
-	}
-	// A WaitDelay expiry means the check ended with its output pipes still
-	// held open, so its result is unknown rather than an ordinary no.
-	if errors.Is(err, exec.ErrWaitDelay) {
-		return fmt.Errorf("condition check output wait exceeded: %w", err)
-	}
-	// exitCodeFromError reports a negative code only when the process was
-	// terminated by a signal, which is never an ordinary non-zero exit.
-	if code, found := exitCodeFromError(err); found && code < 0 {
-		return fmt.Errorf("condition check terminated: %w", err)
 	}
 	return fmt.Errorf("%w: %s", ErrConditionNotMet, err)
 }
