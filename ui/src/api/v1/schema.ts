@@ -5256,6 +5256,8 @@ export interface components {
             startedAt: string;
             /** @description RFC 3339 timestamp when the DAG-run finished */
             finishedAt: string;
+            /** @description Top-level error recorded for the DAG-run, such as a definition build failure that prevented the run from starting */
+            error?: string;
             /** @description Whether artifact files are available for this DAG-run */
             artifactsAvailable: boolean;
             /** @description Whether reuse of prior build materializations was disabled for this DAG-run */

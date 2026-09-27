@@ -930,6 +930,21 @@ func (d *queueDispatcher) dispatchAndWaitForStartupWithConditions(
 			)
 			return true
 		}
+		// A persisted definition that can no longer be built can never be
+		// dispatched; fail the run with the real build error instead of
+		// requeueing it forever behind a generic dispatch condition.
+		if buildErr := d.definitionBuildError(ctx, dag, dagStatus); buildErr != nil {
+			logger.Warn(ctx, "Queued DAG definition no longer builds; marking run failed",
+				tag.DAG(runRef.Name),
+				tag.Error(buildErr),
+			)
+			if finalizeErr := d.failQueuedRunBeforeStartup(ctx, queueName, runRef, buildErr, conditionStage); finalizeErr != nil {
+				logger.Error(ctx, "Failed to finalize queued DAG run after definition failure", tag.Error(finalizeErr))
+				conditionStage.flush(ctx)
+				return false
+			}
+			return true
+		}
 		logger.Warn(ctx, "Failed to dispatch DAG; leaving it queued for the next scan", tag.Error(err))
 		if shouldRecordStartupCondition(err) {
 			conditionStage.observe(queuedDispatchCondition(err)...)
@@ -960,6 +975,13 @@ func (d *queueDispatcher) executeDistributedHandoff(
 	defer release()
 	return d.dagExecutor.ExecuteDAGWithAdmission(ctx, dag, dispatch.DispatchOperationRetry,
 		runID, dagStatus, dagStatus.TriggerType, dagStatus.ScheduleTime, admissionReservationToken)
+}
+
+func (d *queueDispatcher) definitionBuildError(ctx context.Context, dag *ir.DAG, status *ir.DAGRunStatus) error {
+	if d.dagExecutor == nil {
+		return nil
+	}
+	return d.dagExecutor.definitionBuildError(ctx, dag, status)
 }
 
 func (d *queueDispatcher) reserveDistributedAdmission(

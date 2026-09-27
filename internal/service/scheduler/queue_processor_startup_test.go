@@ -439,7 +439,10 @@ func TestQueueDispatcher_DispatchAndWaitForStartup_PermanentErrorLeavesRunQueued
 	}
 
 	dagExec := NewDAGExecutor(disp, nil, config.ExecutionModeDistributed, "")
-	dag := &ir.DAG{Name: "test-dag"}
+	dag := &ir.DAG{
+		Name:     "test-dag",
+		YamlData: []byte("name: test-dag\nsteps:\n  - name: s1\n    command: echo hello\n"),
+	}
 	status := &ir.DAGRunStatus{
 		Name:        "test-dag",
 		DAGRunID:    "run-1",

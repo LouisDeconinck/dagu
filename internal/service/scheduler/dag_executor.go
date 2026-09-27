@@ -385,6 +385,22 @@ func (e *DAGExecutor) IsDistributed(dag *ir.DAG) bool {
 	return e.shouldUseDistributedExecution(dag)
 }
 
+// definitionBuildError rebuilds a queued DAG snapshot the same way dispatch
+// does. A non-nil result means the persisted definition is permanently broken,
+// so the run can never be dispatched and the failure must be surfaced on the
+// run record instead of requeueing behind a generic dispatch error.
+func (e *DAGExecutor) definitionBuildError(ctx context.Context, dag *ir.DAG, status *ir.DAGRunStatus) error {
+	var params any
+	if status != nil {
+		params = status.ParamsList
+	}
+	_, err := spec.ReloadRuntimeSnapshot(ctx, dag, params, spec.ResolveRuntimeParamsOptions{
+		BaseConfig:             e.baseConfigPath,
+		WorkspaceBaseConfigDir: e.workspaceBaseConfigDir,
+	})
+	return err
+}
+
 // dispatchToCoordinator dispatches a task to the coordinator for distributed execution.
 // This is called after the job has been persisted (for START operations via HandleJob)
 // or when retrying dispatch (for RETRY operations from queue handler).
