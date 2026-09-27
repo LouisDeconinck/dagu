@@ -4,9 +4,11 @@
 package spec023_preconditions_test
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/dagucloud/dagu/v2/conformance/harness"
 	"github.com/stretchr/testify/require"
@@ -521,6 +523,58 @@ func TestRuntimeCommandCheckDetailsUnix(t *testing.T) {
 			require.NotContains(t, status.Stdout(), "[skipped]")
 		})
 	}
+
+	// Stopping the run interrupts a running command check: the run aborts
+	// without waiting for the check, and the gated step neither runs nor is
+	// skipped.
+	t.Run("stop interrupts command check", func(t *testing.T) {
+		t.Parallel()
+
+		dagu := harness.NewRunner(t)
+		env := []string{"DAGU_HOME=" + filepath.Join(t.TempDir(), "dagu")}
+		const (
+			runID = "spec023-condition-stop"
+			file  = "command_check_stop.yaml"
+		)
+
+		proc := dagu.StartWithEnv(env, "start", "--run-id="+runID, file)
+
+		deadline := time.Now().Add(harness.WaitTimeout(t))
+		for {
+			// Redirection creates the file before printf writes the marker.
+			content, err := os.ReadFile(dagu.ProjectPath("check-started.txt"))
+			if err == nil && string(content) == "started\n" {
+				break
+			}
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("reading start marker: %v", err)
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("command check never started: %s", proc.FailureOutput())
+			}
+			select {
+			case <-proc.Done():
+				t.Fatalf("dagu start exited before the command check started: %s", proc.FailureOutput())
+			case <-time.After(50 * time.Millisecond):
+			}
+		}
+		stopResult := dagu.RunWithEnv(env, "stop", "--run-id="+runID, file)
+		stopResult.ExpectExitCode(0)
+
+		// The check sleeps longer than this wait, so only an interrupted check
+		// lets the run end in time.
+		select {
+		case <-proc.Done():
+		case <-time.After(harness.WaitTimeout(t)):
+			t.Fatal("dagu start did not exit after dagu stop returned")
+		}
+		dagu.ExpectNoFile("stop-ran.txt")
+
+		status := dagu.RunWithEnv(env, "status", "--run-id="+runID, file)
+		status.ExpectExitCode(0)
+		require.Contains(t, status.Stdout(), "Result: Aborted")
+		require.NotContains(t, status.Stdout(), "[skipped]")
+	})
 }
 
 func TestRuntimeValueMatchDetailsUnix(t *testing.T) {

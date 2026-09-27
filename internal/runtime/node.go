@@ -61,6 +61,8 @@ type Node struct {
 	// bypassPreconditions skips step precondition evaluation for this node.
 	// Step-retry plans set it when the retry asks to bypass preconditions.
 	bypassPreconditions bool
+	// preconditionCancel interrupts the running precondition check.
+	preconditionCancel context.CancelFunc
 
 	outputSchemaOnce sync.Once
 	outputSchema     *jsonschema.Resolved
@@ -215,6 +217,26 @@ func (n *Node) setupContextWithTimeout(ctx context.Context) (context.Context, co
 		cancel()
 		n.clearExecCancel()
 	}, 0
+}
+
+// watchPreconditionStop returns a context for the precondition check that Stop
+// cancels, including a stop that aborted the node before the check started.
+// The returned func ends the watch and must be called once the check returns.
+func (n *Node) watchPreconditionStop(ctx context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	n.mu.Lock()
+	n.preconditionCancel = cancel
+	aborted := n.Status() == ir.NodeAborted
+	n.mu.Unlock()
+	if aborted {
+		cancel()
+	}
+	return ctx, func() {
+		n.mu.Lock()
+		n.preconditionCancel = nil
+		n.mu.Unlock()
+		cancel()
+	}
 }
 
 func (n *Node) setExecCancel(cancel context.CancelFunc) {
@@ -1217,9 +1239,13 @@ func (n *Node) Stop(ctx context.Context, intent cmdutil.TerminationIntent, allow
 		n.SetStatus(ir.NodeAborted)
 	}
 	cancel := n.execCancel
+	cancelCheck := n.preconditionCancel
 	cmd := n.cmd
 	n.mu.Unlock()
 
+	if isTermination && cancelCheck != nil {
+		cancelCheck()
+	}
 	if isTermination && cancel != nil && cmd == nil {
 		cancel()
 	}
@@ -1874,7 +1900,9 @@ func (node *Node) evalPreconditions(ctx context.Context) error {
 	logger.Infof(ctx, "Checking preconditions for \"%s\"", node.Name())
 	env := GetEnv(ctx)
 	shell := env.Shell(ctx)
-	results, err := EvaluateConditions(ctx, shell, conditions)
+	checkCtx, stopCheck := node.watchPreconditionStop(ctx)
+	results, err := EvaluateConditions(checkCtx, shell, conditions)
+	stopCheck()
 	node.SetPreconditionResults(results)
 	if err != nil {
 		logger.Infof(ctx, "Preconditions failed for \"%s\"", node.Name())

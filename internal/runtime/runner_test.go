@@ -2209,6 +2209,25 @@ func TestRunner_DAGPreconditions(t *testing.T) {
 		assert.Equal(t, ir.Failed, r.runner.Status(ctx, plan.Plan))
 		assert.Equal(t, ir.NodeNotStarted, plan.GetNodeByName("1").State().Status)
 	})
+
+	// An abort that interrupts a DAG-level check aborts the run without
+	// waiting for the check to finish.
+	t.Run("DAGPreconditionInterruptedByAbort", func(t *testing.T) {
+		r := setupRunner(t)
+		plan := r.newPlan(t, successStep("1"))
+		ctx := dagPreconditionContext(r, plan, &ir.Condition{Condition: test.Sleep(30 * time.Second)})
+
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			plan.signal(syscall.SIGTERM)
+		}()
+
+		start := time.Now()
+		require.NoError(t, r.runner.Run(ctx, plan.Plan, nil))
+		assert.Less(t, time.Since(start), 10*time.Second)
+		assert.Equal(t, ir.Aborted, r.runner.Status(ctx, plan.Plan))
+		assert.Equal(t, ir.NodeNotStarted, plan.GetNodeByName("1").State().Status)
+	})
 }
 
 // dagPreconditionContext returns a run context for a DAG gated by conditions.
@@ -2538,6 +2557,22 @@ func TestRunner_StepPreconditionInterrupted(t *testing.T) {
 		require.ErrorIs(t, result.Error, context.DeadlineExceeded)
 		result.assertNodeStatus(t, "1", ir.NodeAborted)
 		result.assertNodeStatus(t, "onFailure", ir.NodeSucceeded)
+	})
+
+	t.Run("Abort", func(t *testing.T) {
+		r := setupRunner(t, withOnAbort(successStep("onAbort")))
+		plan := newInterruptedPlan(r)
+
+		go func() {
+			waitForNodeStatus(plan.Plan, "1", ir.NodeRunning, 5*time.Second)
+			plan.signal(syscall.SIGTERM)
+		}()
+
+		start := time.Now()
+		result := plan.assertRun(t, ir.Aborted)
+		assert.Less(t, time.Since(start), 10*time.Second)
+		result.assertNodeStatus(t, "1", ir.NodeAborted)
+		result.assertNodeStatus(t, "onAbort", ir.NodeSucceeded)
 	})
 }
 
