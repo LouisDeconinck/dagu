@@ -242,13 +242,14 @@ func runShellCommand(ctx context.Context, shell []string, commandToRun string, w
 	args = appendShellCommandFlag(shell[0], args)
 	args = append(args, commandToRun)
 	cmd := exec.CommandContext(ctx, shell[0], args...) // nolint:gosec
+	prepareConditionCommand(cmd)
 	cmd.Env = append(cmd.Env, AllEnvs(ctx)...)
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
 	_, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("%w: %s", ErrConditionNotMet, err)
+		return commandCheckError(ctx, err)
 	}
 	return nil
 }
@@ -286,13 +287,41 @@ func hasShellCommandFlag(shell string, args []string) bool {
 
 func runDirectCommand(ctx context.Context, commandToRun string, workingDir string) error {
 	cmd := exec.CommandContext(ctx, commandToRun)
+	prepareConditionCommand(cmd)
 	cmd.Env = append(cmd.Env, AllEnvs(ctx)...)
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
 	_, err := cmd.Output()
 	if err != nil {
-		return fmt.Errorf("%w: %s", ErrConditionNotMet, err)
+		return commandCheckError(ctx, err)
 	}
 	return nil
+}
+
+// prepareConditionCommand groups the check's process and points the context
+// kill at that group, so abort or timeout also reaps children the check
+// spawned and Wait does not block on descriptors they still hold open.
+func prepareConditionCommand(cmd *exec.Cmd) {
+	cmdutil.SetupCommand(cmd)
+	cmd.Cancel = func() error {
+		return cmdutil.TerminateProcessGroup(cmd, cmdutil.ForceTermination())
+	}
+}
+
+// commandCheckError classifies a failed command-check run. A context that is
+// canceled or past its deadline, or a process terminated by a signal, means the
+// check was interrupted by abort or timeout rather than answered no, so the
+// error propagates as an evaluation error for the owning DAG or step. A normal
+// non-zero exit and a process that never started remain not-met results.
+func commandCheckError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("condition check interrupted: %w", ctxErr)
+	}
+	// exitCodeFromError reports a negative code only when the process was
+	// terminated by a signal, which is never an ordinary non-zero exit.
+	if code, found := exitCodeFromError(err); found && code < 0 {
+		return fmt.Errorf("condition check terminated: %w", err)
+	}
+	return fmt.Errorf("%w: %s", ErrConditionNotMet, err)
 }

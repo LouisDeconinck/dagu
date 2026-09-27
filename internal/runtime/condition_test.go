@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"testing"
+	"time"
 
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
 	"github.com/dagucloud/dagu/v2/internal/ir"
@@ -461,6 +462,73 @@ func TestEvalConditions_CommandFormExpandsHomeRelativeScopeVars(t *testing.T) {
 		{Condition: "test -f $TEST_FILE"},
 	})
 	require.NoError(t, err)
+}
+
+// A command check interrupted by workflow abort or timeout is an evaluation
+// error, not a not-met condition, so the owning DAG or step follows the abort
+// or timeout outcome instead of skipping.
+func TestEvalConditions_CommandCheckInterrupted(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("uses POSIX shell snippets")
+	}
+
+	t.Run("ShellCanceledMidCommand", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(newTestContext())
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			cancel()
+		}()
+
+		err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "sleep 30"}})
+		require.ErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
+	})
+
+	t.Run("ShellDeadlineExceeded", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(newTestContext(), 100*time.Millisecond)
+		defer cancel()
+
+		err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "sleep 30"}})
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
+	})
+
+	t.Run("DirectCanceledMidCommand", func(t *testing.T) {
+		script := filepath.Join(t.TempDir(), "sleep.sh")
+		require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755))
+
+		ctx, cancel := context.WithCancel(newTestContext())
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			cancel()
+		}()
+
+		err := evalConditions(ctx, nil, []*ir.Condition{{Condition: script}})
+		require.ErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
+	})
+
+	// A process that dies by signal without context cancellation is terminated
+	// rather than exited, so it is not an ordinary not-met result either.
+	t.Run("SignalKilled", func(t *testing.T) {
+		ctx := newTestContext()
+
+		err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "kill -KILL $$"}})
+		require.Error(t, err)
+		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
+	})
+}
+
+// A non-zero exit and a command that cannot be started remain ordinary
+// not-met conditions.
+func TestEvalConditions_CommandCheckNotMet(t *testing.T) {
+	ctx := newTestContext()
+
+	err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "exit 3"}})
+	require.ErrorIs(t, err, runtime.ErrConditionNotMet)
+
+	err = evalConditions(ctx, nil, []*ir.Condition{{Condition: "./definitely-missing-condition-command"}})
+	require.ErrorIs(t, err, runtime.ErrConditionNotMet)
 }
 
 // A threshold can come from a secret, and condition errors are persisted with

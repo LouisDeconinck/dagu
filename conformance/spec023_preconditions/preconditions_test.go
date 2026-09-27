@@ -4,10 +4,12 @@
 package spec023_preconditions_test
 
 import (
+	"path/filepath"
 	"runtime"
 	"testing"
 
 	"github.com/dagucloud/dagu/v2/conformance/harness"
+	"github.com/stretchr/testify/require"
 )
 
 func TestValidatePreconditions(t *testing.T) {
@@ -490,6 +492,26 @@ func TestRuntimeCommandCheckDetailsUnix(t *testing.T) {
 		result := dagu.Run("start", "command_check_missing_command_skips.yaml")
 		result.ExpectExitCode(0)
 		dagu.ExpectNoFile("missing-command-ran.txt")
+	})
+
+	// A command check killed by the workflow timeout is an interruption, not a
+	// not-met result: the run aborts instead of skipping the gated step. The
+	// harness has no deterministic way to abort mid-check, so the timeout is
+	// the interrupt under test.
+	t.Run("timeout kills command check and aborts the run", func(t *testing.T) {
+		t.Parallel()
+
+		dagu := harness.NewRunner(t)
+		env := []string{"DAGU_HOME=" + filepath.Join(t.TempDir(), "dagu")}
+		const runID = "spec023-condition-timeout"
+
+		result := dagu.RunWithEnv(env, "start", "--run-id="+runID, "command_check_timeout_aborts.yaml")
+		result.ExpectNonZeroExitCode()
+		dagu.ExpectNoFile("timeout-ran.txt")
+
+		status := dagu.RunWithEnv(env, "status", "--run-id="+runID, "command_check_timeout_aborts.yaml")
+		status.ExpectExitCode(0)
+		require.Contains(t, status.Stdout(), "Aborted")
 	})
 }
 
