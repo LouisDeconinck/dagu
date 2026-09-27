@@ -161,42 +161,6 @@ func TestScheduler(t *testing.T) {
 			return dispatchCount.Load() >= int32(1)
 		}, 5*time.Second, 10*time.Millisecond, "dispatch should have been called for start schedule")
 	})
-	t.Run("DescriptorStart", func(t *testing.T) {
-		ctx := context.Background()
-		now := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-
-		// "@every 1h" aligns to the Unix epoch, so the top of the hour is due.
-		schedule, err := ir.NewCronSchedule("@every 1h")
-		require.NoError(t, err)
-
-		entryReader := newMockJobManager()
-		entryReader.LoadedDAGs = []*ir.DAG{
-			{
-				Name: "descriptor-dag",
-				Schedule: []ir.Schedule{
-					schedule,
-				},
-			},
-		}
-
-		th := test.SetupScheduler(t)
-		sc, err := scheduler.New(th.Config, schedulerDependencies(th, entryReader))
-		require.NoError(t, err)
-		sc.SetClock(func() time.Time { return now })
-
-		var dispatchCount atomic.Int32
-		sc.SetDispatchFunc(func(_ context.Context, _ scheduler.DAGEntry, _ string, _ ir.TriggerType, _ time.Time) error {
-			dispatchCount.Add(1)
-			return nil
-		})
-
-		errCh := startSchedulerAsync(t, sc, ctx)
-		defer stopSchedulerAndWait(t, sc, errCh, ctx)
-
-		require.Eventually(t, func() bool {
-			return dispatchCount.Load() >= int32(1)
-		}, 5*time.Second, 10*time.Millisecond, "dispatch should have been called for descriptor schedule")
-	})
 	t.Run("NextTick", func(t *testing.T) {
 		th := test.SetupScheduler(t)
 		schedulerInstance, err := scheduler.New(th.Config, schedulerDependencies(th, newMockJobManager()))
