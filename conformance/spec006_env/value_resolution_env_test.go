@@ -304,6 +304,15 @@ func TestRuntime(t *testing.T) {
 		dagu.ExpectFileContent("protected-final.txt", "ROOT_COPY=root-shadow\nfinal-protected\nresolved-matches-process\n")
 	})
 
+	t.Run("missing container env_file fails the step", func(t *testing.T) {
+		t.Parallel()
+
+		dagu := harness.NewRunner(t)
+		result := dagu.Run("start", "container_env_file_missing.yaml")
+		result.ExpectNonZeroExitCode()
+		result.ExpectStderrContains("missing.env")
+	})
+
 	t.Run("duplicate predecessor outputs follow authored dependency order", func(t *testing.T) {
 		t.Parallel()
 
