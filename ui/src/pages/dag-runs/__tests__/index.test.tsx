@@ -22,6 +22,7 @@ import DAGRuns from '..';
 
 const {
   createRunViewMock,
+  dagsListState,
   deleteRunViewMock,
   readSearchStateMock,
   searchStateMock,
@@ -35,6 +36,7 @@ const {
   const writeState = vi.fn();
   return {
     createRunViewMock: vi.fn(),
+    dagsListState: { dags: [] as { dag: { name: string } }[] },
     deleteRunViewMock: vi.fn(),
     updateRunViewMock: vi.fn(),
     readSearchStateMock: readState,
@@ -76,8 +78,13 @@ vi.mock('@/contexts/UserPreference', () => ({
 }));
 
 vi.mock('@/hooks/api', () => ({
-  useQuery: () => ({
-    data: { labels: [] },
+  useQuery: (path: string) => ({
+    data:
+      path === '/dags/labels'
+        ? { labels: [] }
+        : path === '/dags'
+          ? { dags: dagsListState.dags }
+          : undefined,
   }),
 }));
 
@@ -186,6 +193,7 @@ beforeEach(() => {
   updateRunViewMock.mockReset();
   deleteRunViewMock.mockReset();
   sharedRunViewState.views = [];
+  dagsListState.dags = [];
   usePaginatedDAGRunsMock.mockReset();
   usePaginatedDAGRunsMock.mockReturnValue({
     dagRuns: [],
@@ -527,6 +535,82 @@ describe('DAGRuns page', () => {
     expect(locationSearchParams().get('name')).toBe('deploy');
     expect(locationSearchParams().get('selectedRunName')).toBe('demo');
     expect(locationSearchParams().get('selectedRunId')).toBe('run-1');
+  });
+
+  it('suggests DAG names and applies the selected suggestion as the filter', async () => {
+    dagsListState.dags = [
+      { dag: { name: 'deploy-api' } },
+      { dag: { name: 'nightly-backup' } },
+    ];
+    renderPage();
+
+    const input = screen.getByPlaceholderText('Filter by DAG name...');
+    fireEvent.focus(input);
+    expect(screen.getByRole('option', { name: 'deploy-api' })).toBeVisible();
+    expect(
+      screen.getByRole('option', { name: 'nightly-backup' })
+    ).toBeVisible();
+
+    fireEvent.change(input, { target: { value: 'deploy' } });
+    expect(
+      screen.queryByRole('option', { name: 'nightly-backup' })
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('option', { name: 'deploy-api' }));
+    expect(input).toHaveValue('deploy-api');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => {
+      expect(lastRunQuery()['name']).toBe('deploy-api');
+    });
+    expect(locationSearchParams().get('name')).toBe('deploy-api');
+  });
+
+  it('suggests run IDs from loaded runs and applies the selection', async () => {
+    usePaginatedDAGRunsMock.mockReturnValue({
+      dagRuns: [
+        {
+          name: 'demo',
+          dagRunId: 'run-abc-1',
+          scheduleTime: '2026-09-16T02:00:00Z',
+        },
+        {
+          name: 'demo',
+          dagRunId: 'run-abc-2',
+          scheduleTime: '2026-09-16T01:00:00Z',
+        },
+        {
+          name: 'other',
+          dagRunId: 'run-xyz-9',
+          scheduleTime: '2026-09-16T01:30:00Z',
+        },
+      ],
+      isInitialLoading: false,
+      isLoadingMore: false,
+      loadMoreError: null,
+      hasMore: false,
+      refresh: vi.fn(),
+      loadMore: vi.fn(),
+    });
+    renderPage();
+
+    const input = screen.getByPlaceholderText('Filter by Run ID...');
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'abc' } });
+
+    expect(screen.getByRole('option', { name: 'run-abc-1' })).toBeVisible();
+    expect(screen.getByRole('option', { name: 'run-abc-2' })).toBeVisible();
+    expect(
+      screen.queryByRole('option', { name: 'run-xyz-9' })
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('option', { name: 'run-abc-2' }));
+    expect(input).toHaveValue('run-abc-2');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    await waitFor(() => {
+      expect(lastRunQuery()['dagRunId']).toBe('run-abc-2');
+    });
   });
 
   it('keeps only active date-mode parameters after Search', async () => {
