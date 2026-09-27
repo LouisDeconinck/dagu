@@ -101,7 +101,7 @@ func (r Resolver) Object(ctx context.Context, obj any, field Field) (any, error)
 
 	transform := func(ctx context.Context, s string) (string, error) {
 		if policy.object == objectEvalPipeline {
-			return evalStringValue(ctx, s, buildOptions(r.optionsFor(policy)))
+			return r.evalObjectString(ctx, s, field, policy)
 		}
 		return r.resolveString(ctx, s, field)
 	}
@@ -132,6 +132,30 @@ func (r Resolver) resolveString(ctx context.Context, raw string, field Field) (s
 		}
 	}
 	evaluated, err := evalString(ctx, resolved, r.optionsFor(policy)...)
+	if err != nil {
+		return "", err
+	}
+	return restoreProtectedReferences(evaluated, protected), nil
+}
+
+// evalObjectString resolves one string leaf of an object through the eval
+// pipeline. When the field policy is strict, Dagu-owned references such as
+// ${params.name} resolve first through the binding scope; unresolved
+// references are left in place for the eval pipeline.
+func (r Resolver) evalObjectString(ctx context.Context, raw string, field Field, policy resolverPolicy) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	resolved := raw
+	var protected map[string]string
+	if policy.strict {
+		var err error
+		resolved, protected, err = resolveBindings(ctx, raw, r.bindingScope(), field.path, r.notices)
+		if err != nil {
+			return "", fieldError(field, err)
+		}
+	}
+	evaluated, err := evalStringValue(ctx, resolved, buildOptions(r.optionsFor(policy)))
 	if err != nil {
 		return "", err
 	}
@@ -237,7 +261,7 @@ func policyForField(field Field) resolverPolicy {
 	case fieldDotenvPath:
 		return resolverPolicy{strict: true, options: []option{withOSExpansion(), withoutSubstitute()}}
 	case fieldHostConfigObject:
-		return resolverPolicy{object: objectEvalPipeline, envVariables: envVariablesUser, options: []option{withoutSubstitute()}}
+		return resolverPolicy{strict: true, object: objectEvalPipeline, envVariables: envVariablesUser, options: []option{withoutSubstitute()}}
 	case fieldLogPath:
 		return resolverPolicy{options: []option{withOSExpansion(), withoutSubstitute()}}
 	case fieldServerBasePath, fieldCoordinatorArtifactBaseDir:

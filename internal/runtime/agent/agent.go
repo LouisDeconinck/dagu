@@ -2074,9 +2074,9 @@ func (a *Agent) evaluateMailConfigs(ctx context.Context) error {
 }
 
 func evalHostConfigObject[T any](ctx context.Context, obj T, vars map[string]string, path string) (T, error) {
+	env := runtime.GetEnv(ctx)
 	scope := cmnvalue.GetEnvScope(ctx)
 	if scope == nil {
-		env := runtime.GetEnv(ctx)
 		scope = env.Scope
 	}
 	if len(vars) > 0 {
@@ -2085,7 +2085,19 @@ func evalHostConfigObject[T any](ctx context.Context, obj T, vars map[string]str
 		}
 		scope = scope.WithEntries(vars, cmnvalue.EnvSourceStepEnv)
 	}
-	resolver := cmnvalue.NewResolver(cmnvalue.StaticScope{}, cmnvalue.RuntimeScope{Env: scope})
+
+	var consts, params, paramDeclarations cmnvalue.Values
+	var paramsJSON string
+	if env.DAG != nil {
+		consts = cmnvalue.Values(env.DAG.Consts)
+		params = env.DAG.ParamValues()
+		paramsJSON = env.DAG.ParamsJSON
+		paramDeclarations = env.DAG.ParamDeclarations()
+	}
+	resolver := cmnvalue.NewResolver(
+		cmnvalue.StaticScope{Consts: consts, Params: paramDeclarations},
+		cmnvalue.RuntimeScope{Consts: consts, Params: params, ParamsJSON: paramsJSON, Env: scope},
+	)
 	got, err := resolver.Object(ctx, obj, cmnvalue.HostConfigObjectField(path))
 	if err != nil {
 		return obj, err
