@@ -28,6 +28,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/eventstore"
 	"github.com/dagucloud/dagu/v2/internal/ir"
+	"github.com/dagucloud/dagu/v2/internal/launcher"
 	"github.com/dagucloud/dagu/v2/internal/license"
 	"github.com/dagucloud/dagu/v2/internal/persis"
 	"github.com/dagucloud/dagu/v2/internal/persis/file"
@@ -85,6 +86,17 @@ func (c *Context) WithEventSource(service string) *Context {
 		Service:  service,
 		Instance: c.EventSourceInstance,
 	}))
+}
+
+// withSignalPropagation returns a context carrying a launcher.ProcessRegistry
+// when signal_handling.enable_propagation is enabled. Supervising commands use
+// the registry to forward shutdown signals to the process groups of DAG-run
+// subprocesses they launched. When disabled the context is returned unchanged.
+func (c *Context) withSignalPropagation(ctx context.Context) context.Context {
+	if c == nil || c.Config == nil || !c.Config.SignalHandling.EnablePropagation {
+		return ctx
+	}
+	return launcher.ContextWithProcessRegistry(ctx, launcher.NewProcessRegistry())
 }
 
 func (c *Context) withEvent(service *eventstore.Service) *Context {

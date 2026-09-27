@@ -112,7 +112,7 @@ func runStartAll(ctx *Context, _ []string) error {
 	defer stop()
 
 	// Create a signal-aware context for services (used for auth init and all service operations)
-	serviceCtx := ctx.WithContext(signalCtx)
+	serviceCtx := ctx.WithContext(ctx.withSignalPropagation(signalCtx))
 	if _, err := persisfile.NewDAGSettingsStore(
 		serviceCtx.Config,
 		serviceCtx.backend.Collection(persis.CollectionDAGSettings),

@@ -2646,3 +2646,56 @@ default_execution_mode: invalid
 		assert.Contains(t, err.Error(), "invalid default_execution_mode")
 	})
 }
+
+func TestLoad_SignalHandling(t *testing.T) {
+	t.Run("DefaultDisabled", func(t *testing.T) {
+		cfg := testLoad(t)
+		assert.False(t, cfg.SignalHandling.EnablePropagation)
+	})
+
+	t.Run("YAML", func(t *testing.T) {
+		cfg := loadFromYAML(t, `
+signal_handling:
+  enable_propagation: true
+`)
+		assert.True(t, cfg.SignalHandling.EnablePropagation)
+	})
+
+	t.Run("Environment", func(t *testing.T) {
+		cfg := loadWithEnv(t, "# empty", map[string]string{
+			"DAGU_SIGNAL_PROPAGATION": "true",
+		})
+		assert.True(t, cfg.SignalHandling.EnablePropagation)
+	})
+
+	t.Run("EnvironmentOverridesYAML", func(t *testing.T) {
+		cfg := loadWithEnv(t, `
+signal_handling:
+  enable_propagation: false
+`, map[string]string{
+			"DAGU_SIGNAL_PROPAGATION": "true",
+		})
+		assert.True(t, cfg.SignalHandling.EnablePropagation)
+	})
+
+	// The camelCase spelling is rejected in config.yaml like every other
+	// legacy key, but remains accepted in admin.yaml for compatibility.
+	t.Run("CamelCaseYAMLRejected", func(t *testing.T) {
+		err := loadWithErrorFromYAML(t, `
+signalHandling:
+  enablePropagation: true
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "signal_handling.enable_propagation")
+	})
+
+	t.Run("CamelCaseAdminYAML", func(t *testing.T) {
+		homeDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(homeDir, "admin.yaml"), []byte(`
+signalHandling:
+  enablePropagation: true
+`), 0600))
+		cfg := testLoad(t, WithAppHomeDir(homeDir))
+		assert.True(t, cfg.SignalHandling.EnablePropagation)
+	})
+}

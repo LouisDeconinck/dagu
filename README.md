@@ -964,6 +964,7 @@ OIDC variables: `DAGU_AUTH_OIDC_CLIENT_ID`, `DAGU_AUTH_OIDC_CLIENT_SECRET`, `DAG
 | `DAGU_SCHEDULER_ZOMBIE_DETECTION_INTERVAL` | `45s` | Zombie run detection interval (`0` to disable) |
 | `DAGU_SCHEDULER_LOCK_STALE_THRESHOLD` | `30s` | HA lock stale threshold |
 | `DAGU_QUEUE_ENABLED` | `true` | Enable queue system |
+| `DAGU_SIGNAL_PROPAGATION` | `false` | Forward shutdown signals (`SIGINT`/`SIGTERM`) received by the server or scheduler to the process groups of running DAG-run subprocesses it launched |
 
 ### Coordinator / Worker
 
