@@ -299,13 +299,19 @@ func parseCronExpression(expr string) (cron.Schedule, string, error) {
 	}
 
 	// "@every <duration>" has no calendar-time equivalent, so it keeps its
-	// descriptor form as the canonical expression.
-	if duration, ok := strings.CutPrefix(normalized, "@every "); ok {
+	// descriptor form as the canonical expression. A timezone prefix is
+	// dropped: interval boundaries are aligned to the Unix epoch in every zone.
+	intervalExpr := normalized
+	if i := strings.IndexByte(intervalExpr, ' '); i > 0 &&
+		(strings.HasPrefix(intervalExpr, "TZ=") || strings.HasPrefix(intervalExpr, "CRON_TZ=")) {
+		intervalExpr = intervalExpr[i+1:]
+	}
+	if duration, ok := strings.CutPrefix(intervalExpr, "@every "); ok {
 		parsed, err := newIntervalSchedule(duration)
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid cron expression %q: %w", normalized, err)
 		}
-		return parsed, normalized, nil
+		return parsed, intervalExpr, nil
 	}
 
 	parsed, err := standardCronParser.Parse(normalized)
@@ -321,7 +327,7 @@ func parseCronExpression(expr string) (cron.Schedule, string, error) {
 // fire time falls inside the current tick, so a relative delay would never
 // be due.
 type intervalSchedule struct {
-	delay time.Duration // whole seconds, at least one second
+	delay time.Duration // whole seconds, at least one minute
 }
 
 func newIntervalSchedule(arg string) (cron.Schedule, error) {
@@ -329,11 +335,12 @@ func newIntervalSchedule(arg string) (cron.Schedule, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Same normalization as robfig's Every: sub-second precision is truncated
-	// and delays below one second round up to one second.
-	if delay < time.Second {
-		delay = time.Second
+	// The scheduler evaluates schedules once per minute, so a shorter interval
+	// could never fire at its configured frequency.
+	if delay < time.Minute {
+		return nil, fmt.Errorf("interval must be at least one minute")
 	}
+	// Sub-second precision is truncated as with robfig's Every.
 	return intervalSchedule{delay: delay - delay%time.Second}, nil
 }
 
