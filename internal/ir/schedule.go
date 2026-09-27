@@ -280,26 +280,12 @@ func parseScheduleMap(m map[string]any, opts ScheduleParseOptions) (Schedule, er
 
 func parseCronExpression(expr string) (cron.Schedule, string, error) {
 	normalized := strings.Join(strings.Fields(expr), " ")
-	// Canonical expressions keep equivalent schedules identical in durable state.
-	switch normalized {
-	case "@hourly":
-		normalized = "0 * * * *"
-	case "@daily", "@midnight":
-		normalized = "0 0 * * *"
-	case "@weekly":
-		normalized = "0 0 * * 0"
-	case "@monthly":
-		normalized = "0 0 1 * *"
-	case "@yearly", "@annually":
-		normalized = "0 0 1 1 *"
-	}
-
 	if normalized == "" {
 		return nil, "", fmt.Errorf("cron expression must not be empty")
 	}
 
 	// "@every <duration>" has no calendar-time equivalent, so it keeps its
-	// descriptor form as the canonical expression.
+	// descriptor form, with the shortest duration, as the canonical expression.
 	tzPrefix, body := splitTimezonePrefix(normalized)
 	if duration, ok := strings.CutPrefix(body, "@every "); ok {
 		// Interval boundaries are aligned to the Unix epoch in every zone, so
@@ -311,7 +297,21 @@ func parseCronExpression(expr string) (cron.Schedule, string, error) {
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid cron expression %q: %w", normalized, err)
 		}
-		return parsed, normalized, nil
+		return parsed, "@every " + formatInterval(parsed.delay), nil
+	}
+
+	// Canonical expressions keep equivalent schedules identical in durable state.
+	switch body {
+	case "@hourly":
+		normalized = tzPrefix + "0 * * * *"
+	case "@daily", "@midnight":
+		normalized = tzPrefix + "0 0 * * *"
+	case "@weekly":
+		normalized = tzPrefix + "0 0 * * 0"
+	case "@monthly":
+		normalized = tzPrefix + "0 0 1 * *"
+	case "@yearly", "@annually":
+		normalized = tzPrefix + "0 0 1 1 *"
 	}
 
 	parsed, err := standardCronParser.Parse(normalized)
@@ -344,17 +344,27 @@ type intervalSchedule struct {
 	delay time.Duration // positive whole minutes
 }
 
-func newIntervalSchedule(arg string) (cron.Schedule, error) {
+func newIntervalSchedule(arg string) (intervalSchedule, error) {
 	delay, err := time.ParseDuration(arg)
 	if err != nil {
-		return nil, err
+		return intervalSchedule{}, err
 	}
 	// The scheduler evaluates schedules on whole-minute ticks, so any other
 	// interval would fire on a coarser grid than configured.
 	if delay < time.Minute || delay%time.Minute != 0 {
-		return nil, fmt.Errorf("interval must be a positive whole number of minutes")
+		return intervalSchedule{}, fmt.Errorf("interval must be a positive whole number of minutes")
 	}
 	return intervalSchedule{delay: delay}, nil
+}
+
+// formatInterval returns the shortest duration string for a whole-minute
+// interval, e.g. "1h" rather than "1h0m0s" or "60m".
+func formatInterval(d time.Duration) string {
+	s := strings.TrimSuffix(d.String(), "0s")
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
 }
 
 // Next returns the next interval boundary strictly after t.

@@ -28,11 +28,13 @@ Dagu accepts these descriptors wherever a cron schedule expression is accepted:
 | `@annually` | `0 0 1 1 *` |
 
 A descriptor has the same next run and canonical identity as its corresponding
-cron expression.
+cron expression. A `TZ=` or `CRON_TZ=` prefix is kept, so
+`TZ=Asia/Tokyo @daily` is equivalent to `TZ=Asia/Tokyo 0 0 * * *`.
 
 `@every <duration>` (Go duration syntax, e.g. `@every 1h30m`) is also accepted
-when the duration is a positive whole number of minutes, and keeps its
-descriptor form as the canonical expression. It fires once per interval on a
+when the duration is a positive whole number of minutes. It keeps its
+descriptor form as the canonical expression, with the shortest duration, so
+`@every 60m` and `@every 1h` share an identity. It fires once per interval on a
 fixed grid aligned to the Unix epoch, so fire times are deterministic across
 scheduler restarts rather than anchored to a start time.
 

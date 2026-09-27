@@ -88,10 +88,18 @@ func TestCronDescriptors(t *testing.T) {
 		{"@monthly", "0 0 1 * *", "2026-10-01T00:00:00Z"},
 		{"@yearly", "0 0 1 1 *", "2027-01-01T00:00:00Z"},
 		{"@annually", "0 0 1 1 *", "2027-01-01T00:00:00Z"},
-		// "@every" keeps its descriptor form; intervals are aligned to the
-		// Unix epoch, so 90-minute intervals fire at 10:30 after 09:00.
+		// A timezone prefix is kept on the equivalent cron expression.
+		{"TZ=Asia/Tokyo @daily", "TZ=Asia/Tokyo 0 0 * * *", "2026-09-06T15:00:00Z"},
+		{"CRON_TZ=Asia/Tokyo @hourly", "CRON_TZ=Asia/Tokyo 0 * * * *", "2026-09-06T11:00:00Z"},
+		// "@every" keeps its descriptor form with the shortest duration;
+		// intervals are aligned to the Unix epoch, so 90-minute intervals
+		// fire at 10:30 after 09:00.
 		{"@every 1h", "@every 1h", "2026-09-06T11:00:00Z"},
-		{"@every 90m", "@every 90m", "2026-09-06T10:30:00Z"},
+		{"@every 60m", "@every 1h", "2026-09-06T11:00:00Z"},
+		{"@every 1h0m0s", "@every 1h", "2026-09-06T11:00:00Z"},
+		{"@every 90m", "@every 1h30m", "2026-09-06T10:30:00Z"},
+		{"@every 10m", "@every 10m", "2026-09-06T10:30:00Z"},
+		{"@every 48h", "@every 48h", "2026-09-08T00:00:00Z"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.descriptor, func(t *testing.T) {
