@@ -16,9 +16,12 @@ func TestScheduleDescriptors(t *testing.T) {
 	validCases := []string{
 		"valid_hourly.yaml",
 		"valid_daily.yaml",
+		"valid_midnight.yaml",
 		"valid_weekly.yaml",
 		"valid_monthly.yaml",
 		"valid_yearly.yaml",
+		"valid_annually.yaml",
+		"valid_every.yaml",
 	}
 	for _, file := range validCases {
 		t.Run(file, func(t *testing.T) {
@@ -31,14 +34,20 @@ func TestScheduleDescriptors(t *testing.T) {
 		})
 	}
 
-	t.Run("unknown descriptor is rejected", func(t *testing.T) {
-		t.Parallel()
+	rejectedCases := []string{
+		"invalid_unknown_descriptor.yaml",
+		"invalid_reboot.yaml",
+	}
+	for _, file := range rejectedCases {
+		t.Run(file, func(t *testing.T) {
+			t.Parallel()
 
-		dagu := harness.NewRunner(t)
-		result := dagu.Run("validate", "invalid_unknown_descriptor.yaml")
-		result.ExpectNonZeroExitCode()
-		result.ExpectStderrContains("schedule")
-	})
+			dagu := harness.NewRunner(t)
+			result := dagu.Run("validate", file)
+			result.ExpectNonZeroExitCode()
+			result.ExpectStderrContains("schedule")
+		})
+	}
 }
 
 func TestHourlyMatchesCron(t *testing.T) {

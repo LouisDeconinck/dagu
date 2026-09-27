@@ -15,7 +15,7 @@ import (
 
 var (
 	standardCronParser = cron.NewParser(
-		cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow,
+		cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 	)
 	rfc3339MinuteOffsetRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00(?:Z|[+-]\d{2}:\d{2})$`)
 	runtimeProfileNameRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
@@ -284,13 +284,13 @@ func parseCronExpression(expr string) (cron.Schedule, string, error) {
 	switch normalized {
 	case "@hourly":
 		normalized = "0 * * * *"
-	case "@daily":
+	case "@daily", "@midnight":
 		normalized = "0 0 * * *"
 	case "@weekly":
 		normalized = "0 0 * * 0"
 	case "@monthly":
 		normalized = "0 0 1 * *"
-	case "@yearly":
+	case "@yearly", "@annually":
 		normalized = "0 0 1 1 *"
 	}
 
@@ -298,11 +298,50 @@ func parseCronExpression(expr string) (cron.Schedule, string, error) {
 		return nil, "", fmt.Errorf("cron expression must not be empty")
 	}
 
+	// "@every <duration>" has no calendar-time equivalent, so it keeps its
+	// descriptor form as the canonical expression.
+	if duration, ok := strings.CutPrefix(normalized, "@every "); ok {
+		parsed, err := newIntervalSchedule(duration)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid cron expression %q: %w", normalized, err)
+		}
+		return parsed, normalized, nil
+	}
+
 	parsed, err := standardCronParser.Parse(normalized)
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid cron expression %q: %w", normalized, err)
 	}
 	return parsed, normalized, nil
+}
+
+// intervalSchedule fires once every delay on a fixed grid aligned to the Unix
+// epoch. "@every <duration>" cannot use robfig's ConstantDelaySchedule, which
+// is relative to the evaluation instant; the scheduler asks which absolute
+// fire time falls inside the current tick, so a relative delay would never
+// be due.
+type intervalSchedule struct {
+	delay time.Duration // whole seconds, at least one second
+}
+
+func newIntervalSchedule(arg string) (cron.Schedule, error) {
+	delay, err := time.ParseDuration(arg)
+	if err != nil {
+		return nil, err
+	}
+	// Same normalization as robfig's Every: sub-second precision is truncated
+	// and delays below one second round up to one second.
+	if delay < time.Second {
+		delay = time.Second
+	}
+	return intervalSchedule{delay: delay - delay%time.Second}, nil
+}
+
+// Next returns the next interval boundary strictly after t.
+func (s intervalSchedule) Next(t time.Time) time.Time {
+	delaySec := int64(s.delay / time.Second)
+	next := (t.Unix()/delaySec + 1) * delaySec
+	return time.Unix(next, 0).In(t.Location())
 }
 
 func checkMisleadingStepValues(expr string) []string {

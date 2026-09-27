@@ -83,9 +83,15 @@ func TestCronDescriptors(t *testing.T) {
 	}{
 		{"@hourly", "0 * * * *", "2026-09-06T11:00:00Z"},
 		{"@daily", "0 0 * * *", "2026-09-07T00:00:00Z"},
+		{"@midnight", "0 0 * * *", "2026-09-07T00:00:00Z"},
 		{"@weekly", "0 0 * * 0", "2026-09-13T00:00:00Z"},
 		{"@monthly", "0 0 1 * *", "2026-10-01T00:00:00Z"},
 		{"@yearly", "0 0 1 1 *", "2027-01-01T00:00:00Z"},
+		{"@annually", "0 0 1 1 *", "2027-01-01T00:00:00Z"},
+		// "@every" keeps its descriptor form; intervals are aligned to the
+		// Unix epoch, so 90-minute intervals fire at 10:30 after 09:00.
+		{"@every 1h", "@every 1h", "2026-09-06T11:00:00Z"},
+		{"@every 90m", "@every 90m", "2026-09-06T10:30:00Z"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.descriptor, func(t *testing.T) {
@@ -95,6 +101,28 @@ func TestCronDescriptors(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, tc.expression, schedule.Expression)
 			require.Equal(t, tc.next, schedule.Next(now).Format(time.RFC3339))
+		})
+	}
+}
+
+func TestCronDescriptorRejected(t *testing.T) {
+	t.Parallel()
+
+	// "@reboot" is meaningless for a scheduler and unknown descriptors must
+	// fail validation.
+	cases := []string{
+		"@reboot",
+		"@fortnightly",
+		"@every",
+		"@every bogus",
+	}
+	for _, tc := range cases {
+		t.Run(tc, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := NewCronSchedule(tc)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "invalid cron expression")
 		})
 	}
 }

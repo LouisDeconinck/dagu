@@ -72,11 +72,11 @@
       }
     },
     "schedule": {
-      "examples": ["@daily", "0 * * * *", "*/15 8-18 * * MON-FRI"],
+      "examples": ["@daily", "@every 1h", "0 * * * *", "*/15 8-18 * * MON-FRI"],
       "oneOf": [
         {
           "type": "string",
-          "description": "Single cron expression or schedule alias for starting the DAG (e.g., '@daily' runs at midnight)"
+          "description": "Single cron expression or descriptor for starting the DAG (e.g., '@daily' runs at midnight, '@every 1h' runs hourly)"
         },
         {
           "type": "array",
@@ -142,7 +142,7 @@
           "description": "Advanced scheduling with separate start, stop, and restart schedules."
         }
       ],
-      "description": "Schedule configuration for the DAG. Start schedules support cron expressions and schedule aliases, profile-scoped cron object entries, and one-off RFC 3339 timestamps with explicit offsets. Stop and restart remain cron-only but may still use profile-scoped cron objects."
+      "description": "Schedule configuration for the DAG. Start schedules support cron expressions and descriptors (e.g. '@daily', '@weekly', '@every 1h30m'), profile-scoped cron object entries, and one-off RFC 3339 timestamps with explicit offsets. Stop and restart remain cron-only but may still use profile-scoped cron objects."
     },
     "skip_if_successful": {
       "type": "boolean",
@@ -869,7 +869,7 @@
         },
         "expression": {
           "type": "string",
-          "description": "Cron expression for a recurring schedule entry"
+          "description": "Cron expression or descriptor (e.g. '@daily', '@every 30m') for a recurring schedule entry"
         },
         "profile": {
           "type": "string",
