@@ -1108,7 +1108,7 @@ func disableDeclaredStepOutputs(env *Env) {
 
 func (r *Runner) execNode(ctx context.Context, node *Node, progressCh chan ProgressUpdate) error {
 	if r.dry {
-		return nil
+		return checkDryRunStep(ctx, node.Step())
 	}
 	report := func() {
 		r.report(ctx, progressCh, node)
@@ -1374,6 +1374,12 @@ func (r *Runner) runEventHandler(ctx context.Context, plan *Plan, node *Node, ex
 	defer node.Finish()
 
 	if r.dry {
+		env := NewEnv(ctx, node.Step())
+		_ = addResolvedEnvVars(ctx, &env, node.Step().Env, "env.", cmnvalue.StepEnvField)
+		if err := checkDryRunStep(WithEnv(ctx, env), node.Step()); err != nil {
+			node.SetStatus(ir.NodeFailed)
+			return err
+		}
 		node.SetStatus(ir.NodeSucceeded)
 		return nil
 	}

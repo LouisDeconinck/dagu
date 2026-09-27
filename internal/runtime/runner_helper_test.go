@@ -123,6 +123,12 @@ func withCommand(command string) stepOption {
 	}
 }
 
+func withShell(shell string) stepOption {
+	return func(step *ir.Step) {
+		step.Shell = shell
+	}
+}
+
 func sequentialGuardScript(name, lockDir string) string {
 	if windowsShellTest() {
 		return fmt.Sprintf(`
