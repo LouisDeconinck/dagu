@@ -723,6 +723,63 @@ func TestRenderWebhookBodyTemplateEscapesValues(t *testing.T) {
 	assert.Equal(t, "exit status 1: \"boom\"\nsecond line", decoded.Text)
 }
 
+// Issue #2893: a step failure records its message on the node, so run.error
+// must surface it — with ANSI escape codes from the captured stderr tail
+// stripped for message channels.
+func TestNotificationRunErrorDerivesFromFailedStep(t *testing.T) {
+	t.Parallel()
+
+	event := chatbridge.NotificationEvent{
+		Type: eventstore.TypeDAGRunFailed,
+		Status: &ir.DAGRunStatus{
+			Name:     "daily-report",
+			DAGRunID: "run-1",
+			Status:   ir.Failed,
+			Nodes: []*ir.Node{
+				{
+					Step:   ir.Step{Name: "fetch"},
+					Status: ir.NodeFailed,
+					Error:  "\x1b[31mexit status 11\x1b[0m\nrecent stderr (tail):\nfatal: cannot open file",
+				},
+				{Step: ir.Step{Name: "ok"}, Status: ir.NodeSucceeded},
+			},
+		},
+	}
+
+	values := notificationTemplateValues(event, "")
+	assert.Equal(t,
+		"fetch: exit status 11\nrecent stderr (tail):\nfatal: cannot open file",
+		values["run.error"])
+	assert.Equal(t, values["run.error"], values["error"])
+
+	payload := webhookPayloadForEvents([]chatbridge.NotificationEvent{event}, "")
+	require.Equal(t, values["run.error"], payload["events"].([]map[string]any)[0]["error"])
+
+	assert.Contains(t, bodyForEvents([]chatbridge.NotificationEvent{event}, ""),
+		"Error: fetch: exit status 11")
+}
+
+// The run-level error still wins when present (infrastructure failures).
+func TestNotificationRunErrorPrefersRunLevel(t *testing.T) {
+	t.Parallel()
+
+	event := chatbridge.NotificationEvent{
+		Type: eventstore.TypeDAGRunFailed,
+		Status: &ir.DAGRunStatus{
+			Name:     "daily-report",
+			DAGRunID: "run-1",
+			Status:   ir.Failed,
+			Error:    "workdir snapshot failed",
+			Nodes: []*ir.Node{
+				{Step: ir.Step{Name: "fetch"}, Status: ir.NodeFailed, Error: "exit status 11"},
+			},
+		},
+	}
+
+	values := notificationTemplateValues(event, "")
+	assert.Equal(t, "workdir snapshot failed", values["run.error"])
+}
+
 func TestService_TeamsThrottledResponseIsRetried(t *testing.T) {
 	t.Parallel()
 

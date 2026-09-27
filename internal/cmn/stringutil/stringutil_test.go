@@ -766,3 +766,14 @@ func TestExtractEmailDomain(t *testing.T) {
 		})
 	}
 }
+
+func TestStripANSI(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, "plain", stringutil.StripANSI("plain"))
+	require.Equal(t, "fatal: boom", stringutil.StripANSI("\x1b[31mfatal:\x1b[0m boom"))
+	require.Equal(t, "exit status 1", stringutil.StripANSI("exit status 1"))
+	require.Equal(t, "", stringutil.StripANSI(""))
+	// OSC sequences (hyperlinks, titles) also strip.
+	require.Equal(t, "link", stringutil.StripANSI("\x1b]8;;http://x\x07link\x1b]8;;\x07"))
+}

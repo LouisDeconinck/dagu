@@ -7,6 +7,7 @@ import (
 	cryptorand "crypto/rand"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -400,6 +401,20 @@ func parseQuotedStrings(s string) []string {
 // parseSpaceSeparated uses strings.Fields as fallback for space-separated values
 func parseSpaceSeparated(s string) []string {
 	return strings.Fields(s)
+}
+
+// ansiEscapeRE matches ANSI escape sequences: CSI (\x1b[...letter) and OSC
+// (\x1b]...terminated by BEL or ST) sequences embedded in command output.
+var ansiEscapeRE = regexp.MustCompile("\x1b\\[[0-9;?]*[ -/]*[@-~]|\x1b\\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
+
+// StripANSI returns s with ANSI escape sequences removed. Step errors may carry
+// color codes from command stderr tails; notification channels render them as
+// literal junk.
+func StripANSI(s string) string {
+	if !strings.ContainsRune(s, '\x1b') {
+		return s
+	}
+	return ansiEscapeRE.ReplaceAllString(s, "")
 }
 
 // ExtractEmailDomain extracts the domain part from an email address.

@@ -469,6 +469,36 @@ func TestServiceSolarWindsTriggerAndResolvePayloads(t *testing.T) {
 	assert.NotContains(t, requests[1], "description")
 }
 
+// Issue #2893: a step failure records its message on the node, so run.error
+// and incident custom_details must surface it — with ANSI codes stripped.
+func TestIncidentRunErrorDerivesFromFailedStep(t *testing.T) {
+	t.Parallel()
+
+	event := chatbridge.NotificationEvent{
+		Type:       eventstore.TypeDAGRunFailed,
+		ObservedAt: time.Now().UTC(),
+		Status: &ir.DAGRunStatus{
+			Name:     "daily",
+			DAGRunID: "run-1",
+			Status:   ir.Failed,
+			Nodes: []*ir.Node{
+				{
+					Step:   ir.Step{Name: "fetch"},
+					Status: ir.NodeFailed,
+					Error:  "\x1b[31mexit status 11\x1b[0m\nrecent stderr (tail):\nfatal: cannot open file",
+				},
+			},
+		},
+	}
+
+	values := incidentTemplateValues(event, "")
+	assert.Equal(t,
+		"fetch: exit status 11\nrecent stderr (tail):\nfatal: cannot open file",
+		values["run.error"])
+	assert.Equal(t, values["run.error"], values["error"])
+	assert.Equal(t, values["run.error"], incidentCustomDetails(event, "")["error"])
+}
+
 func failedEvent(dagName, runID string) chatbridge.NotificationEvent {
 	now := time.Now().UTC()
 	return chatbridge.NotificationEvent{

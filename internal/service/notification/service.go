@@ -1687,8 +1687,8 @@ func bodyForEvents(events []chatbridge.NotificationEvent, publicURL string) stri
 		if finishedAt, err := stringutil.ParseTime(status.FinishedAt); err == nil && !finishedAt.IsZero() {
 			fmt.Fprintf(&b, "Finished: %s\n", finishedAt.Format(time.RFC3339))
 		}
-		if status.Error != "" {
-			fmt.Fprintf(&b, "Error: %s\n", status.Error)
+		if runErr := effectiveRunError(status); runErr != "" {
+			fmt.Fprintf(&b, "Error: %s\n", runErr)
 		}
 		if runLink := notificationRunLink(status, publicURL); runLink != "" {
 			fmt.Fprintf(&b, "%s\n", runLink)
@@ -1774,8 +1774,8 @@ func notificationTemplateValues(event chatbridge.NotificationEvent, publicURL st
 	values["dagRunId"] = status.DAGRunID
 	values["run.status"] = status.Status.String()
 	values["status"] = status.Status.String()
-	values["run.error"] = status.Error
-	values["error"] = status.Error
+	values["run.error"] = effectiveRunError(status)
+	values["error"] = values["run.error"]
 	maps.Copy(values, notificationStepStatusValues(status))
 	values["run.startedAt"] = notificationTemplateTime(status.StartedAt)
 	values["run.finishedAt"] = notificationTemplateTime(status.FinishedAt)
@@ -1798,6 +1798,13 @@ func notificationTemplateValues(event chatbridge.NotificationEvent, publicURL st
 	values["run.link"] = runLink
 	values["runLink"] = runLink
 	return values
+}
+
+// effectiveRunError returns the run error with step failures folded in.
+// Step errors embed stderr tails that can carry ANSI escape codes from tools
+// that color their output; those render as junk in notification channels.
+func effectiveRunError(status *ir.DAGRunStatus) string {
+	return stringutil.StripANSI(status.EffectiveError())
 }
 
 func notificationStepStatusValues(status *ir.DAGRunStatus) map[string]string {
@@ -1944,7 +1951,7 @@ func webhookPayloadForEvents(events []chatbridge.NotificationEvent, publicURL st
 			"dagRunId":   event.Status.DAGRunID,
 			"runPath":    runPath,
 			"status":     event.Status.Status.String(),
-			"error":      event.Status.Error,
+			"error":      effectiveRunError(event.Status),
 			"observedAt": event.ObservedAt.Format(time.RFC3339Nano),
 		}
 		if runURL := notificationRunURL(publicURL, runPath); runURL != "" {

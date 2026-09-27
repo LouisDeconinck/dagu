@@ -449,3 +449,94 @@ func TestRetryAgentOwnerWorkerIDIncludesCompletedSessionsForStepRetry(t *testing
 	assert.Empty(t, ir.RetryAgentOwnerWorkerID(status, false))
 	assert.Equal(t, "worker-1", ir.RetryAgentOwnerWorkerID(status, true))
 }
+
+func TestEffectiveError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("PrefersRunError", func(t *testing.T) {
+		t.Parallel()
+		status := &ir.DAGRunStatus{
+			Error: "artifact upload failed",
+			Nodes: []*ir.Node{
+				{Step: ir.Step{Name: "fetch"}, Status: ir.NodeFailed, Error: "exit status 11"},
+			},
+		}
+		assert.Equal(t, "artifact upload failed", status.EffectiveError())
+	})
+
+	t.Run("DerivesFromFailedSteps", func(t *testing.T) {
+		t.Parallel()
+		status := &ir.DAGRunStatus{
+			Status: ir.Failed,
+			Nodes: []*ir.Node{
+				{Step: ir.Step{Name: "fetch"}, Status: ir.NodeFailed, Error: "exit status 11"},
+				{Step: ir.Step{Name: "ok"}, Status: ir.NodeSucceeded},
+				{Step: ir.Step{Name: "later"}, Status: ir.NodeNotStarted},
+			},
+		}
+		assert.Equal(t, "fetch: exit status 11", status.EffectiveError())
+	})
+
+	t.Run("JoinsMultipleFailures", func(t *testing.T) {
+		t.Parallel()
+		status := &ir.DAGRunStatus{
+			Status: ir.Failed,
+			Nodes: []*ir.Node{
+				{Step: ir.Step{Name: "a"}, Status: ir.NodeFailed, Error: "boom"},
+				{Step: ir.Step{Name: "b"}, Status: ir.NodeFailed, Error: "crash"},
+			},
+		}
+		assert.Equal(t, "a: boom; b: crash", status.EffectiveError())
+	})
+
+	t.Run("IncludesFailedHandlerNodes", func(t *testing.T) {
+		t.Parallel()
+		status := &ir.DAGRunStatus{
+			Status: ir.Failed,
+			Nodes: []*ir.Node{
+				{Step: ir.Step{Name: "fetch"}, Status: ir.NodeFailed, Error: "exit status 11"},
+			},
+			OnFailure: &ir.Node{
+				Step:   ir.Step{Name: "notify"},
+				Status: ir.NodeFailed,
+				Error:  "exit status 1",
+			},
+		}
+		assert.Equal(t, "fetch: exit status 11; onFailure: exit status 1", status.EffectiveError())
+	})
+
+	t.Run("SkipsErrorsOnUnfailedNodes", func(t *testing.T) {
+		t.Parallel()
+		// A retried step can keep its earlier error after succeeding.
+		status := &ir.DAGRunStatus{
+			Status: ir.Succeeded,
+			Nodes: []*ir.Node{
+				{Step: ir.Step{Name: "fetch"}, Status: ir.NodeSucceeded, Error: "exit status 11"},
+			},
+		}
+		assert.Empty(t, status.EffectiveError())
+	})
+
+	t.Run("TrimsWhitespace", func(t *testing.T) {
+		t.Parallel()
+		status := &ir.DAGRunStatus{
+			Status: ir.Failed,
+			Nodes: []*ir.Node{
+				{
+					Step:   ir.Step{Name: "fetch"},
+					Status: ir.NodeFailed,
+					Error:  "exit status 11\nrecent stderr (tail):\nfatal: cannot open file\n",
+				},
+			},
+		}
+		assert.Equal(t,
+			"fetch: exit status 11\nrecent stderr (tail):\nfatal: cannot open file",
+			status.EffectiveError())
+	})
+
+	t.Run("EmptyWhenNoError", func(t *testing.T) {
+		t.Parallel()
+		status := &ir.DAGRunStatus{Status: ir.Succeeded}
+		assert.Empty(t, status.EffectiveError())
+	})
+}

@@ -265,6 +265,40 @@ func (st *DAGRunStatus) NodesInRunOrder() []*Node {
 	return nodes
 }
 
+// EffectiveError returns the run's error message. A step failure records its
+// message on the node rather than the run, so when Error is empty the failed
+// nodes' errors are joined as "<step>: <message>" entries.
+func (st *DAGRunStatus) EffectiveError() string {
+	if st == nil {
+		return ""
+	}
+	if st.Error != "" {
+		return strings.TrimSpace(st.Error)
+	}
+	var parts []string
+	for _, node := range st.Nodes {
+		if msg := nodeFailureMessage(node); msg != "" {
+			parts = append(parts, fmt.Sprintf("%s: %s", node.Step.Name, msg))
+		}
+	}
+	for _, handler := range st.handlerNodes() {
+		if msg := nodeFailureMessage(handler.node); msg != "" {
+			parts = append(parts, fmt.Sprintf("%s: %s", handler.name, msg))
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
+func nodeFailureMessage(node *Node) string {
+	if node == nil || node.Error == "" {
+		return ""
+	}
+	if node.Status != NodeFailed && node.Status != NodePartiallySucceeded {
+		return ""
+	}
+	return strings.TrimSpace(node.Error)
+}
+
 // Errors returns a slice of errors for the current status
 func (st *DAGRunStatus) Errors() []error {
 	var errs []error
