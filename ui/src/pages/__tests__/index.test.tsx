@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import * as React from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Status } from '@/api/v1/schema';
+import dayjs from '../../lib/dayjs';
 import { AppBarContext } from '@/contexts/AppBarContext';
 import { ConfigContext, type Config } from '@/contexts/ConfigContext';
 import { SearchStateProvider } from '@/contexts/SearchStateContext';
@@ -319,6 +321,137 @@ describe('DashboardPage', () => {
       expect(clientGetMock.mock.calls.length).toBeGreaterThan(callsBeforeRetry);
     });
     expect(await screen.findByText(/No runs on /)).toBeVisible();
+  });
+
+  function latestDashboardQuery() {
+    const calls = usePaginatedDAGRunsMock.mock.calls;
+    const latest = calls[calls.length - 1]?.[0];
+    if (!latest?.query) {
+      throw new Error('Expected dashboard DAG run query to be defined');
+    }
+    return latest.query;
+  }
+
+  it('scopes the DAG-run query to the selected date-range preset', async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await waitFor(() => {
+      expect(usePaginatedDAGRunsMock).toHaveBeenCalled();
+    });
+
+    // The default preset is today: start-of-day lower bound, open upper bound.
+    expect(latestDashboardQuery().fromDate).toBe(
+      dayjs().utcOffset(0).startOf('day').unix()
+    );
+    expect(latestDashboardQuery().toDate).toBeUndefined();
+
+    await user.click(screen.getByRole('combobox', { name: 'Date range' }));
+    await user.click(
+      await screen.findByRole('option', { name: 'Last 7 days' })
+    );
+
+    await waitFor(() => {
+      expect(latestDashboardQuery().fromDate).toBe(
+        dayjs().utcOffset(0).startOf('day').subtract(7, 'day').unix()
+      );
+    });
+    expect(latestDashboardQuery().toDate).toBeUndefined();
+  });
+
+  it('drops the date bounds for the all-time range', async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await waitFor(() => {
+      expect(usePaginatedDAGRunsMock).toHaveBeenCalled();
+    });
+
+    await user.click(screen.getByRole('combobox', { name: 'Date range' }));
+    await user.click(await screen.findByRole('option', { name: 'All time' }));
+
+    await waitFor(() => {
+      expect(latestDashboardQuery().fromDate).toBeUndefined();
+    });
+    expect(latestDashboardQuery().toDate).toBeUndefined();
+  });
+
+  it('applies a custom range through the date-range picker', async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole('combobox', { name: 'Date range' }));
+    await user.click(await screen.findByRole('option', { name: 'Custom' }));
+
+    const boundInputs = await screen.findAllByPlaceholderText(
+      'YYYY-MM-DD HH:mm:ss'
+    );
+    expect(boundInputs).toHaveLength(2);
+
+    fireEvent.change(boundInputs[0] as HTMLElement, {
+      target: { value: '2026-05-01 08:30:00' },
+    });
+
+    await waitFor(() => {
+      expect(latestDashboardQuery().fromDate).toBe(
+        dayjs('2026-05-01T08:30').utcOffset(0, true).unix()
+      );
+    });
+  });
+
+  // A preset means "relative to now", so a session left open across a date
+  // boundary must not keep querying the range it computed back then.
+  it('resolves a stored date preset relative to now', async () => {
+    window.sessionStorage.setItem(
+      'dagu.searchState',
+      JSON.stringify({
+        [`dashboard:${JSON.stringify({
+          remoteNode: 'remote-a',
+          workspace: 'workspace:all',
+        })}`]: {
+          selectedDAGRun: 'all',
+          datePreset: 'last30days',
+          dateRange: { startDate: 1, endDate: 2 },
+        },
+      })
+    );
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(latestDashboardQuery().fromDate).toBe(
+        dayjs().utcOffset(0).startOf('day').subtract(30, 'day').unix()
+      );
+    });
+    expect(latestDashboardQuery().toDate).toBeUndefined();
+  });
+
+  // Sessions stored before the preset selector existed carry only a concrete
+  // range; it is kept and shown as a custom range.
+  it('keeps a stored concrete range as a custom range', async () => {
+    const startDate = dayjs('2026-04-02T00:00').utcOffset(0, true).unix();
+    window.sessionStorage.setItem(
+      'dagu.searchState',
+      JSON.stringify({
+        [`dashboard:${JSON.stringify({
+          remoteNode: 'remote-a',
+          workspace: 'workspace:all',
+        })}`]: {
+          selectedDAGRun: 'all',
+          dateRange: { startDate, endDate: 1780000000 },
+        },
+      })
+    );
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(latestDashboardQuery().fromDate).toBe(startDate);
+    });
+    expect(latestDashboardQuery().toDate).toBe(1780000000);
+    expect(
+      await screen.findAllByPlaceholderText('YYYY-MM-DD HH:mm:ss')
+    ).toHaveLength(2);
   });
 
   it('shows placeholders instead of zeros while runs load', async () => {

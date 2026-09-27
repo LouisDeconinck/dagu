@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { DateRangePicker } from '@/components/ui/date-range-picker';
 import { RefreshButton } from '@/components/ui/refresh-button';
 import {
   Select,
@@ -11,12 +11,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Filter, GanttChart } from 'lucide-react';
+import { Calendar, Filter, GanttChart } from 'lucide-react';
 import React from 'react';
 import { Link } from 'react-router-dom';
 import {
   PathsDagsGetParametersQueryOrder,
   PathsDagsGetParametersQuerySort,
+  RunDatePreset,
   Status,
 } from '../api/v1/schema';
 import { AppBarContext } from '../contexts/AppBarContext';
@@ -79,6 +80,41 @@ function getDayBounds(
 
 function compareDAGNames(left: string, right: string): number {
   return left.localeCompare(right);
+}
+
+// A preset range or a free-form range edited through the date-range picker.
+type DashboardDatePreset = RunDatePreset | 'custom';
+
+type DashboardDateRange = {
+  startDate: number | undefined;
+  endDate: number | undefined;
+};
+
+function isDashboardDatePreset(value: unknown): value is DashboardDatePreset {
+  return (
+    value === 'custom' ||
+    (typeof value === 'string' &&
+      (Object.values(RunDatePreset) as string[]).includes(value))
+  );
+}
+
+// Human-readable description of a preset's period, used in the empty state.
+function emptyPeriodLabel(
+  preset: DashboardDatePreset,
+  ts: (source: string) => string
+): string {
+  switch (preset) {
+    case RunDatePreset.last7days:
+      return ts('the last 7 days');
+    case RunDatePreset.last30days:
+      return ts('the last 30 days');
+    case RunDatePreset.thisWeek:
+      return ts('the current week');
+    case RunDatePreset.thisMonth:
+      return ts('the current month');
+    default:
+      return ts('the selected period');
+  }
 }
 
 async function fetchAllDashboardDAGNames(
@@ -184,17 +220,23 @@ function GettingStartedPanel(): React.ReactElement {
 }
 
 function NoRunsNotice({
-  dateLabel,
+  label,
+  isRange,
   hasExampleDAGs,
 }: {
-  dateLabel: string;
+  label: string;
+  isRange: boolean;
   hasExampleDAGs: boolean;
 }): React.ReactElement {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
       <GanttChart className="h-12 w-12 text-muted-foreground/40" />
       <h2 className="text-xl font-semibold text-foreground">
-        <I18nText text="No runs on {date}" values={{ date: dateLabel }} />
+        {isRange ? (
+          <I18nText text="No runs in {period}" values={{ period: label }} />
+        ) : (
+          <I18nText text="No runs on {date}" values={{ date: label }} />
+        )}
       </h2>
       <p className="text-base text-muted-foreground">
         <I18nTemplate
@@ -217,7 +259,7 @@ function NoRunsNotice({
 }
 
 function Dashboard(): React.ReactElement | null {
-  const { locale } = useI18n();
+  const { locale, ts } = useI18n();
   const appBarContext = React.useContext(AppBarContext);
   const client = useClient();
   const config = useConfig();
@@ -254,47 +296,82 @@ function Dashboard(): React.ReactElement | null {
 
   type DashboardFilters = {
     selectedDAGRun: string;
-    dateRange: {
-      startDate: number;
-      endDate: number | undefined;
-    };
+    datePreset: DashboardDatePreset;
+    dateRange: DashboardDateRange;
   };
 
   const areFiltersEqual = (a: DashboardFilters, b: DashboardFilters) =>
     a.selectedDAGRun === b.selectedDAGRun &&
-    a.dateRange.startDate === b.dateRange.startDate &&
+    a.datePreset === b.datePreset &&
+    (a.dateRange.startDate ?? null) === (b.dateRange.startDate ?? null) &&
     (a.dateRange.endDate ?? null) === (b.dateRange.endDate ?? null);
 
-  const getDefaultDateRange = React.useCallback(() => {
-    const { startOfDay } = getDayBounds(dayjs(), config.tzOffsetInSec);
-    return {
-      startDate: startOfDay.unix(),
-      endDate: undefined,
-    };
-  }, [config.tzOffsetInSec]);
+  // Preset ranges are relative to "now", so they resolve to concrete bounds
+  // whenever the preset is applied or restored rather than being persisted.
+  const resolvePresetRange = React.useCallback(
+    (preset: RunDatePreset): DashboardDateRange => {
+      const { startOfDay } = getDayBounds(dayjs(), config.tzOffsetInSec);
+      switch (preset) {
+        case RunDatePreset.yesterday:
+          return {
+            startDate: startOfDay.subtract(1, 'day').unix(),
+            endDate: startOfDay.unix(),
+          };
+        case RunDatePreset.last7days:
+          return {
+            startDate: startOfDay.subtract(7, 'day').unix(),
+            endDate: undefined,
+          };
+        case RunDatePreset.last30days:
+          return {
+            startDate: startOfDay.subtract(30, 'day').unix(),
+            endDate: undefined,
+          };
+        case RunDatePreset.thisWeek:
+          return {
+            startDate: startOfDay.startOf('week').unix(),
+            endDate: undefined,
+          };
+        case RunDatePreset.thisMonth:
+          return {
+            startDate: startOfDay.startOf('month').unix(),
+            endDate: undefined,
+          };
+        case RunDatePreset.all:
+          return { startDate: undefined, endDate: undefined };
+        case RunDatePreset.today:
+          return { startDate: startOfDay.unix(), endDate: undefined };
+      }
+    },
+    [config.tzOffsetInSec]
+  );
 
   const defaultFilters = React.useMemo<DashboardFilters>(
     () => ({
       selectedDAGRun: 'all',
-      dateRange: getDefaultDateRange(),
+      datePreset: RunDatePreset.today,
+      dateRange: resolvePresetRange(RunDatePreset.today),
     }),
-    [getDefaultDateRange]
+    [resolvePresetRange]
   );
 
   const [selectedDAGRun, setSelectedDAGRun] = React.useState<string>(
     defaultFilters.selectedDAGRun
   );
-  const [dateRange, setDateRange] = React.useState<{
-    startDate: number;
-    endDate: number | undefined;
-  }>(defaultFilters.dateRange);
+  const [datePreset, setDatePreset] = React.useState<DashboardDatePreset>(
+    defaultFilters.datePreset
+  );
+  const [dateRange, setDateRange] = React.useState<DashboardDateRange>(
+    defaultFilters.dateRange
+  );
 
   const currentFilters = React.useMemo<DashboardFilters>(
     () => ({
       selectedDAGRun,
+      datePreset,
       dateRange,
     }),
-    [selectedDAGRun, dateRange]
+    [selectedDAGRun, datePreset, dateRange]
   );
 
   const currentFiltersRef = React.useRef(currentFilters);
@@ -310,18 +387,33 @@ function Dashboard(): React.ReactElement | null {
       searchStateScope
     );
     const base = defaultFilters;
-    const next = stored
-      ? {
-          selectedDAGRun: stored.selectedDAGRun || base.selectedDAGRun,
-          dateRange: {
-            startDate: stored.dateRange?.startDate ?? base.dateRange.startDate,
-            endDate:
-              stored.dateRange?.endDate === undefined
-                ? base.dateRange.endDate
-                : stored.dateRange.endDate,
-          },
-        }
-      : base;
+    let next = base;
+    if (stored) {
+      // Sessions stored before the preset existed carry only a concrete
+      // range: a range that still starts at today's start maps back to
+      // 'today'; anything else is a custom range.
+      const preset: DashboardDatePreset = isDashboardDatePreset(
+        stored.datePreset
+      )
+        ? stored.datePreset
+        : stored.dateRange?.startDate !== undefined &&
+            stored.dateRange.startDate !== base.dateRange.startDate
+          ? 'custom'
+          : RunDatePreset.today;
+      next = {
+        selectedDAGRun: stored.selectedDAGRun || base.selectedDAGRun,
+        datePreset: preset,
+        // Custom bounds are concrete and keep their stored values; preset
+        // ranges are re-derived from "now" like on the DAG-runs page.
+        dateRange:
+          preset === 'custom'
+            ? {
+                startDate: stored.dateRange?.startDate,
+                endDate: stored.dateRange?.endDate ?? undefined,
+              }
+            : resolvePresetRange(preset),
+      };
+    }
 
     const current = currentFiltersRef.current;
     if (current && areFiltersEqual(current, next)) {
@@ -333,10 +425,11 @@ function Dashboard(): React.ReactElement | null {
     }
 
     setSelectedDAGRun(next.selectedDAGRun);
+    setDatePreset(next.datePreset);
     setDateRange(next.dateRange);
     lastPersistedFiltersRef.current = next;
     searchState.writeState('dashboard', searchStateScope, next);
-  }, [defaultFilters, searchState, searchStateScope]);
+  }, [defaultFilters, resolvePresetRange, searchState, searchStateScope]);
 
   React.useEffect(() => {
     const persisted = lastPersistedFiltersRef.current;
@@ -347,11 +440,46 @@ function Dashboard(): React.ReactElement | null {
     searchState.writeState('dashboard', searchStateScope, currentFilters);
   }, [currentFilters, searchState, searchStateScope]);
 
-  const handleDateChange = (startTimestamp: number, endTimestamp: number) => {
-    setDateRange({
-      startDate: startTimestamp,
-      endDate: endTimestamp,
-    });
+  const handleDatePresetChange = (value: string) => {
+    const preset = value as DashboardDatePreset;
+    setDatePreset(preset);
+    if (preset !== 'custom') {
+      setDateRange(resolvePresetRange(preset));
+      return;
+    }
+    // A custom range starts from the current bounds; an unbounded preset gets
+    // today's start so the picker does not open empty.
+    setDateRange((current) =>
+      current.startDate !== undefined || current.endDate !== undefined
+        ? current
+        : resolvePresetRange(RunDatePreset.today)
+    );
+  };
+
+  // The picker edits wall-clock strings in the configured timezone.
+  const formatRangeBound = (
+    timestamp: number | undefined
+  ): string | undefined => {
+    if (timestamp === undefined) {
+      return undefined;
+    }
+    const bound =
+      config.tzOffsetInSec !== undefined
+        ? dayjs.unix(timestamp).utcOffset(config.tzOffsetInSec / 60)
+        : dayjs.unix(timestamp);
+    return bound.format('YYYY-MM-DDTHH:mm');
+  };
+
+  const parseRangeBound = (value: string): number | undefined => {
+    if (!value) {
+      return undefined;
+    }
+    const withSeconds = value.split(':').length < 3 ? `${value}:00` : value;
+    return config.tzOffsetInSec !== undefined
+      ? dayjs(withSeconds)
+          .utcOffset(config.tzOffsetInSec / 60, true)
+          .unix()
+      : dayjs(withSeconds).unix();
   };
 
   const selectedDAGName = selectedDAGRun !== 'all' ? selectedDAGRun : undefined;
@@ -419,13 +547,32 @@ function Dashboard(): React.ReactElement | null {
     setSelectedDAGRun(value);
   };
 
-  const selectedTimelineDate = React.useMemo(
-    () => ({
-      startTimestamp: dateRange.startDate,
-      endTimestamp: dateRange.endDate,
-    }),
-    [dateRange.endDate, dateRange.startDate]
-  );
+  const selectedTimelineDate = React.useMemo(() => {
+    if (dateRange.startDate !== undefined) {
+      return {
+        startTimestamp: dateRange.startDate,
+        endTimestamp: dateRange.endDate,
+      };
+    }
+    // An unbounded range ('all', or a custom range without a start) frames
+    // the window around the earliest loaded run rather than opening on an
+    // empty today.
+    let earliest: number | undefined;
+    for (const dagRun of dagRunsList) {
+      const startedAt = dagRun.startedAt;
+      if (!startedAt || startedAt === '-') {
+        continue;
+      }
+      const timestamp = dayjs(startedAt).unix();
+      if (
+        !Number.isNaN(timestamp) &&
+        (earliest === undefined || timestamp < earliest)
+      ) {
+        earliest = timestamp;
+      }
+    }
+    return earliest === undefined ? undefined : { startTimestamp: earliest };
+  }, [dagRunsList, dateRange.endDate, dateRange.startDate]);
 
   React.useEffect(() => {
     if (appBarContext) {
@@ -554,6 +701,19 @@ function Dashboard(): React.ReactElement | null {
   // Show placeholders instead of zeros while the first page is loading.
   const stat = (value: number) => (isLoading ? '-' : value);
 
+  // Presets that name a single day keep the "No runs on <date>" wording;
+  // every other selection describes a period.
+  const emptyStateIsRange =
+    datePreset !== RunDatePreset.today &&
+    datePreset !== RunDatePreset.yesterday;
+  const emptyStateLabel = emptyStateIsRange
+    ? emptyPeriodLabel(datePreset, ts)
+    : new Intl.DateTimeFormat(locale, {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      }).format(dayjs.unix(dateRange.startDate ?? dayjs().unix()).toDate());
+
   return (
     <div className="flex flex-col max-w-7xl h-full overflow-hidden">
       {/* Main Content Area */}
@@ -585,34 +745,58 @@ function Dashboard(): React.ReactElement | null {
             </SelectContent>
           </Select>
 
-          <Input
-            type="date"
-            value={dayjs.unix(dateRange.startDate).format('YYYY-MM-DD')}
-            onChange={(e) => {
-              const newDate = e.target.value;
-              if (!newDate) return;
-              const date = dayjs(newDate);
-              if (!date.isValid()) return;
-              const { startOfDay, endOfDay } = getDayBounds(
-                date,
-                config.tzOffsetInSec
-              );
-              handleDateChange(startOfDay.unix(), endOfDay.unix());
-            }}
-            className="h-9 w-[150px]"
-          />
-          <Button
-            variant="outline"
-            onClick={() => {
-              const { startOfDay, endOfDay } = getDayBounds(
-                dayjs(),
-                config.tzOffsetInSec
-              );
-              handleDateChange(startOfDay.unix(), endOfDay.unix());
-            }}
-          >
-            <I18nText text={'Today'} />
-          </Button>
+          <Select value={datePreset} onValueChange={handleDatePresetChange}>
+            <I18nProps>
+              <SelectTrigger aria-label="Date range" className="h-9 w-[160px]">
+                <Calendar className="h-4 w-4 mr-1.5 text-muted-foreground" />
+                <SelectValue />
+              </SelectTrigger>
+            </I18nProps>
+            <SelectContent>
+              <SelectItem value={RunDatePreset.today}>
+                <I18nText text={'Today'} />
+              </SelectItem>
+              <SelectItem value={RunDatePreset.yesterday}>
+                <I18nText text={'Yesterday'} />
+              </SelectItem>
+              <SelectItem value={RunDatePreset.last7days}>
+                <I18nText text={'Last 7 days'} />
+              </SelectItem>
+              <SelectItem value={RunDatePreset.last30days}>
+                <I18nText text={'Last 30 days'} />
+              </SelectItem>
+              <SelectItem value={RunDatePreset.thisWeek}>
+                <I18nText text={'This week'} />
+              </SelectItem>
+              <SelectItem value={RunDatePreset.thisMonth}>
+                <I18nText text={'This month'} />
+              </SelectItem>
+              <SelectItem value={RunDatePreset.all}>
+                <I18nText text={'All time'} />
+              </SelectItem>
+              <SelectItem value="custom">
+                <I18nText text={'Custom'} />
+              </SelectItem>
+            </SelectContent>
+          </Select>
+          {datePreset === 'custom' && (
+            <DateRangePicker
+              fromDate={formatRangeBound(dateRange.startDate)}
+              toDate={formatRangeBound(dateRange.endDate)}
+              onFromDateChange={(value) =>
+                setDateRange((current) => ({
+                  ...current,
+                  startDate: parseRangeBound(value),
+                }))
+              }
+              onToDateChange={(value) =>
+                setDateRange((current) => ({
+                  ...current,
+                  endDate: parseRangeBound(value),
+                }))
+              }
+            />
+          )}
 
           <div className="flex-1" />
 
@@ -697,11 +881,8 @@ function Dashboard(): React.ReactElement | null {
             <div className="flex-1 min-h-[250px] rounded-xl border border-border bg-surface overflow-hidden">
               {showNoRunsNotice ? (
                 <NoRunsNotice
-                  dateLabel={new Intl.DateTimeFormat(locale, {
-                    year: 'numeric',
-                    month: 'short',
-                    day: 'numeric',
-                  }).format(dayjs.unix(dateRange.startDate).toDate())}
+                  label={emptyStateLabel}
+                  isRange={emptyStateIsRange}
                   hasExampleDAGs={hasExampleDAGs}
                 />
               ) : showInventoryError ? (

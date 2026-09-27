@@ -2253,6 +2253,14 @@ const english = {
   '(unchanged)': '(unchanged)',
   'Next run': 'Next run',
   'Copy MCP setup prompt': 'Copy MCP setup prompt',
+  'Date range': 'Date range',
+  'All time': 'All time',
+  'the last 7 days': 'the last 7 days',
+  'the last 30 days': 'the last 30 days',
+  'the current week': 'the current week',
+  'the current month': 'the current month',
+  'the selected period': 'the selected period',
+  'No runs in {period}': 'No runs in {period}',
 } as const;
 
 export type StaticMessage = keyof typeof english;
@@ -4449,6 +4457,14 @@ const chinese = {
   '(unchanged)': '（不变）',
   'Next run': '下次运行',
   'Copy MCP setup prompt': '复制 MCP 配置提示词',
+  'Date range': '日期范围',
+  'All time': '全部时间',
+  'the last 7 days': '最近 7 天',
+  'the last 30 days': '最近 30 天',
+  'the current week': '本周',
+  'the current month': '本月',
+  'the selected period': '所选时间段',
+  'No runs in {period}': '{period} 没有运行记录',
 } as const satisfies Record<StaticMessage, string>;
 
 const japanese = {
@@ -6726,6 +6742,14 @@ const japanese = {
   '(unchanged)': '（変更なし）',
   'Next run': '次の実行',
   'Copy MCP setup prompt': 'MCP セットアップ用プロンプトをコピー',
+  'Date range': '期間',
+  'All time': '全期間',
+  'the last 7 days': '過去 7 日間',
+  'the last 30 days': '過去 30 日間',
+  'the current week': '今週',
+  'the current month': '今月',
+  'the selected period': '選択された期間',
+  'No runs in {period}': '{period}の実行はありません',
 } as const satisfies Record<StaticMessage, string>;
 
 export const staticMessages = {
