@@ -3341,7 +3341,7 @@
               "description": "List of paths to .env files whose variables are injected into the container environment"
             }
           ],
-          "description": ".env files to load into the container environment (docker --env-file semantics). Files are read in order; later files override earlier values, and 'env' entries override file variables with the same name. Relative paths are searched in the working directory first, then in the DAG file directory. A missing file fails the run."
+          "description": ".env files to load into the container environment. Files use the same dotenv syntax as root 'dotenv', not docker's literal --env-file format: surrounding quotes are removed, and $VAR or ${VAR} in unquoted or double-quoted values expands from variables defined earlier in the same file; single-quoted values are literal. Files are read in order; later files override earlier values, and 'env' entries override file variables with the same name. Relative paths are searched in the working directory first, then in the DAG file directory. Unlike 'dotenv', a missing file fails the run."
         },
         "volumes": {
           "type": "array",

@@ -484,7 +484,7 @@ func mergeEnvVars(base, override []string) []string {
 // Fields like PullPolicy, Startup, WaitFor, KeepContainer are NOT evaluated
 // as they have specific enum/boolean values.
 // EnvFile paths are evaluated, then each file's variables are injected into
-// Env at lower precedence than explicit entries (docker --env-file semantics).
+// Env at lower precedence than explicit entries.
 func EvalContainerFields(ctx context.Context, ct ir.Container) (ir.Container, error) {
 	var err error
 
@@ -564,12 +564,13 @@ func evalStringSlice(ctx context.Context, ss []string, path string, fieldForPath
 }
 
 // loadEnvFileVars reads each env_file entry and returns the env list extended
-// with the file variables. Later files override earlier ones, and explicit env
-// entries override file variables for the same key, mirroring how docker
-// applies --env-file values before -e/--env flags. A missing or unreadable
-// file is an error, matching docker --env-file behavior. Relative paths are
-// searched in the step working directory first, then in the DAG file
-// directory, matching dotenv lookup order.
+// with the file variables. Files use the same dotenv syntax as root dotenv,
+// not docker's literal --env-file format, and their values are not evaluated
+// further. Later files override earlier ones, and explicit env entries
+// override file variables for the same key. Unlike root dotenv, a missing or
+// unreadable file is an error. Relative paths are searched in the step working
+// directory first, then in the DAG file directory, matching dotenv lookup
+// order.
 func loadEnvFileVars(ctx context.Context, files, env []string) ([]string, error) {
 	if len(files) == 0 {
 		return env, nil

@@ -310,6 +310,21 @@ func TestEvalContainerEnvFile(t *testing.T) {
 		assert.ElementsMatch(t, []string{"MULTI_A=base", "MULTI_B=local"}, result.Env)
 	})
 
+	t.Run("DotenvSyntax", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		// Quotes are stripped, single-quoted values stay literal, and ${VAR}
+		// expands from entries defined earlier in the same file.
+		writeEnv(t, dir, ".env", "QUOTED=\"a b\"\nLITERAL='x$y'\nREF=${QUOTED}-z\n")
+
+		result, err := EvalContainerFields(newCtx(t, dir), ir.Container{
+			Image:   "alpine",
+			EnvFile: []string{".env"},
+		})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"QUOTED=a b", "LITERAL=x$y", "REF=a b-z"}, result.Env)
+	})
+
 	t.Run("PathVariablesEvaluate", func(t *testing.T) {
 		t.Parallel()
 		dir := t.TempDir()
