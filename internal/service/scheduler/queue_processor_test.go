@@ -446,6 +446,33 @@ actions:
 	assert.Empty(t, items, "a run that can never be dispatched should leave the queue")
 }
 
+func TestQueueProcessor_DistributedDispatchKeepsRunQueuedOnSourceReadError(t *testing.T) {
+	// A queued run whose source cannot be read (here: the DAG file is missing)
+	// has not proven its definition invalid, so the dispatch failure leaves it
+	// queued for a later scan instead of marking it failed.
+	f := newQueueFixture(t).withDAG("missing-source", 1)
+	f.dag.YamlData = nil
+	f.dag.Location = filepath.Join(t.TempDir(), "deleted.yaml")
+	f.withProcessor(config.Queues{}).simulateQueue(1, false)
+	dispatcher := &mockDispatcher{errFunc: func(int32) error {
+		return errors.New("dispatch unavailable")
+	}}
+	f.processor.dagExecutor = NewDAGExecutor(dispatcher, nil, config.ExecutionModeDistributed, "")
+	f.enqueueToQueue(f.dag.Name, "run-1", queuedomain.QueuePriorityHigh)
+
+	f.processor.ProcessQueueItems(f.ctx, f.dag.Name)
+
+	attempt, err := f.dagRunRepository.FindAttempt(f.ctx, ir.NewDAGRunRef(f.dag.Name, "run-1"))
+	require.NoError(t, err)
+	runStatus, err := attempt.ReadStatus(f.ctx)
+	require.NoError(t, err)
+	assert.Equal(t, ir.Queued, runStatus.Status)
+
+	items, err := f.queueStore.List(f.ctx, f.dag.Name)
+	require.NoError(t, err)
+	assert.Len(t, items, 1, "a run with an unreadable source should stay queued")
+}
+
 func TestQueueProcessor_ProcessQueueItems_FailsClosedOnLeaseCountError(t *testing.T) {
 	f := newQueueFixture(t).withDAG("distributed-count-error-dag", 1).
 		withProcessor(config.Queues{}).
