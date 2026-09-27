@@ -790,6 +790,45 @@ steps:
 	assert.Contains(t, err.Error(), "labels and deprecated tags cannot both be set")
 }
 
+func TestLoadYAMLEnvFile(t *testing.T) {
+	t.Parallel()
+
+	// envFile is an alias for dotenv and accepts the same string or list forms.
+	for _, tc := range []struct {
+		name     string
+		yaml     string
+		expected []string
+	}{
+		{name: "String", yaml: `envFile: .env.prod`, expected: []string{".env.prod"}},
+		{name: "List", yaml: `envFile: [".env.base", ".env.prod"]`, expected: []string{".env.base", ".env.prod"}},
+		{name: "EmptyDisables", yaml: `envFile: []`, expected: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d, err := LoadYAML(context.Background(), []byte(tc.yaml+`
+steps:
+  - name: step
+    run: echo ok
+`), WithoutEval())
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, d.Dotenv)
+		})
+	}
+}
+
+func TestLoadYAMLDotenvAndEnvFileRejected(t *testing.T) {
+	t.Parallel()
+
+	_, err := LoadYAML(context.Background(), []byte(`
+dotenv: .env.base
+envFile: .env.prod
+steps:
+  - name: step
+    run: echo ok
+`), WithoutEval())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dotenv and envFile cannot both be set")
+}
+
 func TestBuildMaxActiveRuns(t *testing.T) {
 	t.Parallel()
 
@@ -1650,24 +1689,48 @@ func TestBuildDotenv(t *testing.T) {
 
 	tests := []struct {
 		name     string
-		input    types.StringOrArray
+		dotenv   types.StringOrArray
+		envFile  types.StringOrArray
 		expected []string
 	}{
 		{
 			name:     "EmptyDefaultsToDotEnv",
-			input:    types.StringOrArray{},
 			expected: []string{".env"},
 		},
 		{
 			name:     "SingleFile",
-			input:    stringOrArray(".env.local"),
+			dotenv:   stringOrArray(".env.local"),
 			expected: []string{".env.local"},
+		},
+		{
+			name:     "EnvFileString",
+			envFile:  stringOrArray(".env.local"),
+			expected: []string{".env.local"},
+		},
+		{
+			name:     "EnvFileList",
+			envFile:  stringOrArrayList([]string{".env.base", ".env.local"}),
+			expected: []string{".env.base", ".env.local"},
+		},
+		{
+			// envFile: [] disables dotenv loading, same as dotenv: []
+			name:     "EnvFileEmptyDisables",
+			envFile:  stringOrArrayList([]string{}),
+			expected: nil,
+		},
+		{
+			// Both set is rejected during manifest decoding; dotenv wins here
+			// so a programmatically built spec stays deterministic.
+			name:     "DotenvWinsOverEnvFile",
+			dotenv:   stringOrArray(".env.a"),
+			envFile:  stringOrArray(".env.b"),
+			expected: []string{".env.a"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			d := &dag{Dotenv: tt.input}
+			d := &dag{Dotenv: tt.dotenv, EnvFile: tt.envFile}
 			result, err := buildDotenv(testBuildContext(), d)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expected, result)

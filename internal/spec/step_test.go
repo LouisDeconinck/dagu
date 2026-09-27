@@ -2170,6 +2170,29 @@ func TestBuildStepContainer(t *testing.T) {
 				PullPolicy: ir.PullPolicyMissing,
 			},
 		},
+		{
+			name: "ContainerWithEnvFile",
+			input: &container{
+				Image:   "alpine:3.18",
+				EnvFile: stringOrArrayList([]string{".env", ".env.local"}),
+			},
+			expected: &ir.Container{
+				Image:      "alpine:3.18",
+				PullPolicy: ir.PullPolicyMissing,
+				EnvFile:    []string{".env", ".env.local"},
+			},
+		},
+		{
+			name: "ExecModeContainerWithEnvFile",
+			input: &container{
+				Exec:    "existing-container",
+				EnvFile: stringOrArray(".env"),
+			},
+			expected: &ir.Container{
+				Exec:    "existing-container",
+				EnvFile: []string{".env"},
+			},
+		},
 	}
 
 	for _, tt := range tests {

@@ -2760,6 +2760,27 @@ steps:
 		assert.True(t, dag.Steps[0].Container.IsExecMode())
 	})
 
+	t.Run("ContainerEnvFile", func(t *testing.T) {
+		t.Parallel()
+		yaml := `
+container:
+  image: alpine
+  envFile: .env.dag
+steps:
+  - name: step1
+    run: echo test
+    container:
+      image: alpine
+      envFile:
+        - .env.base
+        - .env.local
+`
+		dag, err := spec.LoadYAML(context.Background(), []byte(yaml))
+		require.NoError(t, err)
+		assert.Equal(t, []string{".env.dag"}, dag.Container.EnvFile)
+		assert.Equal(t, []string{".env.base", ".env.local"}, dag.Steps[0].Container.EnvFile)
+	})
+
 	// Error tests
 	errorTests := []struct {
 		name        string
@@ -3868,6 +3889,54 @@ steps:
 		assert.Equal(t, "from_file", envMap["LOAD_ENV_DOTENV_VAR"])
 		assert.Equal(t, "from_dag", envMap["LOAD_ENV_ENV_VAR"])
 		assert.Equal(t, "another_value", envMap["LOAD_ENV_ANOTHER_VAR"])
+	})
+
+	t.Run("LoadEnvWithEnvFileAlias", func(t *testing.T) {
+		// envFile is an alias for dotenv: the file is loaded the same way.
+		tempDir := t.TempDir()
+		envFile := filepath.Join(tempDir, ".env")
+		err := os.WriteFile(envFile, []byte("LOAD_ENV_ENVFILE_VAR=from_env_file\n"), 0644)
+		require.NoError(t, err)
+
+		yaml := fmt.Sprintf(`
+working_dir: %s
+envFile: .env
+env:
+  - LOAD_ENV_ENV_VAR: from_dag
+steps:
+  - run: echo hello
+`, tempDir)
+
+		dag, err := spec.LoadYAML(context.Background(), []byte(yaml), spec.WithoutEval())
+		require.NoError(t, err)
+		require.NotNil(t, dag)
+
+		resolveDAGRuntimeEnv(t, dag)
+
+		envMap := envSliceMap(dag.Env)
+		assert.Equal(t, "from_env_file", envMap["LOAD_ENV_ENVFILE_VAR"])
+		assert.Equal(t, "from_dag", envMap["LOAD_ENV_ENV_VAR"])
+	})
+
+	t.Run("LoadEnvAdjacentDotEnvFile", func(t *testing.T) {
+		// A .env file next to the DAG file is loaded even when the DAG does not
+		// declare dotenv or envFile.
+		tempDir := t.TempDir()
+		dagFile := filepath.Join(tempDir, "adjacent.yaml")
+		require.NoError(t, os.WriteFile(dagFile, []byte(`
+steps:
+  - run: echo hello
+`), 0600))
+		require.NoError(t, os.WriteFile(filepath.Join(tempDir, ".env"), []byte("LOAD_ENV_ADJACENT_VAR=adjacent\n"), 0600))
+
+		dag, err := spec.Load(context.Background(), dagFile, spec.WithoutEval())
+		require.NoError(t, err)
+		require.NotNil(t, dag)
+
+		resolveDAGRuntimeEnv(t, dag)
+
+		envMap := envSliceMap(dag.Env)
+		assert.Equal(t, "adjacent", envMap["LOAD_ENV_ADJACENT_VAR"])
 	})
 
 	t.Run("LoadEnvWithMissingDotenvFile", func(t *testing.T) {

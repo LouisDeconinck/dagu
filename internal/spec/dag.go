@@ -70,6 +70,9 @@ type dag struct {
 	WorkingDir string `yaml:"working_dir,omitempty"`
 	// Dotenv is the path to the dotenv file (string or []string).
 	Dotenv types.StringOrArray `yaml:"dotenv,omitempty"`
+	// EnvFile is an alias for Dotenv (string or []string), matching the
+	// docker-compose env_file naming. Mutually exclusive with Dotenv.
+	EnvFile types.StringOrArray `yaml:"envFile,omitempty"`
 	// Schedule is the cron schedule to run the DAG.
 	Schedule types.ScheduleValue `yaml:"schedule,omitempty"`
 	// SkipIfSuccessful is the flag to skip the DAG on schedule when it is
@@ -296,6 +299,9 @@ type container struct {
 	PullPolicy any `yaml:"pull_policy,omitempty"`
 	// Env specifies environment variables for the container.
 	Env any `yaml:"env,omitempty"` // Can be a map or struct
+	// EnvFile lists .env files whose variables are injected into the container
+	// environment (docker --env-file semantics). Accepts a string or []string.
+	EnvFile types.StringOrArray `yaml:"envFile,omitempty"`
 	// Volumes specifies the volumes to mount in the container.
 	Volumes []string `yaml:"volumes,omitempty"` // Map of volume names to volume definitions
 	// User is the user to run the container as.
@@ -2235,6 +2241,7 @@ func buildContainerField(ctx buildContext, raw any) (*ir.Container, error) {
 			ErrorUnused:      true,
 			WeaklyTypedInput: true,
 			TagName:          "yaml",
+			DecodeHook:       typedUnionDecodeHook(),
 		})
 		if err != nil {
 			return nil, ir.NewValidationError("container", nil,
@@ -2336,6 +2343,7 @@ func buildContainerFromSpec(_ buildContext, c *container) (*ir.Container, error)
 			User:       c.User,
 			WorkingDir: c.WorkingDir,
 			Env:        envs,
+			EnvFile:    c.EnvFile.Values(),
 			Shell:      c.Shell,
 		}, nil
 	}
@@ -2368,6 +2376,7 @@ func buildContainerFromSpec(_ buildContext, c *container) (*ir.Container, error)
 		Image:         c.Image,
 		PullPolicy:    pullPolicy,
 		Env:           envs,
+		EnvFile:       c.EnvFile.Values(),
 		Volumes:       c.Volumes,
 		User:          c.User,
 		WorkingDir:    c.WorkingDir,
@@ -3227,10 +3236,16 @@ func validateHarnessProviderConfig(defs ir.HarnessDefinitions, cfg map[string]an
 }
 
 func buildDotenv(_ buildContext, d *dag) ([]string, error) {
-	if d.Dotenv.IsZero() {
+	dotenv := d.Dotenv
+	if dotenv.IsZero() {
+		// envFile is an alias for dotenv; the manifest decoder rejects
+		// documents that set both.
+		dotenv = d.EnvFile
+	}
+	if dotenv.IsZero() {
 		return []string{".env"}, nil
 	}
-	return d.Dotenv.Values(), nil
+	return dotenv.Values(), nil
 }
 
 func composeSteps(inherited, current []ir.Step) []ir.Step {

@@ -19,6 +19,9 @@
           "llm": { "$ref": "#/definitions/standardLLMConfig" }
         }
       }
+    },
+    {
+      "not": { "required": ["dotenv", "envFile"] }
     }
   ],
   "properties": {
@@ -50,6 +53,23 @@
         }
       ],
       "description": "Specifies .env files to load environment variables from. By default, '.env' is loaded. When files are specified, '.env' is automatically prepended to the list. All files are loaded sequentially with later files overriding earlier values. Set to empty array [] to disable all .env loading. Relative paths are searched in the DAG's working_dir first, then in the DAG file directory."
+    },
+    "envFile": {
+      "examples": [".env"],
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Path to a .env file to load environment variables from"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "List of paths to .env files to load environment variables from. Paths can be absolute, '~'-prefixed, or relative to the DAG's working_dir or the DAG file directory."
+        }
+      ],
+      "description": "Alias for 'dotenv' following docker-compose env_file naming. Identical semantics to 'dotenv'. Cannot be set together with 'dotenv'."
     },
     "working_dir": {
       "examples": ["/var/data/etl"],
@@ -3278,7 +3298,7 @@
       "properties": {
         "exec": {
           "type": "string",
-          "description": "Name of an existing running container to exec into. Dagu waits up to 120 seconds for the container to be running; fails if not running within timeout. Mutually exclusive with 'image'. When used, only 'user', 'working_dir', and 'env' are applicable."
+          "description": "Name of an existing running container to exec into. Dagu waits up to 120 seconds for the container to be running; fails if not running within timeout. Mutually exclusive with 'image'. When used, only 'user', 'working_dir', 'env', 'envFile', and 'shell' are applicable."
         },
         "name": {
           "type": "string",
@@ -3326,6 +3346,22 @@
             }
           ],
           "description": "Environment variables to set in the container. Supports maps or arrays combining maps and KEY=value strings. Entries are evaluated in YAML source order, and names must match ^[A-Za-z_][A-Za-z0-9_]*$. Values can include variable expansion (e.g., 'API_KEY=${API_KEY}')."
+        },
+        "envFile": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Path to a .env file whose variables are injected into the container environment"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "List of paths to .env files whose variables are injected into the container environment"
+            }
+          ],
+          "description": ".env files to load into the container environment (docker --env-file semantics). Files are read in order; later files override earlier values, and 'env' entries override file variables with the same name. Relative paths are searched in the working directory first, then in the DAG file directory. A missing file fails the run."
         },
         "volumes": {
           "type": "array",
