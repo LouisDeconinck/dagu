@@ -96,6 +96,34 @@ describe('AutocompleteInput', () => {
     expect(onEnterPress).not.toHaveBeenCalled();
   });
 
+  // Live data (for example SSE run updates) replaces the suggestions while
+  // the user navigates; Enter must still pick the suggestion they highlighted.
+  it('keeps the highlighted suggestion when suggestions update', () => {
+    const onValueChange = vi.fn();
+    const onEnterPress = vi.fn();
+    const { rerender } = render(
+      <TestAutocomplete
+        onValueChange={onValueChange}
+        onEnterPress={onEnterPress}
+      />
+    );
+
+    const input = screen.getByRole('combobox', { name: 'Filter...' });
+    fireEvent.focus(input);
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    rerender(
+      <TestAutocomplete
+        suggestions={['aardvark', 'alpha', 'beta', 'alpine']}
+        onValueChange={onValueChange}
+        onEnterPress={onEnterPress}
+      />
+    );
+    fireEvent.keyDown(input, { key: 'Enter' });
+
+    expect(onValueChange).toHaveBeenLastCalledWith('alpha');
+    expect(onEnterPress).not.toHaveBeenCalled();
+  });
+
   it('submits the typed value on Enter when nothing is highlighted', () => {
     const onEnterPress = vi.fn();
     render(<TestAutocomplete onEnterPress={onEnterPress} />);

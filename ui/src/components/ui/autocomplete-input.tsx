@@ -25,7 +25,11 @@ function AutocompleteInput({
   onEnterPress,
 }: AutocompleteInputProps) {
   const [isOpen, setIsOpen] = React.useState(false);
-  const [highlightedIndex, setHighlightedIndex] = React.useState(-1);
+  // Tracks the suggestion rather than its index so live suggestion updates
+  // that reorder or extend the list keep the keyboard selection.
+  const [highlightedValue, setHighlightedValue] = React.useState<string | null>(
+    null
+  );
   const containerRef = React.useRef<HTMLDivElement>(null);
   const listboxId = React.useId();
 
@@ -45,10 +49,10 @@ function AutocompleteInput({
       .sort(sortAlphabetically);
   }, [value, suggestions]);
 
-  // Reset highlighted index when suggestions change
-  React.useEffect(() => {
-    setHighlightedIndex(-1);
-  }, [filteredSuggestions]);
+  const highlightedIndex =
+    highlightedValue === null
+      ? -1
+      : filteredSuggestions.indexOf(highlightedValue);
 
   // Handle click outside to close dropdown
   React.useEffect(() => {
@@ -68,22 +72,15 @@ function AutocompleteInput({
   const selectSuggestion = (suggestion: string) => {
     onValueChange(suggestion);
     setIsOpen(false);
-    setHighlightedIndex(-1);
+    setHighlightedValue(null);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     switch (e.key) {
       case 'Enter':
         e.preventDefault();
-        if (
-          isOpen &&
-          highlightedIndex >= 0 &&
-          highlightedIndex < filteredSuggestions.length
-        ) {
-          const suggestion = filteredSuggestions[highlightedIndex];
-          if (suggestion !== undefined) {
-            selectSuggestion(suggestion);
-          }
+        if (isOpen && highlightedValue !== null && highlightedIndex >= 0) {
+          selectSuggestion(highlightedValue);
         } else {
           setIsOpen(false);
           onEnterPress?.();
@@ -92,7 +89,7 @@ function AutocompleteInput({
 
       case 'Escape':
         setIsOpen(false);
-        setHighlightedIndex(-1);
+        setHighlightedValue(null);
         break;
 
       case 'ArrowDown':
@@ -101,8 +98,12 @@ function AutocompleteInput({
         }
         e.preventDefault();
         setIsOpen(true);
-        setHighlightedIndex((prev) =>
-          prev < filteredSuggestions.length - 1 ? prev + 1 : 0
+        setHighlightedValue(
+          filteredSuggestions[
+            highlightedIndex < filteredSuggestions.length - 1
+              ? highlightedIndex + 1
+              : 0
+          ] ?? null
         );
         break;
 
@@ -112,8 +113,12 @@ function AutocompleteInput({
         }
         e.preventDefault();
         setIsOpen(true);
-        setHighlightedIndex((prev) =>
-          prev > 0 ? prev - 1 : filteredSuggestions.length - 1
+        setHighlightedValue(
+          filteredSuggestions[
+            highlightedIndex > 0
+              ? highlightedIndex - 1
+              : filteredSuggestions.length - 1
+          ] ?? null
         );
         break;
 
@@ -125,6 +130,7 @@ function AutocompleteInput({
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     onValueChange(e.target.value);
     setIsOpen(true);
+    setHighlightedValue(null);
   };
 
   const handleInputFocus = () => {
@@ -182,7 +188,7 @@ function AutocompleteInput({
               // Keep the input's focus so selecting does not blur then
               // re-open the dropdown through onFocus.
               onMouseDown={(e) => e.preventDefault()}
-              onMouseEnter={() => setHighlightedIndex(index)}
+              onMouseEnter={() => setHighlightedValue(suggestion)}
             >
               {suggestion}
             </div>
