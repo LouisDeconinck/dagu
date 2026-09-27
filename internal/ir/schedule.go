@@ -299,19 +299,19 @@ func parseCronExpression(expr string) (cron.Schedule, string, error) {
 	}
 
 	// "@every <duration>" has no calendar-time equivalent, so it keeps its
-	// descriptor form as the canonical expression. A timezone prefix is
-	// dropped: interval boundaries are aligned to the Unix epoch in every zone.
-	intervalExpr := normalized
-	if i := strings.IndexByte(intervalExpr, ' '); i > 0 &&
-		(strings.HasPrefix(intervalExpr, "TZ=") || strings.HasPrefix(intervalExpr, "CRON_TZ=")) {
-		intervalExpr = intervalExpr[i+1:]
-	}
-	if duration, ok := strings.CutPrefix(intervalExpr, "@every "); ok {
+	// descriptor form as the canonical expression.
+	tzPrefix, body := splitTimezonePrefix(normalized)
+	if duration, ok := strings.CutPrefix(body, "@every "); ok {
+		// Interval boundaries are aligned to the Unix epoch in every zone, so
+		// a timezone prefix could not be honored.
+		if tzPrefix != "" {
+			return nil, "", fmt.Errorf("invalid cron expression %q: @every does not accept a timezone prefix", normalized)
+		}
 		parsed, err := newIntervalSchedule(duration)
 		if err != nil {
 			return nil, "", fmt.Errorf("invalid cron expression %q: %w", normalized, err)
 		}
-		return parsed, intervalExpr, nil
+		return parsed, normalized, nil
 	}
 
 	parsed, err := standardCronParser.Parse(normalized)
@@ -319,6 +319,20 @@ func parseCronExpression(expr string) (cron.Schedule, string, error) {
 		return nil, "", fmt.Errorf("invalid cron expression %q: %w", normalized, err)
 	}
 	return parsed, normalized, nil
+}
+
+// splitTimezonePrefix separates a leading "TZ=" or "CRON_TZ=" field from the
+// rest of a whitespace-normalized cron expression. The prefix keeps its
+// trailing space so that prefix+body reproduces expr.
+func splitTimezonePrefix(expr string) (prefix, body string) {
+	if !strings.HasPrefix(expr, "TZ=") && !strings.HasPrefix(expr, "CRON_TZ=") {
+		return "", expr
+	}
+	i := strings.IndexByte(expr, ' ')
+	if i < 0 {
+		return "", expr
+	}
+	return expr[:i+1], expr[i+1:]
 }
 
 // intervalSchedule fires once every delay on a fixed grid aligned to the Unix

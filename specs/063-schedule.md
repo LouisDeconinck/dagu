@@ -32,17 +32,18 @@ cron expression.
 
 `@every <duration>` (Go duration syntax, e.g. `@every 1h30m`) is also accepted
 when the duration is a positive whole number of minutes, and keeps its
-descriptor form as the canonical expression. It fires once per
-interval on a fixed grid aligned to the Unix epoch, so fire times are
-deterministic across scheduler restarts rather than anchored to a start time.
+descriptor form as the canonical expression. It fires once per interval on a
+fixed grid aligned to the Unix epoch, so fire times are deterministic across
+scheduler restarts rather than anchored to a start time.
 
 ## Errors
 
 Unknown descriptors fail validation; `@reboot` is rejected because it has no
 scheduled fire time. `@every` fails validation when its interval is not a
-positive whole number of minutes, because the scheduler evaluates schedules
-on whole-minute ticks. Runtime failure, timeout, abort, and cleanup behavior
-belong to workflow execution and are outside this scope.
+positive whole number of minutes, since the scheduler evaluates schedules on
+whole-minute ticks. It also fails with a `TZ=` or `CRON_TZ=` prefix, since its
+epoch-aligned grid cannot follow a time zone. Runtime failure, timeout, abort,
+and cleanup behavior belong to workflow execution and are outside this scope.
 
 ## Examples
 

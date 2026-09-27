@@ -92,10 +92,6 @@ func TestCronDescriptors(t *testing.T) {
 		// Unix epoch, so 90-minute intervals fire at 10:30 after 09:00.
 		{"@every 1h", "@every 1h", "2026-09-06T11:00:00Z"},
 		{"@every 90m", "@every 90m", "2026-09-06T10:30:00Z"},
-		// A timezone prefix cannot shift epoch-aligned interval boundaries,
-		// so it is dropped from the canonical expression.
-		{"TZ=UTC @every 1h", "@every 1h", "2026-09-06T11:00:00Z"},
-		{"CRON_TZ=Asia/Tokyo @every 90m", "@every 90m", "2026-09-06T10:30:00Z"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.descriptor, func(t *testing.T) {
@@ -115,7 +111,8 @@ func TestCronDescriptorRejected(t *testing.T) {
 	// "@reboot" is meaningless for a scheduler and unknown descriptors must
 	// fail validation. Intervals must be whole minutes because the scheduler
 	// only ticks on whole-minute boundaries; "@every 90s" would otherwise
-	// fire every three minutes.
+	// fire every three minutes. A timezone prefix is rejected because
+	// epoch-aligned intervals cannot follow a time zone.
 	cases := []string{
 		"@reboot",
 		"@fortnightly",
@@ -125,7 +122,9 @@ func TestCronDescriptorRejected(t *testing.T) {
 		"@every 59s",
 		"@every 90s",
 		"@every 1m30s",
-		"TZ=UTC @every 1s",
+		"TZ=UTC @every 1h",
+		"CRON_TZ=Asia/Tokyo @every 90m",
+		"TZ=Not/AZone @every 1h",
 	}
 	for _, tc := range cases {
 		t.Run(tc, func(t *testing.T) {
