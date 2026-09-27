@@ -2194,6 +2194,32 @@ func TestRunner_DAGPreconditions(t *testing.T) {
 		require.NoError(t, r.runner.Run(successCtx, successPlan.Plan, nil))
 		assert.Equal(t, ir.Succeeded, r.runner.Status(successCtx, successPlan.Plan))
 	})
+
+	// A timeout that cuts a DAG-level check short fails the run like any
+	// other workflow timeout.
+	t.Run("DAGPreconditionInterruptedByTimeout", func(t *testing.T) {
+		r := setupRunner(t, withTimeout(200*time.Millisecond))
+		plan := r.newPlan(t, successStep("1"))
+		ctx := dagPreconditionContext(r, plan, &ir.Condition{Condition: test.Sleep(30 * time.Second)})
+
+		start := time.Now()
+		err := r.runner.Run(ctx, plan.Plan, nil)
+		assert.Less(t, time.Since(start), 10*time.Second)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Equal(t, ir.Failed, r.runner.Status(ctx, plan.Plan))
+		assert.Equal(t, ir.NodeNotStarted, plan.GetNodeByName("1").State().Status)
+	})
+}
+
+// dagPreconditionContext returns a run context for a DAG gated by conditions.
+func dagPreconditionContext(r testHelper, plan planHelper, conditions ...*ir.Condition) context.Context {
+	dag := &ir.DAG{
+		Name:          "test_dag",
+		WorkingDir:    plan.workDir,
+		Preconditions: conditions,
+	}
+	logFilePath := filepath.Join(r.cfg.LogDir, fmt.Sprintf("%s_%s.log", dag.Name, r.cfg.DAGRunID))
+	return runtime.NewContext(plan.Context, dag, r.cfg.DAGRunID, logFilePath)
 }
 
 func TestRunner_DAGPreconditionShellReferencePreserved(t *testing.T) {
@@ -2489,6 +2515,30 @@ func TestRunner_PreconditionWithError(t *testing.T) {
 	// The step should be skipped but no error should be set for condition not met
 	result.assertNodeStatus(t, "1", ir.NodeSkipped)
 	// Conditions that exit with non-zero are just "not met", not errors
+}
+
+// A step precondition check cut short by workflow abort or timeout aborts the
+// step, and the run ends as that abort or timeout defines instead of treating
+// the step as skipped or failed.
+func TestRunner_StepPreconditionInterrupted(t *testing.T) {
+	newInterruptedPlan := func(r testHelper) planHelper {
+		return r.newPlan(t, newStep("1",
+			withPrecondition(&ir.Condition{Condition: test.Sleep(30 * time.Second)}),
+			withCommand("echo should_not_run"),
+		))
+	}
+
+	t.Run("Timeout", func(t *testing.T) {
+		r := setupRunner(t, withTimeout(200*time.Millisecond), withOnFailure(successStep("onFailure")))
+		plan := newInterruptedPlan(r)
+
+		start := time.Now()
+		result := plan.assertRun(t, ir.Failed)
+		assert.Less(t, time.Since(start), 10*time.Second)
+		require.ErrorIs(t, result.Error, context.DeadlineExceeded)
+		result.assertNodeStatus(t, "1", ir.NodeAborted)
+		result.assertNodeStatus(t, "onFailure", ir.NodeSucceeded)
+	})
 }
 
 func TestRunner_MultipleHandlerExecution(t *testing.T) {

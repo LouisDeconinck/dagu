@@ -579,8 +579,7 @@ func (r *Runner) runNodeExecution(ctx context.Context, plan *Plan, node *Node, p
 	met, err := r.meetsPreconditions(ctx, node, preconditionProgress)
 	if err != nil {
 		r.markBuildPrecondition(ctx, buildSession, node, ir.BuildReasonPreconditionError, "", progressCh)
-		r.setLastError(err)
-		r.Cancel(plan)
+		r.handlePreconditionError(plan, err)
 		return
 	}
 	if !met {
@@ -761,8 +760,7 @@ func (r *Runner) runHumanTask(ctx context.Context, plan *Plan, node *Node, progr
 	ctx = r.setupNodeExecutionEnv(ctx, node)
 	met, err := r.meetsPreconditions(ctx, node, progressCh)
 	if err != nil {
-		r.setLastError(err)
-		r.Cancel(plan)
+		r.handlePreconditionError(plan, err)
 		return
 	}
 	if !met {
@@ -1625,6 +1623,16 @@ func externalStepRetryEnabled(ctx context.Context) bool {
 	return false
 }
 
+// handlePreconditionError records a step precondition error and cancels the
+// run. An interrupted check leaves the run to the abort or timeout that
+// interrupted it, so the run ends as that event defines.
+func (r *Runner) handlePreconditionError(plan *Plan, err error) {
+	r.setLastError(err)
+	if !errors.Is(err, errConditionInterrupted) {
+		r.Cancel(plan)
+	}
+}
+
 // checkPreconditions evaluates the preconditions for a node and updates its status accordingly.
 func (r *Runner) meetsPreconditions(ctx context.Context, node *Node, progressCh chan ProgressUpdate) (bool, error) {
 	err := node.evalPreconditions(ctx)
@@ -1634,7 +1642,11 @@ func (r *Runner) meetsPreconditions(ctx context.Context, node *Node, progressCh 
 			r.report(ctx, progressCh, node)
 			return false, nil
 		}
-		node.SetStatus(ir.NodeFailed)
+		status := ir.NodeFailed
+		if errors.Is(err, errConditionInterrupted) {
+			status = ir.NodeAborted
+		}
+		node.SetStatus(status)
 		node.SetError(err)
 		r.report(ctx, progressCh, node)
 		return false, err

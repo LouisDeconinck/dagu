@@ -494,25 +494,33 @@ func TestRuntimeCommandCheckDetailsUnix(t *testing.T) {
 		dagu.ExpectNoFile("missing-command-ran.txt")
 	})
 
-	// A command check killed by the workflow timeout is an interruption, not a
-	// not-met result: the run aborts instead of skipping the gated step. The
-	// harness has no deterministic way to abort mid-check, so the timeout is
-	// the interrupt under test.
-	t.Run("timeout kills command check and aborts the run", func(t *testing.T) {
-		t.Parallel()
+	// A command check cut short by the workflow timeout is an interruption,
+	// not a not-met result: the gated step does not run, nothing is skipped,
+	// and the run fails as any workflow timeout does.
+	for _, tc := range []struct {
+		name string
+		file string
+	}{
+		{name: "timeout interrupts step command check", file: "command_check_timeout.yaml"},
+		{name: "timeout interrupts DAG command check", file: "dag_command_check_timeout.yaml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-		dagu := harness.NewRunner(t)
-		env := []string{"DAGU_HOME=" + filepath.Join(t.TempDir(), "dagu")}
-		const runID = "spec023-condition-timeout"
+			dagu := harness.NewRunner(t)
+			env := []string{"DAGU_HOME=" + filepath.Join(t.TempDir(), "dagu")}
+			const runID = "spec023-condition-timeout"
 
-		result := dagu.RunWithEnv(env, "start", "--run-id="+runID, "command_check_timeout_aborts.yaml")
-		result.ExpectNonZeroExitCode()
-		dagu.ExpectNoFile("timeout-ran.txt")
+			result := dagu.RunWithEnv(env, "start", "--run-id="+runID, tc.file)
+			result.ExpectNonZeroExitCode()
+			dagu.ExpectNoFile("timeout-ran.txt")
 
-		status := dagu.RunWithEnv(env, "status", "--run-id="+runID, "command_check_timeout_aborts.yaml")
-		status.ExpectExitCode(0)
-		require.Contains(t, status.Stdout(), "Aborted")
-	})
+			status := dagu.RunWithEnv(env, "status", "--run-id="+runID, tc.file)
+			status.ExpectExitCode(0)
+			require.Contains(t, status.Stdout(), "Result: Failed")
+			require.NotContains(t, status.Stdout(), "[skipped]")
+		})
+	}
 }
 
 func TestRuntimeValueMatchDetailsUnix(t *testing.T) {

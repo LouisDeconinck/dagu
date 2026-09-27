@@ -19,6 +19,11 @@ import (
 // Errors for condition evaluation
 var (
 	ErrConditionNotMet = fmt.Errorf("condition was not met")
+
+	// errConditionInterrupted marks an evaluation cut short by workflow abort
+	// or timeout. The owning DAG or step follows that outcome instead of
+	// treating the result as not met or failed.
+	errConditionInterrupted = errors.New("condition check interrupted")
 )
 
 // Error message for when not all conditions are met
@@ -51,11 +56,18 @@ func EvaluateConditions(ctx context.Context, shell []string, conditions []*ir.Co
 	// An evaluation error outranks a not-met condition regardless of the order
 	// they appear in, so that a broken gate fails the owning DAG or step
 	// instead of being downgraded to a skip by a later mismatch.
+	err := lastErr
 	if evalErr != nil {
-		return results, evalErr
+		err = evalErr
 	}
 
-	return results, lastErr
+	// A context that ended during evaluation means abort or timeout cut the
+	// checks short, whatever each condition reported.
+	if err != nil && ctx.Err() != nil && !errors.Is(err, errConditionInterrupted) {
+		err = fmt.Errorf("%w: %w", errConditionInterrupted, ctx.Err())
+	}
+
+	return results, err
 }
 
 func conditionResults(conditions []*ir.Condition) []ir.ConditionResult {
@@ -315,7 +327,7 @@ func prepareConditionCommand(cmd *exec.Cmd) {
 // exit and a process that never started, is a not-met result.
 func commandCheckError(ctx context.Context, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return fmt.Errorf("condition check interrupted: %w", ctxErr)
+		return fmt.Errorf("%w: %w", errConditionInterrupted, ctxErr)
 	}
 	return fmt.Errorf("%w: %s", ErrConditionNotMet, err)
 }
