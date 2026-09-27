@@ -60,6 +60,25 @@ steps:
 	}
 }
 
+// TestEnqueueCommand_StdinParams replaces the process-global os.Stdin, so it
+// must stay sequential to avoid feeding other commands.
+func TestEnqueueCommand_StdinParams(t *testing.T) {
+	th := test.SetupCommand(t)
+
+	dag := th.DAG(t, `params: "p1 p2"
+steps:
+  - name: "1"
+    run: "echo \"params is $1 and $2\""
+`)
+
+	pipeCommandStdin(t, "s1 s2\n")
+
+	th.RunCommand(t, cmd.Enqueue(), test.CmdTest{
+		Args:        []string{"enqueue", dag.Location},
+		ExpectedOut: []string{`params="[1=s1 2=s2]`},
+	})
+}
+
 func TestEnqueueCommand_RequiresDAGDefinition(t *testing.T) {
 	t.Parallel()
 

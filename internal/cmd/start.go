@@ -51,6 +51,9 @@ A DAG definition is a blueprint that defines the DAG structure. This command cre
 instance with a unique DAG-run ID.
 
 Parameters after the "--" separator are passed as execution parameters (either positional or key=value pairs).
+When neither "--" nor --params is given, piped or redirected stdin supplies the parameters
+(e.g. 'echo "P1=foo P2=bar" | dagu start my_dag'). Command-line parameters take precedence:
+stdin is not read when params are provided on the command line.
 Flags can override default settings such as DAG-run ID, DAG name, or suppress output.
 
 Use --only to run just the named steps (by name or ID) in a new DAG-run of the
@@ -243,7 +246,7 @@ func runStart(ctx *Context, args []string) error {
 			return err
 		}
 
-		if err := validateStartPositionalParamCount(ctx, args, dag); err != nil {
+		if err := validateStartPositionalParamCount(ctx, args, dag, params); err != nil {
 			return err
 		}
 	}
@@ -386,6 +389,8 @@ func getDAGRunInfo(ctx *Context) (dagRunID, rootDAGRun, parentDAGRun string, isS
 }
 
 // loadDAGWithParams loads the DAG and its parameters from command arguments.
+// Parameters come from args after "--", else the --params flag, else piped or
+// redirected stdin; command-line parameters take precedence over stdin.
 func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, string, error) {
 	dagPath := args[0]
 
@@ -430,6 +435,9 @@ func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, 
 	var params string
 
 	if ctx.Command.ArgsLenAtDash() != -1 && len(args) > 0 {
+		if stdinHasParamsInput() {
+			logger.Warn(ctx, "Ignoring piped stdin: params were provided after '--'")
+		}
 		dashArgs := args[ctx.Command.ArgsLenAtDash():]
 		loadOpts = append(loadOpts, spec.WithParams(quoteStartDashArgs(dashArgs)))
 		params = strings.Join(dashArgs, " ")
@@ -437,6 +445,17 @@ func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, 
 		params, err = ctx.Command.Flags().GetString("params")
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to get parameters: %w", err)
+		}
+		switch {
+		case ctx.Command.Flags().Changed("params"):
+			if stdinHasParamsInput() {
+				logger.Warn(ctx, "Ignoring piped stdin: params were provided via --params")
+			}
+		case stdinHasParamsInput():
+			params, err = readStdinParams()
+			if err != nil {
+				return nil, "", err
+			}
 		}
 		loadOpts = append(loadOpts, spec.WithParams(stringutil.RemoveQuotes(params)))
 	}

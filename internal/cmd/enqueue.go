@@ -22,6 +22,9 @@ func Enqueue() *cobra.Command {
 			Short: "Enqueue a DAG-run to the queue.",
 			Long: `Enqueue a DAG-run to the queue.
 
+Parameters can also be provided on piped or redirected stdin when neither "--" nor
+--params is given (e.g. 'echo "P1=foo" | dagu enqueue my_dag').
+
 Examples:
 	dagu enqueue --run-id=run_id my_dag -- P1=foo P2=bar
 	dagu enqueue --name my_custom_name my_dag.yaml -- P1=foo P2=bar

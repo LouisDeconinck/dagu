@@ -256,6 +256,144 @@ steps:
 	})
 }
 
+// TestCmdStart_StdinParams replaces the process-global os.Stdin, so the test
+// and its subtests must stay sequential to avoid feeding other commands.
+func TestCmdStart_StdinParams(t *testing.T) {
+	positionalDAG := `params: "p1 p2"
+steps:
+  - name: "1"
+    run: "echo \"params is $1 and $2\""
+`
+	namedDAG := `params: KEY1=default1 KEY2=default2
+steps:
+  - name: "1"
+    run: "echo $KEY1 $KEY2"
+`
+
+	t.Run("PipedPositionalParams", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		dag := th.DAG(t, positionalDAG)
+		pipeCommandStdin(t, "s1 s2\n")
+
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args:        []string{"start", dag.Location},
+			ExpectedOut: []string{`params="[1=s1 2=s2]`},
+		})
+		assertLatestParams(t, th, dag.Location, "1=s1 2=s2")
+	})
+
+	t.Run("PipedNamedParamsAcrossLines", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		dag := th.DAG(t, namedDAG)
+		pipeCommandStdin(t, "KEY1=v1\nKEY2=v2\n")
+
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args: []string{"start", dag.Location},
+		})
+		assertLatestParams(t, th, dag.Location, "KEY1=v1 KEY2=v2")
+	})
+
+	t.Run("PipedJSONParams", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		dag := th.DAG(t, `params: KEY=default
+steps:
+  - name: "1"
+    run: "echo $KEY"
+`)
+		pipeCommandStdin(t, `{"KEY":"v1"}`)
+
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args: []string{"start", dag.Location},
+		})
+		assertLatestParams(t, th, dag.Location, "KEY=v1")
+	})
+
+	t.Run("EmptyStdinBehavesLikeNoParams", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		dag := th.DAG(t, namedDAG)
+		pipeCommandStdin(t, "")
+
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args: []string{"start", dag.Location},
+		})
+		assertLatestParams(t, th, dag.Location, "KEY1=default1 KEY2=default2")
+	})
+
+	t.Run("WhitespaceStdinBehavesLikeNoParams", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		dag := th.DAG(t, namedDAG)
+		pipeCommandStdin(t, "  \n\t\n")
+
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args: []string{"start", dag.Location},
+		})
+		assertLatestParams(t, th, dag.Location, "KEY1=default1 KEY2=default2")
+	})
+
+	t.Run("ParamsFlagTakesPrecedenceOverStdin", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		dag := th.DAG(t, positionalDAG)
+		pipeCommandStdin(t, "s1 s2\n")
+
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args: []string{"start", `--params="c1 c2"`, dag.Location},
+		})
+		assertLatestParams(t, th, dag.Location, "1=c1 2=c2")
+	})
+
+	t.Run("DashArgsTakePrecedenceOverStdin", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		dag := th.DAG(t, positionalDAG)
+		pipeCommandStdin(t, "s1 s2\n")
+
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args: []string{"start", dag.Location, "--", "d1", "d2"},
+		})
+		assertLatestParams(t, th, dag.Location, "1=d1 2=d2")
+	})
+
+	t.Run("RejectsTooManyPositionalFromStdin", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		dag := th.DAG(t, positionalDAG)
+		pipeCommandStdin(t, "one two three\n")
+
+		err := th.RunCommandWithError(t, cmd.Start(), test.CmdTest{
+			Args: []string{"start", dag.Location},
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "too many positional params: expected at most 2, got 3")
+	})
+}
+
+// pipeCommandStdin replaces process stdin with a pipe holding input until the
+// test ends. The caller must not be parallel.
+func pipeCommandStdin(t *testing.T, input string) {
+	t.Helper()
+
+	stdin, writer, err := os.Pipe()
+	require.NoError(t, err)
+	originalStdin := os.Stdin
+	os.Stdin = stdin
+	t.Cleanup(func() {
+		os.Stdin = originalStdin
+		require.NoError(t, stdin.Close())
+	})
+	_, err = writer.WriteString(input)
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+}
+
+func assertLatestParams(t *testing.T, th test.Command, dagPath, want string) {
+	t.Helper()
+
+	dag, err := spec.Load(th.Context, dagPath)
+	require.NoError(t, err)
+	status, err := th.DAGRunMgr.GetLatestStatus(th.Context, dag)
+	require.NoError(t, err)
+	require.Equal(t, ir.Succeeded, status.Status)
+	require.Equal(t, want, status.Params)
+}
+
 func TestCmdStart_FromRunID(t *testing.T) {
 	t.Run("ReschedulesWithStoredParameters", func(t *testing.T) {
 		t.Parallel()
