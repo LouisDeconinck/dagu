@@ -2949,20 +2949,32 @@ paths:
                 includeDownstream:
                   type: boolean
                   description: "Optional. When true, retry the selected step and every reachable descendant. Requires stepName. Unrelated branches keep their existing status."
+                bypassPreconditions:
+                  type: boolean
+                  description: "Optional. When true, skip step precondition evaluation for the steps reset by this retry. Requires stepName. DAG-level preconditions and lifecycle handlers still apply."
                 subDAGRunId:
                   allOf:
                     - $ref: "#/components/schemas/DAGRunId"
                     - description: "Optional. Persisted child DAG-run containing the step. Requires stepName; the path and dagRunId remain the root DAG-run."
               not:
                 allOf:
-                  - type: object
-                    required:
-                      - includeDownstream
-                    properties:
-                      includeDownstream:
-                        type: boolean
-                        enum:
-                          - true
+                  - anyOf:
+                      - type: object
+                        required:
+                          - includeDownstream
+                        properties:
+                          includeDownstream:
+                            type: boolean
+                            enum:
+                              - true
+                      - type: object
+                        required:
+                          - bypassPreconditions
+                        properties:
+                          bypassPreconditions:
+                            type: boolean
+                            enum:
+                              - true
                   - not:
                       type: object
                       required:

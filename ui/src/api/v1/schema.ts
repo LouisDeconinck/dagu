@@ -10440,6 +10440,8 @@ export interface operations {
                     stepName?: string;
                     /** @description Optional. When true, retry the selected step and every reachable descendant. Requires stepName. Unrelated branches keep their existing status. */
                     includeDownstream?: boolean;
+                    /** @description Optional. When true, skip step precondition evaluation for the steps reset by this retry. Requires stepName. DAG-level preconditions and lifecycle handlers still apply. */
+                    bypassPreconditions?: boolean;
                     subDAGRunId?: components["schemas"]["DAGRunId"] & unknown;
                 };
             };
