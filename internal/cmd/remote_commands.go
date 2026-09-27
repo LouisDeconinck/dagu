@@ -207,6 +207,28 @@ func remoteResolveDAG(ctx *Context, arg string) (*api.DAGFile, error) {
 	return ctx.Remote.resolveDAG(ctx, arg)
 }
 
+// remoteRunParams resolves run parameters for remote commands: "--" arguments
+// first, then --params, then piped or redirected stdin when neither is given.
+func remoteRunParams(ctx *Context, args []string) (string, error) {
+	params := ""
+	hasParams := ctx.Command.ArgsLenAtDash() >= 0
+	if hasParams {
+		params = joinNonEmpty(args[1:])
+	}
+	if flagParams, _ := ctx.StringParam("params"); flagParams != "" {
+		params = flagParams
+		hasParams = true
+	}
+	if !hasParams && stdinHasParamsInput() {
+		var err error
+		params, err = readStdinParams()
+		if err != nil {
+			return "", err
+		}
+	}
+	return params, nil
+}
+
 func remoteRunStart(ctx *Context, args []string) error {
 	if err := validateRemoteStartLikeFlags(ctx); err != nil {
 		return err
@@ -249,12 +271,9 @@ func remoteRunStart(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	params := ""
-	if ctx.Command.ArgsLenAtDash() >= 0 {
-		params = joinNonEmpty(args[1:])
-	}
-	if flagParams, _ := ctx.StringParam("params"); flagParams != "" {
-		params = flagParams
+	params, err := remoteRunParams(ctx, args)
+	if err != nil {
+		return err
 	}
 	nameOverride, _ := ctx.StringParam("name")
 	runID, _ := ctx.StringParam("run-id")
@@ -304,12 +323,9 @@ func remoteRunEnqueue(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	params := ""
-	if ctx.Command.ArgsLenAtDash() >= 0 {
-		params = joinNonEmpty(args[1:])
-	}
-	if flagParams, _ := ctx.StringParam("params"); flagParams != "" {
-		params = flagParams
+	params, err := remoteRunParams(ctx, args)
+	if err != nil {
+		return err
 	}
 	nameOverride, _ := ctx.StringParam("name")
 	runID, _ := ctx.StringParam("run-id")

@@ -78,4 +78,22 @@ func TestReadStdinParams(t *testing.T) {
 		require.NoError(t, err)
 		require.Empty(t, params)
 	})
+
+	t.Run("ExceedsLimit", func(t *testing.T) {
+		// A redirected file larger than the limit is rejected instead of being
+		// fully buffered in memory.
+		path := filepath.Join(t.TempDir(), "params.txt")
+		require.NoError(t, os.WriteFile(path, make([]byte, maxStdinParamsSize+1), 0o600))
+		file, err := os.Open(path)
+		require.NoError(t, err)
+		original := os.Stdin
+		os.Stdin = file
+		t.Cleanup(func() {
+			os.Stdin = original
+			require.NoError(t, file.Close())
+		})
+
+		_, err = readStdinParams()
+		require.ErrorContains(t, err, "exceed the")
+	})
 }

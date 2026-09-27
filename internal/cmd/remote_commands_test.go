@@ -208,6 +208,71 @@ func TestRemoteStartSendsSteps(t *testing.T) {
 	assert.Equal(t, map[string]map[string]string{"extract": {"rows": "3"}}, *body.Outputs)
 }
 
+func TestRemoteStartReadsParamsFromStdin(t *testing.T) {
+	pipeStdin(t, "P1=foo P2=bar")
+
+	bodies := make(chan api.ExecuteDAGJSONBody, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"fileName":"etl"}`))
+			return
+		}
+		var body api.ExecuteDAGJSONBody
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		bodies <- body
+		_, _ = w.Write([]byte(`{"dagRunId":"run-1"}`))
+	}))
+	defer server.Close()
+
+	command := &cobra.Command{Use: "start"}
+	initFlags(command, startFlags...)
+	ctx := &Context{
+		Context: context.Background(),
+		Command: command,
+		Remote:  &remoteClient{baseURL: server.URL, client: server.Client()},
+	}
+
+	require.NoError(t, remoteRunStart(ctx, []string{"etl"}))
+
+	body := <-bodies
+	require.NotNil(t, body.Params)
+	assert.Equal(t, "P1=foo P2=bar", *body.Params)
+}
+
+func TestRemoteStartParamsFlagBeatsStdin(t *testing.T) {
+	pipeStdin(t, "P1=stdin")
+
+	bodies := make(chan api.ExecuteDAGJSONBody, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"fileName":"etl"}`))
+			return
+		}
+		var body api.ExecuteDAGJSONBody
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		bodies <- body
+		_, _ = w.Write([]byte(`{"dagRunId":"run-1"}`))
+	}))
+	defer server.Close()
+
+	command := &cobra.Command{Use: "start"}
+	initFlags(command, startFlags...)
+	require.NoError(t, command.Flags().Set("params", "P1=flag"))
+	ctx := &Context{
+		Context: context.Background(),
+		Command: command,
+		Remote:  &remoteClient{baseURL: server.URL, client: server.Client()},
+	}
+
+	require.NoError(t, remoteRunStart(ctx, []string{"etl"}))
+
+	body := <-bodies
+	require.NotNil(t, body.Params)
+	assert.Equal(t, "P1=flag", *body.Params)
+}
+
 func TestWaitForRemoteStopHonorsContextCancellation(t *testing.T) {
 	t.Parallel()
 

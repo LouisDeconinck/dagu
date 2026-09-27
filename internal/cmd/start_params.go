@@ -23,11 +23,18 @@ func stdinHasParamsInput() bool {
 	return err == nil && info.Mode()&os.ModeCharDevice == 0
 }
 
-// readStdinParams returns all of stdin trimmed, for use as run params.
+// maxStdinParamsSize bounds the bytes read from stdin as run params, so a
+// large redirected file or stream cannot exhaust memory.
+const maxStdinParamsSize = 1 << 20 // 1 MiB
+
+// readStdinParams returns stdin trimmed, for use as run params.
 func readStdinParams() (string, error) {
-	data, err := io.ReadAll(os.Stdin)
+	data, err := io.ReadAll(io.LimitReader(os.Stdin, maxStdinParamsSize+1))
 	if err != nil {
 		return "", fmt.Errorf("failed to read params from stdin: %w", err)
+	}
+	if len(data) > maxStdinParamsSize {
+		return "", fmt.Errorf("params from stdin exceed the %d byte limit", maxStdinParamsSize)
 	}
 	return strings.TrimSpace(string(data)), nil
 }
