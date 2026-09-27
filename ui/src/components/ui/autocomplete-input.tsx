@@ -96,6 +96,9 @@ function AutocompleteInput({
         break;
 
       case 'ArrowDown':
+        if (filteredSuggestions.length === 0) {
+          break;
+        }
         e.preventDefault();
         setIsOpen(true);
         setHighlightedIndex((prev) =>
@@ -104,6 +107,9 @@ function AutocompleteInput({
         break;
 
       case 'ArrowUp':
+        if (filteredSuggestions.length === 0) {
+          break;
+        }
         e.preventDefault();
         setIsOpen(true);
         setHighlightedIndex((prev) =>
@@ -136,12 +142,17 @@ function AutocompleteInput({
         placeholder={placeholder}
         role="combobox"
         aria-label={ariaLabel ?? placeholder}
-        aria-expanded={isOpen}
+        aria-expanded={isOpen && filteredSuggestions.length > 0}
         aria-haspopup="listbox"
         aria-autocomplete="list"
-        aria-controls={listboxId}
+        aria-controls={
+          isOpen && filteredSuggestions.length > 0 ? listboxId : undefined
+        }
         aria-activedescendant={
-          isOpen && highlightedIndex >= 0
+          isOpen &&
+          filteredSuggestions.length > 0 &&
+          highlightedIndex >= 0 &&
+          highlightedIndex < filteredSuggestions.length
             ? `${listboxId}-option-${highlightedIndex}`
             : undefined
         }

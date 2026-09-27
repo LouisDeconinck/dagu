@@ -180,6 +180,23 @@ function supportsIntersectionObserver(): boolean {
   return typeof IntersectionObserver !== 'undefined';
 }
 
+const NAME_SUGGESTION_DEBOUNCE_MS = 300;
+const NAME_SUGGESTION_LIMIT = 50;
+
+function useDebouncedText(value: string, delayMs: number) {
+  const [debouncedValue, setDebouncedValue] = React.useState(value);
+
+  React.useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      setDebouncedValue(value);
+    }, delayMs);
+
+    return () => window.clearTimeout(timeout);
+  }, [delayMs, value]);
+
+  return debouncedValue;
+}
+
 function DAGRuns() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -343,8 +360,8 @@ function DAGRuns() {
     const dagRunId = params.get('selectedRunId');
     return name && dagRunId ? { name, dagRunId } : null;
   });
-  const [selectedDAGRunTab, setSelectedDAGRunTab] = React.useState<StatusTab>(() =>
-    readSelectedRunTab(location.search)
+  const [selectedDAGRunTab, setSelectedDAGRunTab] = React.useState<StatusTab>(
+    () => readSelectedRunTab(location.search)
   );
   const updateSelectedDAGRun = React.useCallback(
     (
@@ -786,18 +803,27 @@ function DAGRuns() {
     [labelsData?.labels]
   );
 
-  // Fetch DAG names to feed the name filter autocomplete
-  const { data: dagsData } = useQuery(
-    '/dags',
-    {
-      params: {
-        query: {
-          remoteNode: appBarContext.selectedRemoteNode || 'local',
-          perPage: 1000,
-          ...workspaceQuery,
-        },
-      },
-    },
+  // Search DAG names to feed the name filter autocomplete. /search/dags is a
+  // lightweight name lookup; the paginated /dags listing clamps perPage and
+  // loads full DAG records, so names beyond the first page would be missed.
+  const debouncedSearchText = useDebouncedText(
+    searchText,
+    NAME_SUGGESTION_DEBOUNCE_MS
+  );
+  const { data: dagSearchData } = useQuery(
+    '/search/dags',
+    debouncedSearchText
+      ? {
+          params: {
+            query: {
+              remoteNode: appBarContext.selectedRemoteNode || 'local',
+              q: debouncedSearchText,
+              limit: NAME_SUGGESTION_LIMIT,
+              ...workspaceQuery,
+            },
+          },
+        }
+      : null,
     {
       revalidateOnFocus: false,
       revalidateIfStale: false,
@@ -839,13 +865,13 @@ function DAGRuns() {
     query: dagRunQuery,
   });
 
-  // DAG name suggestions combine the DAG list with names of runs already
+  // DAG name suggestions combine search matches with names of runs already
   // loaded, so runs whose DAG is no longer listed are still suggested.
   const dagNameSuggestions = React.useMemo(() => {
     const names = new Set<string>();
-    for (const file of dagsData?.dags ?? []) {
-      if (file.dag.name) {
-        names.add(file.dag.name);
+    for (const item of dagSearchData?.results ?? []) {
+      if (item.name) {
+        names.add(item.name);
       }
     }
     for (const run of dagRuns) {
@@ -854,7 +880,7 @@ function DAGRuns() {
       }
     }
     return [...names];
-  }, [dagsData?.dags, dagRuns]);
+  }, [dagSearchData?.results, dagRuns]);
 
   const dagRunIdSuggestions = React.useMemo(() => {
     const ids = new Set<string>();

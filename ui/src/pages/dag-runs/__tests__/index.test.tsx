@@ -36,7 +36,7 @@ const {
   const writeState = vi.fn();
   return {
     createRunViewMock: vi.fn(),
-    dagsListState: { dags: [] as { dag: { name: string } }[] },
+    dagsListState: { results: [] as { name: string }[] },
     deleteRunViewMock: vi.fn(),
     updateRunViewMock: vi.fn(),
     readSearchStateMock: readState,
@@ -78,13 +78,15 @@ vi.mock('@/contexts/UserPreference', () => ({
 }));
 
 vi.mock('@/hooks/api', () => ({
-  useQuery: (path: string) => ({
+  useQuery: (path: string, init?: unknown) => ({
     data:
-      path === '/dags/labels'
-        ? { labels: [] }
-        : path === '/dags'
-          ? { dags: dagsListState.dags }
-          : undefined,
+      init === null
+        ? undefined
+        : path === '/dags/labels'
+          ? { labels: [] }
+          : path === '/search/dags'
+            ? { results: dagsListState.results }
+            : undefined,
   }),
 }));
 
@@ -193,7 +195,7 @@ beforeEach(() => {
   updateRunViewMock.mockReset();
   deleteRunViewMock.mockReset();
   sharedRunViewState.views = [];
-  dagsListState.dags = [];
+  dagsListState.results = [];
   usePaginatedDAGRunsMock.mockReset();
   usePaginatedDAGRunsMock.mockReturnValue({
     dagRuns: [],
@@ -538,15 +540,21 @@ describe('DAGRuns page', () => {
   });
 
   it('suggests DAG names and applies the selected suggestion as the filter', async () => {
-    dagsListState.dags = [
-      { dag: { name: 'deploy-api' } },
-      { dag: { name: 'nightly-backup' } },
+    dagsListState.results = [
+      { name: 'deploy-api' },
+      { name: 'nightly-backup' },
     ];
     renderPage();
 
     const input = screen.getByPlaceholderText('Filter by DAG name...');
     fireEvent.focus(input);
-    expect(screen.getByRole('option', { name: 'deploy-api' })).toBeVisible();
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+
+    // Suggestions arrive from /search/dags once the debounced input is set
+    fireEvent.change(input, { target: { value: 'a' } });
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: 'deploy-api' })).toBeVisible();
+    });
     expect(
       screen.getByRole('option', { name: 'nightly-backup' })
     ).toBeVisible();

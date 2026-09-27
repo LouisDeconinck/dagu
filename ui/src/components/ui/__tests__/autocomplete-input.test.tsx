@@ -109,6 +109,66 @@ describe('AutocompleteInput', () => {
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
   });
 
+  it('keeps combobox aria state collapsed while the listbox is absent', () => {
+    render(<TestAutocomplete />);
+
+    const input = screen.getByRole('combobox', { name: 'Filter...' });
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+    expect(input).not.toHaveAttribute('aria-controls');
+    expect(input).not.toHaveAttribute('aria-activedescendant');
+
+    fireEvent.focus(input);
+    expect(input).toHaveAttribute('aria-expanded', 'true');
+    const listbox = screen.getByRole('listbox');
+    expect(input).toHaveAttribute('aria-controls', listbox.id);
+  });
+
+  it('reports no expanded listbox when every suggestion is filtered out', () => {
+    render(<TestAutocomplete />);
+
+    const input = screen.getByRole('combobox', { name: 'Filter...' });
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: 'zzz' } });
+
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+    expect(input).not.toHaveAttribute('aria-controls');
+    expect(input).not.toHaveAttribute('aria-activedescendant');
+  });
+
+  it('points aria-activedescendant at the highlighted option only', () => {
+    render(<TestAutocomplete />);
+
+    const input = screen.getByRole('combobox', { name: 'Filter...' });
+    fireEvent.focus(input);
+    expect(input).not.toHaveAttribute('aria-activedescendant');
+
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    const listbox = screen.getByRole('listbox');
+    const firstOption = screen.getByRole('option', { name: 'alpha' });
+    expect(input).toHaveAttribute(
+      'aria-activedescendant',
+      `${listbox.id}-option-0`
+    );
+    expect(firstOption.id).toBe(`${listbox.id}-option-0`);
+  });
+
+  it('ignores arrow keys when no suggestions are available', () => {
+    const onEnterPress = vi.fn();
+    render(<TestAutocomplete suggestions={[]} onEnterPress={onEnterPress} />);
+
+    const input = screen.getByRole('combobox', { name: 'Filter...' });
+    fireEvent.focus(input);
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'ArrowUp' });
+
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(input).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onEnterPress).toHaveBeenCalledTimes(1);
+  });
+
   it('closes the dropdown on Escape', () => {
     render(<TestAutocomplete />);
 
