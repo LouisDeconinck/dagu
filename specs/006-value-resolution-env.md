@@ -124,6 +124,13 @@ Rules:
 - If another spec makes both root-level container settings and step-level
   container settings applicable to a step, only the environment declarations
   on the selected container participate in this spec's precedence order.
+- Variables loaded from the selected container's `env_file` entries are part
+  of that container's environment declarations.
+- Within the selected container, `container.env` entries override variables
+  from `env_file`, and a later `env_file` entry overrides an earlier one.
+- Dagu does not value-resolve `env_file` contents. Files use dotenv syntax.
+- A missing or unreadable `env_file` fails the step or run that selects the
+  container.
 
 - Runtime-profile specs own profile selection and profile inheritance.
 - Secret specs own secret provider lookup and masking.
