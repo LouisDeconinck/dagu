@@ -47,6 +47,16 @@ func (store *Store) PruneArtifacts(ctx context.Context, req persis.ArtifactPrune
 	if err != nil {
 		return nil, fmt.Errorf("invalid artifact root %q: %w", root, err)
 	}
+	// Abs and Clean do not resolve symlinks, so a root linked to the
+	// filesystem root would pass the guard below and sweep the link target.
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("invalid artifact root %q: %w", root, err)
+		}
+		resolved = abs
+	}
+	abs = resolved
 	if filepath.Dir(abs) == abs {
 		return nil, fmt.Errorf("refusing to sweep filesystem root %q", abs)
 	}
@@ -67,7 +77,7 @@ func (store *Store) PruneArtifacts(ctx context.Context, req persis.ArtifactPrune
 	}
 
 	s := &artifactSweep{
-		root:    filepath.Clean(root),
+		root:    abs,
 		cutoff:  cutoff,
 		dryRun:  req.DryRun,
 		live:    live,
@@ -79,15 +89,24 @@ func (store *Store) PruneArtifacts(ctx context.Context, req persis.ArtifactPrune
 	return &s.result, nil
 }
 
-// artifactSweep carries the liveness set and policy for one sweep of an
+// artifactSweep carries the liveness sets and policy for one sweep of an
 // artifact root.
 type artifactSweep struct {
 	root    string
 	cutoff  time.Time
 	dryRun  bool
-	live    map[string]struct{}
+	live    liveSets
 	result  persis.ArtifactPruneResult
 	emptied map[string]struct{}
+}
+
+// liveSets keeps the two layouts' claim keys apart: pre-date directories are
+// keyed by the run ID itself, partitioned directories and their sidecars by
+// the derived suffix. A shared set would let a run ID shaped like a suffix —
+// a fixed-length hexadecimal string — shield an orphan of the other layout.
+type liveSets struct {
+	ids      map[string]struct{}
+	suffixes map[string]struct{}
 }
 
 func (s *artifactSweep) run(ctx context.Context) error {
@@ -162,7 +181,7 @@ func (s *artifactSweep) sweepRunDir(ctx context.Context, path, name string) bool
 	if matches := reDAGRunDir.FindStringSubmatch(name); len(matches) == 3 {
 		at, err := parseDAGRunTimestamp(matches[1])
 		if err == nil {
-			s.maybeRemove(ctx, path, matches[2], at, true)
+			s.maybeRemove(ctx, path, matches[2], at, true, s.live.ids)
 		}
 		return true
 	}
@@ -175,7 +194,7 @@ func (s *artifactSweep) sweepRunDir(ctx context.Context, path, name string) bool
 	if !ok {
 		return true
 	}
-	s.maybeRemove(ctx, path, parsed.Suffix, runDirTimestamp(day, parsed.TimeOfDay), true)
+	s.maybeRemove(ctx, path, parsed.Suffix, runDirTimestamp(day, parsed.TimeOfDay), true, s.live.suffixes)
 	return true
 }
 
@@ -192,13 +211,14 @@ func (s *artifactSweep) sweepRecord(ctx context.Context, path, name string) {
 	if !ok {
 		return
 	}
-	s.maybeRemove(ctx, path, parsed.Suffix, runDirTimestamp(day, parsed.TimeOfDay), false)
+	s.maybeRemove(ctx, path, parsed.Suffix, runDirTimestamp(day, parsed.TimeOfDay), false, s.live.suffixes)
 }
 
 // maybeRemove removes path when its key is claimed by no surviving run and
-// its timestamp predates the cutoff.
-func (s *artifactSweep) maybeRemove(ctx context.Context, path, key string, at time.Time, dir bool) {
-	if _, ok := s.live[key]; ok || at.IsZero() || !at.Before(s.cutoff) {
+// its timestamp predates the cutoff. live is the set for the layout the key
+// belongs to.
+func (s *artifactSweep) maybeRemove(ctx context.Context, path, key string, at time.Time, dir bool, live map[string]struct{}) {
+	if _, ok := live[key]; ok || at.IsZero() || !at.Before(s.cutoff) {
 		return
 	}
 	if s.dryRun {
@@ -269,21 +289,21 @@ func runDirTimestamp(day, timeOfDay string) time.Time {
 // liveArtifactNames collects the names that keep an artifact directory alive:
 // every run ID in the dag-runs tree, plus the directory name suffix derived
 // from it. Directory names alone carry the ID, so no status file is read.
-func (store *Store) liveArtifactNames(ctx context.Context) (map[string]struct{}, error) {
+func (store *Store) liveArtifactNames(ctx context.Context) (liveSets, error) {
 	roots, err := store.listRoot(ctx, "")
 	if err != nil {
-		return nil, fmt.Errorf("failed to list DAG data roots: %w", err)
+		return liveSets{}, fmt.Errorf("failed to list DAG data roots: %w", err)
 	}
-	live := map[string]struct{}{}
+	live := liveSets{ids: map[string]struct{}{}, suffixes: map[string]struct{}{}}
 	for _, root := range roots {
-		if err := collectRunIDs(ctx, root.dagRunsDir, live); err != nil {
-			return nil, err
+		if err := collectRunIDs(ctx, root.dagRunsDir, &live); err != nil {
+			return liveSets{}, err
 		}
 	}
 	return live, nil
 }
 
-func collectRunIDs(ctx context.Context, dagRunsDir string, live map[string]struct{}) error {
+func collectRunIDs(ctx context.Context, dagRunsDir string, live *liveSets) error {
 	years, err := listDirsSorted(dagRunsDir, false, reYear)
 	if err != nil {
 		return fmt.Errorf("failed to list run years under %s: %w", dagRunsDir, err)
@@ -312,7 +332,7 @@ func collectRunIDs(ctx context.Context, dagRunsDir string, live map[string]struc
 	return nil
 }
 
-func collectDayRunIDs(ctx context.Context, dayPath string, live map[string]struct{}) error {
+func collectDayRunIDs(ctx context.Context, dayPath string, live *liveSets) error {
 	entries, err := fileutil.ReadDir(dayPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -331,7 +351,7 @@ func collectDayRunIDs(ctx context.Context, dayPath string, live map[string]struc
 		if len(matches) != 3 {
 			continue
 		}
-		markLive(matches[2], live)
+		live.markLive(matches[2])
 		if err := collectSubRunIDs(ctx, filepath.Join(dayPath, entry.Name()), live); err != nil {
 			return err
 		}
@@ -342,7 +362,7 @@ func collectDayRunIDs(ctx context.Context, dayPath string, live map[string]struc
 // collectSubRunIDs marks the run IDs nested under a run directory's sub
 // dag-run directories. A sub dag-run can hold children of its own, so this
 // recurses.
-func collectSubRunIDs(ctx context.Context, runDir string, live map[string]struct{}) error {
+func collectSubRunIDs(ctx context.Context, runDir string, live *liveSets) error {
 	for _, dirName := range []string{SubDAGRunsDir, LegacySubDAGRunsDir} {
 		subDir := filepath.Join(runDir, dirName)
 		entries, err := fileutil.ReadDir(subDir)
@@ -363,7 +383,7 @@ func collectSubRunIDs(ctx context.Context, runDir string, live map[string]struct
 			if !ok {
 				continue
 			}
-			markLive(dagRunID, live)
+			live.markLive(dagRunID)
 			if err := collectSubRunIDs(ctx, filepath.Join(subDir, entry.Name()), live); err != nil {
 				return err
 			}
@@ -375,7 +395,7 @@ func collectSubRunIDs(ctx context.Context, runDir string, live map[string]struct
 // markLive records both names a run's artifact directory can be keyed by: the
 // run ID verbatim for the pre-date layout and the derived suffix for the
 // partitioned layout.
-func markLive(dagRunID string, live map[string]struct{}) {
-	live[dagRunID] = struct{}{}
-	live[artifactpath.RunSuffix(dagRunID)] = struct{}{}
+func (l *liveSets) markLive(dagRunID string) {
+	l.ids[dagRunID] = struct{}{}
+	l.suffixes[artifactpath.RunSuffix(dagRunID)] = struct{}{}
 }

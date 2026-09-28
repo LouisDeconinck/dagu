@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -34,6 +35,16 @@ func artifactSweepRunDir(t *testing.T, root, dagName, dagRunID string, at time.T
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "out.txt"), []byte("x"), 0o600))
 	return dir
+}
+
+// resolvedDir evaluates symlinks in dir, the form the sweep reports paths in.
+// TempDir itself can sit behind a link (macOS /var -> /private/var), so
+// expectations must be built from the resolved base.
+func resolvedDir(t *testing.T, dir string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	return resolved
 }
 
 func artifactSweepRecord(t *testing.T, root, runDir, dagName, dagRunID string) string {
@@ -64,7 +75,7 @@ func TestArtifactSweep(t *testing.T) {
 
 	t.Run("RemovesOrphanedDirAndRecord", func(t *testing.T) {
 		th := setupTestRepository(t)
-		root := filepath.Join(th.TmpDir, "artifacts")
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
 
 		dir := artifactSweepRunDir(t, root, "gone-dag", "gone-run", artifactSweepOld)
 		meta := artifactSweepRecord(t, root, dir, "gone-dag", "gone-run")
@@ -86,7 +97,7 @@ func TestArtifactSweep(t *testing.T) {
 	// run still writing is a run whose record exists.
 	t.Run("KeepsDirsClaimedByRuns", func(t *testing.T) {
 		th := setupTestRepository(t)
-		root := filepath.Join(th.TmpDir, "artifacts")
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
 
 		th.CreateAttempt(t, time.Now(), "live-run", ir.Running)
 		liveDir := artifactSweepRunDir(t, root, "test_DAG", "live-run", artifactSweepOld)
@@ -105,7 +116,7 @@ func TestArtifactSweep(t *testing.T) {
 
 	t.Run("KeepsSubRunArtifacts", func(t *testing.T) {
 		th := setupTestRepository(t)
-		root := filepath.Join(th.TmpDir, "artifacts")
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
 
 		dag := th.DAG("parent-dag")
 		_, err := th.Backend.CreateAttempt(th.Context, persis.DAGRunCreateAttemptRequest{
@@ -141,7 +152,7 @@ func TestArtifactSweep(t *testing.T) {
 
 	t.Run("KeepsFreshOrphansBelowMinAge", func(t *testing.T) {
 		th := setupTestRepository(t)
-		root := filepath.Join(th.TmpDir, "artifacts")
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
 
 		dir := artifactSweepRunDir(t, root, "gone-dag", "gone-run", artifactSweepFresh)
 		meta := artifactSweepRecord(t, root, dir, "gone-dag", "gone-run")
@@ -161,9 +172,9 @@ func TestArtifactSweep(t *testing.T) {
 	// relocated directory alone.
 	t.Run("RemovesRecordForRelocatedDirOnly", func(t *testing.T) {
 		th := setupTestRepository(t)
-		root := filepath.Join(th.TmpDir, "artifacts")
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
 
-		outside := artifactSweepRunDir(t, t.TempDir(), "gone-dag", "gone-run", artifactSweepOld)
+		outside := artifactSweepRunDir(t, resolvedDir(t, t.TempDir()), "gone-dag", "gone-run", artifactSweepOld)
 		meta := artifactSweepRecord(t, root, outside, "gone-dag", "gone-run")
 
 		result := sweepArtifacts(t, th, oldEnough)
@@ -175,7 +186,7 @@ func TestArtifactSweep(t *testing.T) {
 
 	t.Run("DryRunReportsWithoutRemoving", func(t *testing.T) {
 		th := setupTestRepository(t)
-		root := filepath.Join(th.TmpDir, "artifacts")
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
 
 		dir := artifactSweepRunDir(t, root, "gone-dag", "gone-run", artifactSweepOld)
 		meta := artifactSweepRecord(t, root, dir, "gone-dag", "gone-run")
@@ -192,7 +203,7 @@ func TestArtifactSweep(t *testing.T) {
 
 	t.Run("SkipsNonConformingEntries", func(t *testing.T) {
 		th := setupTestRepository(t)
-		root := filepath.Join(th.TmpDir, "artifacts")
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
 
 		day := filepath.Join(root, filepath.FromSlash(artifactSweepOld.Format("2006/01/02")))
 		require.NoError(t, os.MkdirAll(day, 0o750))
@@ -211,7 +222,7 @@ func TestArtifactSweep(t *testing.T) {
 
 	t.Run("RemovesLegacyDirs", func(t *testing.T) {
 		th := setupTestRepository(t)
-		root := filepath.Join(th.TmpDir, "artifacts")
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
 
 		th.CreateAttempt(t, time.Now(), "live-run", ir.Running)
 
@@ -229,6 +240,87 @@ func TestArtifactSweep(t *testing.T) {
 		assert.DirExists(t, live)
 	})
 
+	// A run ID shaped like a partitioned suffix — a fixed-length hexadecimal
+	// string — must not shield a legacy orphan whose directory is keyed by it.
+	t.Run("RemovesLegacyDirWithSuffixShapedID", func(t *testing.T) {
+		th := setupTestRepository(t)
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
+
+		th.CreateAttempt(t, time.Now(), "live-run", ir.Running)
+
+		colliding := filepath.Join(root, "legacy-dag",
+			"dag-run_"+artifactSweepOld.Format("20060102_150405Z")+"_"+artifactpath.RunSuffix("live-run"))
+		require.NoError(t, os.MkdirAll(colliding, 0o750))
+		require.NoError(t, os.WriteFile(filepath.Join(colliding, "out.txt"), []byte("x"), 0o600))
+
+		result := sweepArtifacts(t, th, oldEnough)
+
+		assert.Contains(t, result.Dirs, colliding)
+		assert.NoDirExists(t, colliding)
+	})
+
+	// The reverse direction: a partitioned orphan whose suffix equals a live
+	// run's ID must not be kept by that run.
+	t.Run("RemovesPartitionedDirWithIDShapedSuffix", func(t *testing.T) {
+		th := setupTestRepository(t)
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
+
+		th.CreateAttempt(t, time.Now(), "0123456789abcdef", ir.Running)
+
+		day := filepath.Join(root, filepath.FromSlash(artifactSweepOld.Format("2006/01/02")))
+		colliding := filepath.Join(day, artifactSweepOld.Format("150405")+"_gone-dag_0123456789abcdef")
+		require.NoError(t, os.MkdirAll(colliding, 0o750))
+		require.NoError(t, os.WriteFile(filepath.Join(colliding, "out.txt"), []byte("x"), 0o600))
+
+		result := sweepArtifacts(t, th, oldEnough)
+
+		assert.Contains(t, result.Dirs, colliding)
+		assert.NoDirExists(t, colliding)
+	})
+
+	// A root that is a symlink to the filesystem root must still trip the
+	// filesystem-root guard: Abs and Clean do not resolve the link, so
+	// sweeping it would roam the link target.
+	t.Run("RejectsSymlinkedFilesystemRoot", func(t *testing.T) {
+		th := setupTestRepository(t)
+
+		link := filepath.Join(th.TmpDir, "root-link")
+		if err := os.Symlink("/", link); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("creating symlinks requires privilege on Windows: %v", err)
+			}
+			require.NoError(t, err)
+		}
+
+		_, err := th.Backend.PruneArtifacts(th.Context, persis.ArtifactPruneRequest{Root: link})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to sweep filesystem root")
+	})
+
+	// A symlinked root that stays inside the filesystem sweeps its target as
+	// a plain root does.
+	t.Run("SweepsThroughSymlinkedRoot", func(t *testing.T) {
+		th := setupTestRepository(t)
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
+
+		stale := artifactSweepRunDir(t, root, "gone-dag", "dead-run", artifactSweepOld)
+
+		link := filepath.Join(th.TmpDir, "root-link")
+		if err := os.Symlink(root, link); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("creating symlinks requires privilege on Windows: %v", err)
+			}
+			require.NoError(t, err)
+		}
+
+		req := oldEnough
+		req.Root = link
+		result := sweepArtifacts(t, th, req)
+
+		assert.Contains(t, result.Dirs, stale)
+		assert.NoDirExists(t, stale)
+	})
+
 	// Pointing the sweep at a root outside the configured one reclaims a tree
 	// left at a previous data directory; liveness still applies there.
 	t.Run("SweepsExternalRoot", func(t *testing.T) {
@@ -236,7 +328,7 @@ func TestArtifactSweep(t *testing.T) {
 
 		th.CreateAttempt(t, time.Now(), "live-run", ir.Running)
 
-		oldRoot := t.TempDir()
+		oldRoot := resolvedDir(t, t.TempDir())
 		stale := artifactSweepRunDir(t, oldRoot, "gone-dag", "dead-run", artifactSweepOld)
 		live := artifactSweepRunDir(t, oldRoot, "live-dag", "live-run", artifactSweepOld)
 		meta := artifactSweepRecord(t, oldRoot, stale, "gone-dag", "dead-run")
