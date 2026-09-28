@@ -5,7 +5,6 @@ package fileutil
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 )
@@ -22,7 +21,10 @@ func NewFileResolver(relativeTos []string) *FileResolver {
 	}
 }
 
-// ResolveFilePath attempts to find a file in multiple locations in the following order:
+// ResolveFilePath attempts to find a file in multiple locations.
+// It returns a *FileNotFoundError when no candidate path exists, and the
+// underlying error when a path cannot be resolved at all (for example an
+// unsupported ~name path or an undetermined home directory).
 func (r *FileResolver) ResolveFilePath(file string) (string, error) {
 	return r.resolveFilePath(file, ResolvePath)
 }
@@ -35,7 +37,10 @@ func (r *FileResolver) ResolveFilePathLiteral(file string) (string, error) {
 func (r *FileResolver) resolveFilePath(file string, resolvePath func(string) (string, error)) (string, error) {
 	if filepath.IsAbs(file) || strings.HasPrefix(file, "~") {
 		resolved, err := resolvePath(file)
-		if err == nil && FileExists(resolved) {
+		if err != nil {
+			return "", err
+		}
+		if FileExists(resolved) {
 			return resolved, nil
 		}
 		return "", &FileNotFoundError{Path: file}
@@ -46,11 +51,22 @@ func (r *FileResolver) resolveFilePath(file string, resolvePath func(string) (st
 		return "", fmt.Errorf("getting search paths: %w", err)
 	}
 
+	var resolveErr error
 	for _, path := range searchPaths {
 		resolved, err := resolvePath(path)
-		if err == nil && FileExists(resolved) {
+		if err != nil {
+			// Keep searching: a later search path may still locate the file.
+			if resolveErr == nil {
+				resolveErr = err
+			}
+			continue
+		}
+		if FileExists(resolved) {
 			return resolved, nil
 		}
+	}
+	if resolveErr != nil {
+		return "", resolveErr
 	}
 
 	return "", &FileNotFoundError{
@@ -64,12 +80,9 @@ func resolvePathLiteral(path string) (string, error) {
 	if path == "" {
 		return "", nil
 	}
-	if strings.HasPrefix(path, "~") {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("failed to get user home directory: %w", err)
-		}
-		path = filepath.Join(homeDir, path[1:])
+	path, err := expandHomeDir(path)
+	if err != nil {
+		return "", err
 	}
 	absPath, err := filepath.Abs(path)
 	if err != nil {

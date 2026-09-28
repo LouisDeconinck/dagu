@@ -4,8 +4,11 @@
 package fileutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -118,6 +121,51 @@ func TestFileResolver(t *testing.T) {
 				t.Errorf("resolved path %s does not exist", path)
 			}
 		})
+	}
+}
+
+func TestFileResolverHomeTilde(t *testing.T) {
+	homeDir := t.TempDir()
+	target := filepath.Join(homeDir, "dotenv")
+	if err := os.WriteFile(target, []byte("x"), 0600); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+	t.Setenv("HOME", homeDir)
+	if runtime.GOOS == "windows" {
+		t.Setenv("USERPROFILE", homeDir)
+	}
+
+	resolver := NewFileResolver(nil)
+
+	resolved, err := resolver.ResolveFilePath("~/dotenv")
+	if err != nil {
+		t.Fatalf("unexpected error resolving ~/ path: %v", err)
+	}
+	if resolved != target {
+		t.Errorf("expected %s, got %s", target, resolved)
+	}
+}
+
+func TestFileResolverUserTildeError(t *testing.T) {
+	// A ~name path cannot be resolved portably; the resolution error must
+	// surface instead of collapsing into FileNotFoundError.
+	resolver := NewFileResolver(nil)
+
+	for _, resolve := range []func(string) (string, error){
+		resolver.ResolveFilePath,
+		resolver.ResolveFilePathLiteral,
+	} {
+		_, err := resolve("~alice/missing.txt")
+		if err == nil {
+			t.Fatal("expected error for ~name path, got none")
+		}
+		var notFound *FileNotFoundError
+		if errors.As(err, &notFound) {
+			t.Fatalf("expected resolution error, got FileNotFoundError: %v", err)
+		}
+		if !strings.Contains(err.Error(), "~alice/missing.txt") {
+			t.Errorf("error should mention the offending path, got: %v", err)
+		}
 	}
 }
 
