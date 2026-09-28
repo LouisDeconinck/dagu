@@ -1375,7 +1375,10 @@ func (r *Runner) runEventHandler(ctx context.Context, plan *Plan, node *Node, ex
 
 	if r.dry {
 		env := NewEnv(ctx, node.Step())
-		_ = addResolvedEnvVars(ctx, &env, node.Step().Env, "env.", cmnvalue.StepEnvField)
+		if err := addResolvedEnvVars(ctx, &env, node.Step().Env, "env.", cmnvalue.StepEnvField); err != nil {
+			node.SetStatus(ir.NodeFailed)
+			return err
+		}
 		if err := checkDryRunStep(WithEnv(ctx, env), node.Step()); err != nil {
 			node.SetStatus(ir.NodeFailed)
 			return err

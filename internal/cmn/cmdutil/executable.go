@@ -46,20 +46,51 @@ func IsExecutableFile(path string) bool {
 	return info.Mode()&0o111 != 0
 }
 
+// IsExecutableFileInEnv reports whether path resolves to a file the process
+// starter can launch under envs. Off Windows it is IsExecutableFile. On
+// Windows it follows the os/exec lookup rules: the exact name is tried first,
+// then each PATHEXT suffix, and the first existing candidate must carry a
+// PATHEXT extension — a match like tool.txt or an extensionless file resolves
+// at lookup but cannot launch.
+func IsExecutableFileInEnv(path string, envs []string) bool {
+	if runtime.GOOS != "windows" {
+		return IsExecutableFile(path)
+	}
+	pathextEnv, _ := LookupEnv(envs, "PATHEXT")
+	for _, candidate := range pathCandidates(path, pathextEnv) {
+		if IsExecutableFile(candidate) {
+			return pathextContains(pathextEnv, filepath.Ext(candidate))
+		}
+	}
+	return false
+}
+
 // LookPathInEnv resolves name to an executable file using the PATH entry in
 // envs, honoring PATHEXT on Windows. When envs carries no PATH entry it falls
 // back to FindExecutable. Names containing a path separator are checked as
 // file paths.
 func LookPathInEnv(name string, envs []string) (string, error) {
+	return LookPathInEnvDir(name, envs, "")
+}
+
+// LookPathInEnvDir is LookPathInEnv with relative names resolved against dir,
+// matching how a process started in dir resolves them: relative PATH entries
+// and relative path-form names anchor to dir instead of the process working
+// directory. An empty dir keeps process working directory semantics.
+func LookPathInEnvDir(name string, envs []string, dir string) (string, error) {
 	if strings.ContainsAny(name, `/\`) {
-		if IsExecutableFile(name) {
-			return name, nil
+		path := name
+		if dir != "" && !filepath.IsAbs(path) {
+			path = filepath.Join(dir, path)
+		}
+		if IsExecutableFileInEnv(path, envs) {
+			return path, nil
 		}
 		return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
 	}
 	if pathEnv, ok := LookupEnv(envs, "PATH"); ok {
 		pathextEnv, _ := LookupEnv(envs, "PATHEXT")
-		return lookPathInPATH(name, pathEnv, pathextEnv)
+		return lookPathInPATH(name, pathEnv, pathextEnv, dir)
 	}
 	if resolved, ok := FindExecutable(name); ok {
 		return resolved, nil
@@ -67,14 +98,22 @@ func LookPathInEnv(name string, envs []string) (string, error) {
 	return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
 }
 
-func lookPathInPATH(command, pathEnv, pathextEnv string) (string, error) {
+func lookPathInPATH(command, pathEnv, pathextEnv, baseDir string) (string, error) {
 	var lastErr error
 	for _, dir := range filepath.SplitList(pathEnv) {
 		if dir == "" {
 			dir = "."
 		}
+		if baseDir != "" && !filepath.IsAbs(dir) {
+			dir = filepath.Join(baseDir, dir)
+		}
 		for _, candidate := range pathCandidates(filepath.Join(dir, command), pathextEnv) {
 			if IsExecutableFile(candidate) {
+				if runtime.GOOS == "windows" && !pathextContains(pathextEnv, filepath.Ext(candidate)) {
+					// The starter resolves this candidate but cannot launch
+					// it; later entries never get a chance.
+					return "", &exec.Error{Name: command, Err: exec.ErrNotFound}
+				}
 				return candidate, nil
 			}
 			if _, err := os.Stat(candidate); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -89,24 +128,51 @@ func lookPathInPATH(command, pathEnv, pathextEnv string) (string, error) {
 }
 
 func pathCandidates(candidate, pathextEnv string) []string {
-	if runtime.GOOS != "windows" || filepath.Ext(candidate) != "" {
+	if runtime.GOOS != "windows" {
 		return []string{candidate}
 	}
 
+	exts := pathextList(pathextEnv)
+	candidates := make([]string, 0, len(exts)+1)
+	// The exact name resolves first, then each PATHEXT suffix, even when the
+	// name already carries an extension (e.g. tool.v2 resolves tool.v2.exe).
+	candidates = append(candidates, candidate)
+	for _, ext := range exts {
+		candidates = append(candidates, candidate+ext)
+	}
+	return candidates
+}
+
+// pathextList splits a PATHEXT value into normalized extensions, falling
+// back to the Windows default when empty.
+func pathextList(pathextEnv string) []string {
 	pathext := pathextEnv
 	if pathext == "" {
 		pathext = ".COM;.EXE;.BAT;.CMD"
 	}
-	exts := strings.Split(pathext, ";")
-	candidates := make([]string, 0, len(exts)+1)
-	candidates = append(candidates, candidate)
-	for _, ext := range exts {
+	var exts []string
+	for ext := range strings.SplitSeq(pathext, ";") {
 		if ext == "" {
 			continue
 		}
-		candidates = append(candidates, candidate+ext)
+		if ext[0] != '.' {
+			ext = "." + ext
+		}
+		exts = append(exts, ext)
 	}
-	return candidates
+	return exts
+}
+
+func pathextContains(pathextEnv, ext string) bool {
+	if ext == "" {
+		return false
+	}
+	for _, e := range pathextList(pathextEnv) {
+		if strings.EqualFold(e, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // FindExecutable resolves cmd from PATH first, then falls back to common

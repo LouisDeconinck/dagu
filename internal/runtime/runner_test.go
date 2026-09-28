@@ -2095,6 +2095,64 @@ func TestRunner_DryRunStepChecks(t *testing.T) {
 		result := plan.assertRun(t, ir.Succeeded)
 		result.assertNodeStatus(t, "1", ir.NodeSucceeded)
 	})
+
+	t.Run("MultiCommandErrorNamesFieldPath", func(t *testing.T) {
+		if goruntime.GOOS == "windows" {
+			t.Skip("lookup fixtures rely on POSIX executables")
+		}
+		r := setupRunner(t, func(cfg *runtime.Config) {
+			cfg.Dry = true
+		})
+
+		step := newStep("1", withShell("direct"))
+		step.Commands = []ir.CommandEntry{parseCommand("true"), parseCommand(missing + "-second")}
+		plan := r.newPlan(t, step)
+
+		result := plan.assertRun(t, ir.Failed)
+		result.assertNodeStatus(t, "1", ir.NodeFailed)
+		require.ErrorContains(t, result.Error, "run[1]")
+	})
+
+	t.Run("RelativePathEntryResolvesFromStepWorkDir", func(t *testing.T) {
+		if goruntime.GOOS == "windows" {
+			t.Skip("relative PATH fixture relies on POSIX executables")
+		}
+		r := setupRunner(t, func(cfg *runtime.Config) {
+			cfg.Dry = true
+		})
+
+		plan := r.newPlan(t,
+			newStep("1",
+				withCommand("relpath-tool"),
+				withShell("direct"),
+				withEnvVars("PATH=./bin"),
+			),
+		)
+		binDir := filepath.Join(plan.workDir, "bin")
+		require.NoError(t, os.MkdirAll(binDir, 0o755))
+		tool := filepath.Join(binDir, "relpath-tool")
+		require.NoError(t, os.WriteFile(tool, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+
+		result := plan.assertRun(t, ir.Succeeded)
+		result.assertNodeStatus(t, "1", ir.NodeSucceeded)
+	})
+
+	t.Run("HandlerEnvErrorFailsHandler", func(t *testing.T) {
+		handler := successStep("onSuccess")
+		handler.Env = []string{"DAGU_TEST_NO_EQUALS"}
+		r := setupRunner(t,
+			func(cfg *runtime.Config) {
+				cfg.Dry = true
+			},
+			withOnSuccess(handler),
+		)
+
+		plan := r.newPlan(t, successStep("1"))
+
+		result := plan.assertRun(t, ir.Failed)
+		result.assertNodeStatus(t, "onSuccess", ir.NodeFailed)
+		require.ErrorContains(t, result.Error, "DAGU_TEST_NO_EQUALS")
+	})
 }
 
 func TestRunner_ConcurrentExecution(t *testing.T) {

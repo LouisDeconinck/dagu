@@ -41,8 +41,8 @@ func checkDryRunStep(ctx context.Context, step ir.Step) error {
 	if len(command.Shell) > 0 && !isDirectShellName(command.Shell[0]) {
 		direct = false
 		shell := command.Shell[0]
-		if _, err := cmdutil.LookPathInEnv(shell, envs); err != nil {
-			return fmt.Errorf("shell %q: %w", shell, err)
+		if _, err := cmdutil.LookPathInEnvDir(shell, envs, env.WorkingDir); err != nil {
+			return fmt.Errorf("field 'shell': %w", err)
 		}
 		if cmdutil.IsNixShell(shell) {
 			// Commands may be supplied by shell_packages instead of PATH.
@@ -118,16 +118,16 @@ func checkDryRunCommand(
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(env.WorkingDir, path)
 		}
-		if _, err := os.Stat(path); err != nil {
-			return fmt.Errorf("command %q: %w", entry.Command, err)
-		}
-		if !cmdutil.IsExecutableFile(path) {
-			return fmt.Errorf("command %q: permission denied", entry.Command)
+		if !cmdutil.IsExecutableFileInEnv(path, envs) {
+			if _, err := os.Stat(path); err != nil {
+				return fmt.Errorf("field '%s': command %q: %w", fieldPath, entry.Command, err)
+			}
+			return fmt.Errorf("field '%s': command %q: not an executable file", fieldPath, entry.Command)
 		}
 		return nil
 	}
 
-	if _, err := cmdutil.LookPathInEnv(name, envs); err == nil {
+	if _, err := cmdutil.LookPathInEnvDir(name, envs, env.WorkingDir); err == nil {
 		return nil
 	}
 	if !noShell && unixShell && posixShellBuiltins[name] {
@@ -136,7 +136,7 @@ func checkDryRunCommand(
 	if dryRunToolCommand(env, name) {
 		return nil
 	}
-	return fmt.Errorf("command %q: executable file not found in $PATH", entry.Command)
+	return fmt.Errorf("field '%s': command %q: executable file not found in $PATH", fieldPath, entry.Command)
 }
 
 // dryRunToolCommand reports whether name is provided by the resolved Dagu
