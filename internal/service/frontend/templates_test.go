@@ -52,24 +52,29 @@ func (s stubWorkspaceStore) Delete(context.Context, string) error {
 }
 
 func resetAssetVersionCache() {
-	assetVersion = ""
-	assetVersionOnce = sync.Once{}
+	bundleHash = ""
+	bundleHashOnce = sync.Once{}
 }
 
 func TestFormatAssetVersionUsesBundleHashForDevBuilds(t *testing.T) {
 	bundle := []byte("bundle")
 	sum := sha256.Sum256(bundle)
-	want := "0.0.0-" + hex.EncodeToString(sum[:8])
+	hash := hex.EncodeToString(sum[:8])
+	want := "0.0.0-" + hash
 
-	assert.Equal(t, want, formatAssetVersion("0.0.0", bundle))
+	assert.Equal(t, want, formatAssetVersion("0.0.0", hash))
 }
 
 func TestFormatAssetVersionSupportsEmptyVersion(t *testing.T) {
 	bundle := []byte("bundle")
 	sum := sha256.Sum256(bundle)
-	want := hex.EncodeToString(sum[:8])
+	hash := hex.EncodeToString(sum[:8])
 
-	assert.Equal(t, want, formatAssetVersion("", bundle))
+	assert.Equal(t, hash, formatAssetVersion("", hash))
+}
+
+func TestFormatAssetVersionFallsBackToVersionWithoutBundleHash(t *testing.T) {
+	assert.Equal(t, "1.2.3", formatAssetVersion("1.2.3", ""))
 }
 
 func TestCurrentAssetVersionUsesReleaseVersionAndBundleHashWhenSet(t *testing.T) {
@@ -88,7 +93,8 @@ func TestCurrentAssetVersionUsesReleaseVersionAndBundleHashWhenSet(t *testing.T)
 		return
 	}
 
-	assert.Equal(t, formatAssetVersion("1.2.3", data), currentAssetVersion())
+	sum := sha256.Sum256(data)
+	assert.Equal(t, formatAssetVersion("1.2.3", hex.EncodeToString(sum[:8])), currentAssetVersion())
 }
 
 func TestDefaultFunctionsExposeInitialWorkspacesJSON(t *testing.T) {

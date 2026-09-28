@@ -37,31 +37,36 @@ const (
 )
 
 var (
-	// TODO: Cache only the bundle hash here once when we can revisit this
-	// package-global state without widening this low-risk regression fix.
-	assetVersionOnce sync.Once
-	assetVersion     string
+	bundleHashOnce sync.Once
+	bundleHash     string
 )
 
-func formatAssetVersion(version string, bundle []byte) string {
-	sum := sha256.Sum256(bundle)
-	suffix := hex.EncodeToString(sum[:8])
+// formatAssetVersion returns the version suffixed with the bundle hash, or the
+// bare version when the bundle hash is unavailable.
+func formatAssetVersion(version, hash string) string {
 	if version == "" {
-		return suffix
+		return hash
 	}
-	return version + "-" + suffix
+	if hash == "" {
+		return version
+	}
+	return version + "-" + hash
+}
+
+func currentBundleHash() string {
+	bundleHashOnce.Do(func() {
+		data, err := assetsFS.ReadFile("assets/bundle.js")
+		if err != nil {
+			return
+		}
+		sum := sha256.Sum256(data)
+		bundleHash = hex.EncodeToString(sum[:8])
+	})
+	return bundleHash
 }
 
 func currentAssetVersion() string {
-	assetVersionOnce.Do(func() {
-		data, err := assetsFS.ReadFile("assets/bundle.js")
-		if err != nil {
-			assetVersion = config.Version
-			return
-		}
-		assetVersion = formatAssetVersion(config.Version, data)
-	})
-	return assetVersion
+	return formatAssetVersion(config.Version, currentBundleHash())
 }
 
 func (srv *Server) useTemplate(ctx context.Context, layout, name string) func(http.ResponseWriter, any) {
