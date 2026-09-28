@@ -1715,6 +1715,109 @@ func TestRunner(t *testing.T) {
 		node := result.nodeByName(t, "1")
 		assert.Equal(t, 2, node.State().DoneCount)
 	})
+
+	t.Run("RepeatPolicyUntilConditionEvalErrorFailsStep", func(t *testing.T) {
+		r := setupRunner(t)
+		plan := r.newPlan(t,
+			newStep("1",
+				withCommand(test.Output("tick")),
+				func(step *ir.Step) {
+					step.RepeatPolicy.RepeatMode = ir.RepeatModeUntil
+					step.RepeatPolicy.Condition = &ir.Condition{
+						Condition: "not-a-number",
+						Expected:  "num:>=1",
+					}
+					step.RepeatPolicy.Interval = 20 * time.Millisecond
+				},
+			),
+		)
+
+		// The condition can never be evaluated, so the step must fail on the
+		// first check instead of repeating until killed.
+		result := plan.assertRun(t, ir.Failed)
+		result.assertNodeStatus(t, "1", ir.NodeFailed)
+
+		node := result.nodeByName(t, "1")
+		assert.Equal(t, 1, node.State().DoneCount)
+		require.NotErrorIs(t, node.State().Error, runtime.ErrConditionNotMet)
+		require.ErrorContains(t, node.State().Error, "is not a number")
+		require.ErrorContains(t, result.Error, "is not a number")
+	})
+
+	t.Run("RepeatPolicyWhileConditionEvalErrorFailsStep", func(t *testing.T) {
+		r := setupRunner(t)
+		plan := r.newPlan(t,
+			newStep("1",
+				withCommand(test.Output("tick")),
+				func(step *ir.Step) {
+					step.RepeatPolicy.RepeatMode = ir.RepeatModeWhile
+					step.RepeatPolicy.Condition = &ir.Condition{
+						Condition: "not-a-number",
+						Expected:  "num:>=1",
+					}
+					step.RepeatPolicy.Interval = 20 * time.Millisecond
+				},
+			),
+		)
+
+		// The condition can never be evaluated, so the step must fail rather
+		// than stop the loop and report success.
+		result := plan.assertRun(t, ir.Failed)
+		result.assertNodeStatus(t, "1", ir.NodeFailed)
+
+		node := result.nodeByName(t, "1")
+		assert.Equal(t, 1, node.State().DoneCount)
+		require.NotErrorIs(t, node.State().Error, runtime.ErrConditionNotMet)
+		require.ErrorContains(t, node.State().Error, "is not a number")
+	})
+
+	t.Run("RepeatPolicyUntilConditionNotMetRespectsLimit", func(t *testing.T) {
+		r := setupRunner(t)
+		plan := r.newPlan(t,
+			newStep("1",
+				withCommand(test.Output("tick")),
+				func(step *ir.Step) {
+					step.RepeatPolicy.RepeatMode = ir.RepeatModeUntil
+					step.RepeatPolicy.Condition = &ir.Condition{
+						Condition: "pending",
+						Expected:  "done",
+					}
+					step.RepeatPolicy.Interval = 20 * time.Millisecond
+					step.RepeatPolicy.Limit = 3
+				},
+			),
+		)
+
+		// A legitimately not-met condition repeats until the limit stops it.
+		result := plan.assertRun(t, ir.Succeeded)
+		result.assertNodeStatus(t, "1", ir.NodeSucceeded)
+
+		node := result.nodeByName(t, "1")
+		assert.Equal(t, 3, node.State().DoneCount)
+	})
+
+	t.Run("RepeatPolicyUntilConditionMetStopsAfterFirstAttempt", func(t *testing.T) {
+		r := setupRunner(t)
+		plan := r.newPlan(t,
+			newStep("1",
+				withCommand(test.Output("tick")),
+				func(step *ir.Step) {
+					step.RepeatPolicy.RepeatMode = ir.RepeatModeUntil
+					step.RepeatPolicy.Condition = &ir.Condition{
+						Condition: "ready",
+						Expected:  "ready",
+					}
+					step.RepeatPolicy.Interval = 20 * time.Millisecond
+				},
+			),
+		)
+
+		result := plan.assertRun(t, ir.Succeeded)
+		result.assertNodeStatus(t, "1", ir.NodeSucceeded)
+
+		node := result.nodeByName(t, "1")
+		assert.Equal(t, 1, node.State().DoneCount)
+	})
 	t.Run("RetryPolicyWithOutputCapture", func(t *testing.T) {
 		r := setupRunner(t)
 
