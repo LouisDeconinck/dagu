@@ -21,8 +21,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
+	"github.com/dagucloud/dagu/v2/internal/cmn/stringutil"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 )
 
@@ -266,7 +268,12 @@ func startupError(message string, waitErr error, stderr string) error {
 	stderr = strings.ReplaceAll(strings.TrimSpace(stderr), "\n", " ")
 	if len(stderr) > 1024 {
 		stderr = stderr[len(stderr)-1024:]
+		// A byte-level tail cut can leave a partial rune at the start.
+		for len(stderr) > 0 && !utf8.RuneStart(stderr[0]) {
+			stderr = stderr[1:]
+		}
 	}
+	stderr = strings.ToValidUTF8(stderr, string(utf8.RuneError))
 	if stderr != "" {
 		details = append(details, "stderr: "+stderr)
 	}
@@ -473,10 +480,7 @@ func sanitizeError(err error) string {
 		return ""
 	}
 	message := strings.ReplaceAll(strings.TrimSpace(err.Error()), "\n", " ")
-	if len(message) > 1024 {
-		message = message[:1024]
-	}
-	return message
+	return stringutil.TruncUTF8Bytes(message, 1024)
 }
 
 type tailBuffer struct {
