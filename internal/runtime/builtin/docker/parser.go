@@ -96,6 +96,10 @@ func parsePorts(ports []string) (network.PortSet, network.PortMap, error) {
 		// Split by colon to get components
 		parts := strings.Split(rest, ":")
 
+		// Track whether a host binding was specified; an empty host
+		// port is valid and lets Docker allocate an ephemeral port.
+		hasHostBinding := false
+
 		switch len(parts) {
 		case 1:
 			// Format: "80" or "80/tcp"
@@ -105,10 +109,12 @@ func parsePorts(ports []string) (network.PortSet, network.PortMap, error) {
 			containerPort = parts[0]
 		case 2:
 			// Format: "8080:80" or "[::1]:8080:80"
+			hasHostBinding = true
 			hostPort = parts[0]
 			containerPort = parts[1]
 		case 3:
 			// Format: "0.0.0.0:8080:80"
+			hasHostBinding = true
 			if hasHostIP {
 				return nil, nil, fmt.Errorf("%w: %s", ErrInvalidPortFormat, portSpec)
 			}
@@ -144,8 +150,8 @@ func parsePorts(ports []string) (network.PortSet, network.PortMap, error) {
 		// Add to exposed ports
 		exposedPorts[parsedPort] = struct{}{}
 
-		// Add to port bindings if host port is specified
-		if hostPort != "" {
+		// Add to port bindings if a host binding is specified
+		if hasHostBinding {
 			if hostIP == "" {
 				hostIP = "0.0.0.0" // Default to all interfaces
 			}

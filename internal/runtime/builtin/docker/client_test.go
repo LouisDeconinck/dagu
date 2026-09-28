@@ -1188,6 +1188,94 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
+			// An empty host port is valid; Docker allocates an ephemeral port.
+			name: "IPv6PortWithEmptyHostPort",
+			input: ir.Container{
+				Image: "nginx",
+				Ports: []string{"[::]::80"},
+			},
+			expected: &Config{
+				Image:      "nginx",
+				AutoRemove: true,
+				Container: &container.Config{
+					Image: "nginx",
+					ExposedPorts: network.PortSet{
+						mustPort("80/tcp"): {},
+					},
+				},
+				Host: &container.HostConfig{
+					PortBindings: network.PortMap{
+						mustPort("80/tcp"): []network.PortBinding{
+							{
+								HostIP:   mustAddr("::"),
+								HostPort: "",
+							},
+						},
+					},
+				},
+				Network:     &network.NetworkingConfig{},
+				ExecOptions: &client.ExecCreateOptions{},
+			},
+		},
+		{
+			name: "IPv4PortWithEmptyHostPort",
+			input: ir.Container{
+				Image: "nginx",
+				Ports: []string{"0.0.0.0::80"},
+			},
+			expected: &Config{
+				Image:      "nginx",
+				AutoRemove: true,
+				Container: &container.Config{
+					Image: "nginx",
+					ExposedPorts: network.PortSet{
+						mustPort("80/tcp"): {},
+					},
+				},
+				Host: &container.HostConfig{
+					PortBindings: network.PortMap{
+						mustPort("80/tcp"): []network.PortBinding{
+							{
+								HostIP:   mustAddr("0.0.0.0"),
+								HostPort: "",
+							},
+						},
+					},
+				},
+				Network:     &network.NetworkingConfig{},
+				ExecOptions: &client.ExecCreateOptions{},
+			},
+		},
+		{
+			name: "EmptyHostPort",
+			input: ir.Container{
+				Image: "nginx",
+				Ports: []string{":80"},
+			},
+			expected: &Config{
+				Image:      "nginx",
+				AutoRemove: true,
+				Container: &container.Config{
+					Image: "nginx",
+					ExposedPorts: network.PortSet{
+						mustPort("80/tcp"): {},
+					},
+				},
+				Host: &container.HostConfig{
+					PortBindings: network.PortMap{
+						mustPort("80/tcp"): []network.PortBinding{
+							{
+								HostIP:   mustAddr("0.0.0.0"),
+								HostPort: "",
+							},
+						},
+					},
+				},
+				Network:     &network.NetworkingConfig{},
+				ExecOptions: &client.ExecCreateOptions{},
+			},
+		},
+		{
 			name: "InvalidVolumeFormatTooFewParts",
 			input: ir.Container{
 				Image:   "alpine",
