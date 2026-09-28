@@ -297,3 +297,24 @@ func TestRemoteClientCapsErrorResponseBody(t *testing.T) {
 	assert.True(t, utf8.ValidString(rerr.Message))
 	assert.True(t, strings.HasSuffix(rerr.Message, "…"))
 }
+
+func TestRemoteClientPreservesExactLimitErrorResponseBody(t *testing.T) {
+	t.Parallel()
+
+	// A body at exactly the limit must pass through unmodified, without the
+	// truncation ellipsis.
+	body := strings.Repeat("x", maxRemoteErrorBodyBytes)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	client := &remoteClient{baseURL: server.URL, client: server.Client()}
+	_, err := client.getCurrentUser(context.Background())
+	require.Error(t, err)
+
+	var rerr *remoteError
+	require.ErrorAs(t, err, &rerr)
+	assert.Equal(t, body, rerr.Message)
+}
