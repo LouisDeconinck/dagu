@@ -119,6 +119,15 @@ func TestDefectAndRuntimeOnlyNoticeClassification(t *testing.T) {
 		result.ExpectStderrContains("${consts.unknown_name}", "steps[0].run")
 	})
 
+	t.Run("defect: unknown const in root ssh is reported without --show-unresolved", func(t *testing.T) {
+		t.Parallel()
+
+		dagu := harness.NewRunner(t)
+		result := dagu.Run("validate", "notice_defect_unknown_const_ssh.yaml")
+		result.ExpectExitCode(0)
+		result.ExpectStderrContains("${consts.unknown_host}", "ssh.host")
+	})
+
 	t.Run("defect: step-output reference missing its authored dependency is reported without --show-unresolved", func(t *testing.T) {
 		t.Parallel()
 
