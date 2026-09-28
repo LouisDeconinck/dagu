@@ -125,8 +125,14 @@ func displayTreeStatus(ctx *Context, dag *ir.DAG, dagStatus *ir.DAGRunStatus, da
 // locally via the run store or remotely via the server's sub-run endpoint.
 func subRunStatusResolver(ctx *Context, dagStatus *ir.DAGRunStatus, dagName, dagRunID string) output.SubRunResolver {
 	if ctx.IsRemote() {
+		// The sub-run endpoint treats a literal "latest" or empty run ID as a
+		// root ID, so resolve it to the displayed run's recorded ID first.
+		rootName, rootID := dagName, dagRunID
+		if rootID == "" || rootID == "latest" {
+			rootName, rootID = dagStatus.Name, dagStatus.DAGRunID
+		}
 		return func(sub ir.SubDAGRun) (*ir.DAGRunStatus, error) {
-			detail, err := ctx.Remote.getSubDAGRunDetails(ctx, dagName, dagRunID, sub.DAGRunID)
+			detail, err := ctx.Remote.getSubDAGRunDetails(ctx, rootName, rootID, sub.DAGRunID)
 			if err != nil {
 				return nil, err
 			}

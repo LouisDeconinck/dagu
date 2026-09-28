@@ -1147,6 +1147,7 @@ steps:
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = oldStdout; _ = w.Close() })
 	summaryCh := make(chan []byte, 1)
 	go func() {
 		data, _ := io.ReadAll(r)
@@ -1196,6 +1197,7 @@ steps:
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
 	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = oldStdout; _ = w.Close() })
 	summaryCh := make(chan []byte, 1)
 	go func() {
 		data, _ := io.ReadAll(r)

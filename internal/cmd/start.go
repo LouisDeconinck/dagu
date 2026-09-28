@@ -664,6 +664,10 @@ func executeDAGRun(ctx *Context, d *ir.DAG, dagRunID string, opts runOptions) er
 	return ExecuteAgent(ctx, agentInstance, d, dagRunID, logFile)
 }
 
+// subRunStatusLookupTimeout bounds one recursive sub-run status lookup so an
+// unreachable coordinator cannot stall the deferred summary render.
+const subRunStatusLookupTimeout = 5 * time.Second
+
 // remoteSubRunResolver resolves sub-run status through the coordinator so the
 // final summary can render child step trees inline.
 func remoteSubRunResolver(ctx *Context, cli coordinator.Client, dagName, dagRunID string) output.SubRunResolver {
@@ -672,7 +676,9 @@ func remoteSubRunResolver(ctx *Context, cli coordinator.Client, dagName, dagRunI
 		if sub.DAGName == "" {
 			return nil, nil
 		}
-		res, err := cli.GetDAGRunStatus(ctx, sub.DAGName, sub.DAGRunID, &root)
+		lookupCtx, cancel := context.WithTimeout(ctx, subRunStatusLookupTimeout)
+		defer cancel()
+		res, err := cli.GetDAGRunStatus(lookupCtx, sub.DAGName, sub.DAGRunID, &root)
 		if err != nil {
 			return nil, err
 		}
