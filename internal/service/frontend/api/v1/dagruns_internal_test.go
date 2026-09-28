@@ -915,6 +915,29 @@ steps:
 	requireNoDeprecatedTagsKey(t, patched)
 }
 
+func TestApplyInlineEnqueueLabels_PreservesDocAfterEmptyDocument(t *testing.T) {
+	t.Parallel()
+
+	data := []byte(`name: main
+steps:
+  - name: s1
+    run: echo hi
+---
+---
+name: child
+steps:
+  - name: s2
+    run: echo bye
+`)
+
+	patched, err := applyInlineEnqueueLabels(data, "env=prod")
+	require.NoError(t, err)
+
+	content := string(patched)
+	assert.Contains(t, content, "name: child")
+	assert.Contains(t, content, "echo bye")
+}
+
 func TestApplyInlineEnqueueLabels_InvalidYAML(t *testing.T) {
 	t.Parallel()
 

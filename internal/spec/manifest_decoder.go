@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/dagucloud/dagu/v2/internal/cmn/yamlutil"
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/goccy/go-yaml"
 	"github.com/goccy/go-yaml/ast"
@@ -95,7 +96,7 @@ func validateManifestAliases(input map[string]any) error {
 }
 
 func preserveEnvMappingOrder(data []byte, parsed map[string]any) error {
-	file, err := parser.ParseBytes(data, 0)
+	file, err := parser.ParseBytes(yamlutil.ClearEmptyDocumentSeparators(data), 0)
 	if err != nil {
 		return err
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
+	"github.com/dagucloud/dagu/v2/internal/cmn/yamlutil"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/spec"
 	"github.com/dagucloud/dagu/v2/internal/workspace"
@@ -158,7 +159,7 @@ func validateWorkflowFile(path string) (bool, error) {
 }
 
 func validateWorkflowData(data []byte) error {
-	file, err := parser.ParseBytes(data, 0)
+	file, err := parser.ParseBytes(yamlutil.ClearEmptyDocumentSeparators(data), 0)
 	if err != nil {
 		return err
 	}

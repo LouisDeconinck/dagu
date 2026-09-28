@@ -262,6 +262,41 @@ steps:
 		require.Contains(t, err.Error(), "Validation failed")
 	})
 
+	t.Run("DocumentAfterEmptyDocumentIsValidated", func(t *testing.T) {
+		// An empty `---` document must not hide a following document: the last
+		// document lacks a name, so validation must fail rather than pass.
+		dagFile := th.CreateDAGFile(t, "empty_doc_hides_doc.yaml", `
+steps:
+  - run: echo ok
+---
+---
+steps:
+  - run: echo missing name
+`)
+
+		err := th.RunCommandWithError(t, cmd.Validate(), test.CmdTest{
+			Args: []string{"validate", dagFile},
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "must define name")
+	})
+
+	t.Run("EmptyDocumentBeforeValidDocumentAccepted", func(t *testing.T) {
+		dagFile := th.CreateDAGFile(t, "empty_doc_valid.yaml", `
+steps:
+  - run: echo ok
+---
+---
+name: child
+steps:
+  - run: echo child
+`)
+
+		th.RunCommand(t, cmd.Validate(), test.CmdTest{
+			Args: []string{"validate", dagFile},
+		})
+	})
+
 	t.Run("InvalidYAML", func(t *testing.T) {
 		// This DAG has invalid YAML syntax
 		dagFile := th.CreateDAGFile(t, "invalid_yaml.yaml", `

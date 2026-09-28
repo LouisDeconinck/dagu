@@ -31,6 +31,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	"github.com/dagucloud/dagu/v2/internal/cmn/runenv"
 	"github.com/dagucloud/dagu/v2/internal/cmn/stringutil"
+	"github.com/dagucloud/dagu/v2/internal/cmn/yamlutil"
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
 	"github.com/dagucloud/dagu/v2/internal/humantask"
@@ -438,7 +439,7 @@ func applyInlineEnqueueLabels(data []byte, labels string) ([]byte, error) {
 		return nil, fmt.Errorf("marshal patched document: %w", err)
 	}
 
-	file, err := parser.ParseBytes(data, 0)
+	file, err := parser.ParseBytes(yamlutil.ClearEmptyDocumentSeparators(data), 0)
 	if err != nil {
 		return nil, fmt.Errorf("parse yaml documents: %w", err)
 	}
