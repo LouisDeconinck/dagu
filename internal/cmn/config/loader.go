@@ -1196,7 +1196,7 @@ func (l *ConfigLoader) loadServerDefaults(cfg *Config, def Definition) {
 		}
 		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 			l.warnings = append(l.warnings, fmt.Sprintf(
-				"cors_allowed_origins entry %q includes a path or query; only the origin (scheme://host[:port]) is enforced",
+				"cors_allowed_origins entry %q includes a path, query, or fragment; only the origin (scheme://host[:port]) is enforced",
 				origin))
 		}
 	}
