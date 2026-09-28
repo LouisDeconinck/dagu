@@ -82,6 +82,7 @@ func TestScanEndpointLongLines(t *testing.T) {
 	ready := make(chan string, 1)
 	stdout := strings.Repeat("x", 200*1024) + "\nopencode server listening on http://127.0.0.1:4096\n"
 	scanEndpoint(strings.NewReader(stdout), ready)
+	require.Len(t, ready, 1, "listening endpoint was not found")
 	require.Equal(t, "http://127.0.0.1:4096", <-ready)
 }
 
