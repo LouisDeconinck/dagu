@@ -3078,7 +3078,7 @@ func (a *API) retryDAGRun(ctx context.Context, dagName, dagRunID, retryDagRunID,
 	// For DAGs using a global queue, enqueue the retry so it respects queue capacity.
 	// Step retry is not supported via queue (queue processor does not pass step name).
 	if stepName == "" && a.config.FindQueueConfig(dag.ProcGroup()) != nil {
-		if err := a.enqueueRetry(ctx, attempt, dag); err != nil {
+		if err := a.enqueueRetry(ctx, prevStatus, dag); err != nil {
 			return retryDAGRunResult{}, err
 		}
 		a.logRetryAudit(ctx, dagName, sourceDagRunID, auditStepName, includeDownstream, false, false)
@@ -3184,14 +3184,10 @@ func retryPathRequestError(err error) error {
 	}
 }
 
-// enqueueRetry enqueues the retry and persists Queued status via queue.EnqueueRetry.
+// enqueueRetry queues the validated attempt only if its status still matches.
 // Retries respect global queue capacity because the queue processor picks them up
 // when capacity is available.
-func (a *API) enqueueRetry(ctx context.Context, attempt dagrun.Attempt, dag *ir.DAG) error {
-	status, err := attempt.ReadStatus(ctx)
-	if err != nil {
-		return fmt.Errorf("error reading status: %w", err)
-	}
+func (a *API) enqueueRetry(ctx context.Context, status *ir.DAGRunStatus, dag *ir.DAG) error {
 	eventCtx := a.withEventContext(ctx)
 	opts := queue.EnqueueRetryOptions{Processes: a.procRepository}
 	if actor := triggerActorFromContext(ctx); actor != "" {
@@ -3982,7 +3978,7 @@ func (a *API) resumeWaitingDAGRun(ctx context.Context, ref ir.DAGRunRef, dagRunI
 	if err != nil {
 		return fmt.Errorf("read DAG: %w", err)
 	}
-	return a.enqueueRetry(ctx, attempt, dag)
+	return a.enqueueRetry(ctx, status, dag)
 }
 
 func (a *API) resumeDAGRun(ctx context.Context, ref ir.DAGRunRef, dagRunID string) error {

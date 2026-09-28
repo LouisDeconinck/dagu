@@ -25,7 +25,10 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/persis"
+	"github.com/dagucloud/dagu/v2/internal/persis/file"
+	"github.com/dagucloud/dagu/v2/internal/persis/store"
 	"github.com/dagucloud/dagu/v2/internal/proc"
+	"github.com/dagucloud/dagu/v2/internal/queue"
 	runtimepkg "github.com/dagucloud/dagu/v2/internal/runtime"
 	"github.com/dagucloud/dagu/v2/internal/testutil"
 	"github.com/goccy/go-yaml"
@@ -441,9 +444,90 @@ func TestRollbackPushBackIgnoresCancellationAndPreservesConcurrentUnrelatedNodeC
 	assert.JSONEq(t, `{"confirmed":true}`, string(current.Nodes[1].HumanTaskInput))
 }
 
+// A manual resume must not replace state recorded after the approval, even
+// when the replacement is a new attempt that is also waiting.
+func TestResumeWaitingDAGRun(t *testing.T) {
+	const attemptID = "attempt-1"
+	for _, tt := range []struct {
+		name      string
+		status    ir.Status
+		attemptID string
+		wantErr   bool
+	}{
+		{name: "Ready", status: ir.Waiting, attemptID: attemptID},
+		{name: "Rejected", status: ir.Rejected, attemptID: attemptID, wantErr: true},
+		{name: "Running", status: ir.Running, attemptID: attemptID, wantErr: true},
+		{name: "NewAttempt", status: ir.Waiting, attemptID: "attempt-2", wantErr: true},
+		{name: "AlreadyQueued", status: ir.Queued, attemptID: attemptID},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			approved := &ir.DAGRunStatus{
+				Name: "manual-dag", DAGRunID: "run-1", AttemptID: attemptID, Status: ir.Waiting,
+				Nodes: []*ir.Node{
+					{Step: ir.Step{Name: "gate_a", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeSucceeded},
+					{Step: ir.Step{Name: "gate_b", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeWaiting},
+					{Step: ir.Step{Name: "human", HumanTask: &ir.HumanTaskConfig{Prompt: "Review"}}, Status: ir.NodeWaiting},
+					{Step: ir.Step{Name: "after_a", Depends: []string{"gate_a"}}, Status: ir.NodeNotStarted},
+				},
+			}
+			current, err := cloneManualStatus(approved)
+			require.NoError(t, err)
+			current.Status = tt.status
+			current.AttemptID = tt.attemptID
+			if tt.status == ir.Rejected {
+				applyRejection(t.Context(), current.Nodes[1], current, nil)
+			}
+			before, err := cloneManualStatus(current)
+			require.NoError(t, err)
+			backend := &manualCASStore{
+				status: current,
+				attempt: &manualStepAttempt{
+					dag: &ir.DAG{Name: current.Name}, statuses: []*ir.DAGRunStatus{current},
+				},
+			}
+			queueStore := store.NewQueueStore(file.NewCollection(t.TempDir()))
+			if tt.status == ir.Queued {
+				require.NoError(t, queueStore.Enqueue(t.Context(), current.Name, queue.QueuePriorityLow, current.DAGRun()))
+			}
+			a := &API{
+				dagRunRepository: persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{}),
+				queueStore:       queueStore,
+			}
+
+			err = a.resumeWaitingDAGRun(t.Context(), approved.DAGRun(), approved.DAGRunID, approved)
+
+			if tt.wantErr {
+				var apiErr *Error
+				require.ErrorAs(t, err, &apiErr)
+				assert.Equal(t, http.StatusBadRequest, apiErr.HTTPStatus)
+				assert.Equal(t, before, current)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, ir.Queued, current.Status)
+				assert.Equal(t, before.Nodes, current.Nodes)
+			}
+			items, err := queueStore.List(t.Context(), current.Name)
+			require.NoError(t, err)
+			if tt.wantErr {
+				assert.Empty(t, items)
+			} else {
+				require.Len(t, items, 1)
+				ref, err := items[0].Data()
+				require.NoError(t, err)
+				assert.Equal(t, approved.DAGRun(), *ref)
+			}
+		})
+	}
+}
+
 type manualCASStore struct {
 	testutil.DAGRunStoreStub
-	status *ir.DAGRunStatus
+	status  *ir.DAGRunStatus
+	attempt dagrun.Attempt
+}
+
+func (s *manualCASStore) FindAttempt(context.Context, ir.DAGRunRef) (dagrun.Attempt, error) {
+	return s.attempt, nil
 }
 
 type manualStepAttempt struct {
