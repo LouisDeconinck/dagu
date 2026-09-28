@@ -1716,59 +1716,73 @@ func TestRunner(t *testing.T) {
 		assert.Equal(t, 2, node.State().DoneCount)
 	})
 
-	t.Run("RepeatPolicyUntilConditionEvalErrorFailsStep", func(t *testing.T) {
-		r := setupRunner(t)
-		plan := r.newPlan(t,
-			newStep("1",
-				withCommand(test.Output("tick")),
-				func(step *ir.Step) {
-					step.RepeatPolicy.RepeatMode = ir.RepeatModeUntil
-					step.RepeatPolicy.Condition = &ir.Condition{
-						Condition: "not-a-number",
-						Expected:  "num:>=1",
+	t.Run("RepeatErrorContinueOn", func(t *testing.T) {
+		cases := []struct {
+			name            string
+			continueOn      ir.ContinueOn
+			status          ir.Status
+			nodeStatus      ir.NodeStatus
+			dependentStatus ir.NodeStatus
+		}{
+			{
+				name:            "Fail",
+				status:          ir.Failed,
+				nodeStatus:      ir.NodeFailed,
+				dependentStatus: ir.NodeAborted,
+			},
+			{
+				name:            "Continue",
+				continueOn:      ir.ContinueOn{Failure: true},
+				status:          ir.PartiallySucceeded,
+				nodeStatus:      ir.NodeFailed,
+				dependentStatus: ir.NodeSucceeded,
+			},
+			{
+				name:            "MarkSuccess",
+				continueOn:      ir.ContinueOn{Failure: true, MarkSuccess: true},
+				status:          ir.Succeeded,
+				nodeStatus:      ir.NodeSucceeded,
+				dependentStatus: ir.NodeSucceeded,
+			},
+			{
+				name:            "UnmatchedMarkSuccess",
+				continueOn:      ir.ContinueOn{ExitCode: []int{1}, MarkSuccess: true},
+				status:          ir.Failed,
+				nodeStatus:      ir.NodeFailed,
+				dependentStatus: ir.NodeAborted,
+			},
+		}
+		for _, mode := range []ir.RepeatMode{ir.RepeatModeWhile, ir.RepeatModeUntil} {
+			for _, tc := range cases {
+				t.Run(string(mode)+"/"+tc.name, func(t *testing.T) {
+					r := setupRunner(t)
+					plan := r.newPlan(t,
+						newStep("1", withCommand(test.Output("tick")), withContinueOn(tc.continueOn),
+							func(step *ir.Step) {
+								step.RepeatPolicy.RepeatMode = mode
+								step.RepeatPolicy.Condition = &ir.Condition{
+									Condition: "not-a-number",
+									Expected:  "num:>=1",
+								}
+							},
+						),
+						successStep("2", "1"),
+					)
+
+					// Evaluation errors stop repetition even when continuation permits success.
+					result := plan.assertRun(t, tc.status)
+					result.assertNodeStatus(t, "1", tc.nodeStatus)
+					result.assertNodeStatus(t, "2", tc.dependentStatus)
+					node := result.nodeByName(t, "1")
+					assert.Equal(t, 1, node.State().DoneCount)
+					require.NotErrorIs(t, node.State().Error, runtime.ErrConditionNotMet)
+					require.ErrorContains(t, node.State().Error, "is not a number")
+					if tc.status != ir.Succeeded {
+						require.ErrorContains(t, result.Error, "is not a number")
 					}
-					step.RepeatPolicy.Interval = 20 * time.Millisecond
-				},
-			),
-		)
-
-		// The condition can never be evaluated, so the step must fail on the
-		// first check instead of repeating until killed.
-		result := plan.assertRun(t, ir.Failed)
-		result.assertNodeStatus(t, "1", ir.NodeFailed)
-
-		node := result.nodeByName(t, "1")
-		assert.Equal(t, 1, node.State().DoneCount)
-		require.NotErrorIs(t, node.State().Error, runtime.ErrConditionNotMet)
-		require.ErrorContains(t, node.State().Error, "is not a number")
-		require.ErrorContains(t, result.Error, "is not a number")
-	})
-
-	t.Run("RepeatPolicyWhileConditionEvalErrorFailsStep", func(t *testing.T) {
-		r := setupRunner(t)
-		plan := r.newPlan(t,
-			newStep("1",
-				withCommand(test.Output("tick")),
-				func(step *ir.Step) {
-					step.RepeatPolicy.RepeatMode = ir.RepeatModeWhile
-					step.RepeatPolicy.Condition = &ir.Condition{
-						Condition: "not-a-number",
-						Expected:  "num:>=1",
-					}
-					step.RepeatPolicy.Interval = 20 * time.Millisecond
-				},
-			),
-		)
-
-		// The condition can never be evaluated, so the step must fail rather
-		// than stop the loop and report success.
-		result := plan.assertRun(t, ir.Failed)
-		result.assertNodeStatus(t, "1", ir.NodeFailed)
-
-		node := result.nodeByName(t, "1")
-		assert.Equal(t, 1, node.State().DoneCount)
-		require.NotErrorIs(t, node.State().Error, runtime.ErrConditionNotMet)
-		require.ErrorContains(t, node.State().Error, "is not a number")
+				})
+			}
+		}
 	})
 
 	t.Run("RepeatPolicyUntilConditionNotMetRespectsLimit", func(t *testing.T) {

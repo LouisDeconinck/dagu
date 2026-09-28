@@ -75,7 +75,10 @@ Rules:
   attempt.
 - A met or not-met result is a normal loop answer.
 - An evaluation error is not a loop answer: the step stops repeating and
-  reaches terminal status `failed`.
+  fails unless a matching `continue_on` policy has `mark_success: true`.
+- With a matching `mark_success` policy, the step reaches terminal status
+  `succeeded` and its evaluation error does not fail the DAG run. The error
+  remains available on the step for diagnosis.
 - A repeat-condition evaluation error is a step failure for DAG-run status
   calculation, following normal step-failure rules for dependents and
   `continue_on`.

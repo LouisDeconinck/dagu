@@ -10,27 +10,31 @@ import (
 	"github.com/dagucloud/dagu/v2/conformance/harness"
 )
 
-// A repeat condition that cannot be evaluated is a step failure, not a loop
-// answer: a while loop stops and fails, and an until loop fails instead of
-// repeating forever.
+// An unevaluable repeat condition stops repetition and follows continue_on.
 func TestRuntimeRepeatConditionEvaluationErrorUnix(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("fixtures use POSIX shell snippets")
 	}
 
-	cases := []string{
-		"until_eval_error_fails.yaml",
-		"while_eval_error_fails.yaml",
+	cases := []struct {
+		file     string
+		exitCode int
+		ticks    string
+	}{
+		{"until_eval_error_fails.yaml", 1, "tick\n"},
+		{"while_eval_error_fails.yaml", 1, "tick\n"},
+		{"until_eval_error_mark_success.yaml", 0, "tick\ndependent\n"},
+		{"while_eval_error_mark_success.yaml", 0, "tick\ndependent\n"},
 	}
-	for _, file := range cases {
-		t.Run(file, func(t *testing.T) {
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
 			t.Parallel()
 
 			dagu := harness.NewRunner(t)
-			result := dagu.Run("start", file)
-			result.ExpectExitCode(1)
-			dagu.ExpectFileContent("ticks.txt", "tick\n")
+			result := dagu.Run("start", tc.file)
+			result.ExpectExitCode(tc.exitCode)
+			dagu.ExpectFileContent("ticks.txt", tc.ticks)
 		})
 	}
 }

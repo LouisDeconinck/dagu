@@ -1845,6 +1845,10 @@ func (r *Runner) shouldRepeatNode(ctx context.Context, node *Node, execErr error
 		return false
 	}
 	node.MarkError(err)
+	if node.ShouldMarkSuccess(ctx) {
+		node.SetStatus(ir.NodeSucceeded)
+		return false
+	}
 	r.setLastError(err)
 	return false
 }
