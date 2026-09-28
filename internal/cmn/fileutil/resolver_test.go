@@ -159,8 +159,7 @@ func TestFileResolverUserTildeError(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for ~name path, got none")
 		}
-		var notFound *FileNotFoundError
-		if errors.As(err, &notFound) {
+		if _, ok := errors.AsType[*FileNotFoundError](err); ok {
 			t.Fatalf("expected resolution error, got FileNotFoundError: %v", err)
 		}
 		if !strings.Contains(err.Error(), "~alice/missing.txt") {
