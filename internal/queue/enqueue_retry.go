@@ -22,6 +22,21 @@ const (
 	sourceReleasePollInterval   = 25 * time.Millisecond
 )
 
+// RetryAdmission is an accepted retry of a specific run checkpoint.
+type RetryAdmission struct {
+	// Status is the accepted checkpoint for the retry. Callers must not mutate it.
+	Status *ir.DAGRunStatus
+
+	repository *persis.DAGRunRepository
+	original   ir.DAGRunStatus
+	queued     ir.DAGRunStatus
+}
+
+// Rollback restores the checkpoint only if this admission still owns the run.
+func (a *RetryAdmission) Rollback(ctx context.Context) error {
+	return rollbackQueuedRetry(ctx, a.repository, a.queued.DAGRun(), &a.queued, &a.original)
+}
+
 // RunProcesses reports whether the execution that recorded an attempt still
 // owns its dag-run.
 type RunProcesses interface {
@@ -106,24 +121,53 @@ func EnqueueRetry(
 	status *ir.DAGRunStatus,
 	opts EnqueueRetryOptions,
 ) (bool, error) {
-	if dagRunRepository == nil {
-		return false, errors.New("enqueue retry: DAG-run repository is not configured")
-	}
 	if queueStore == nil {
 		return false, errors.New("enqueue retry: queue store is not configured")
 	}
+	admission, err := PrepareRetry(ctx, dagRunRepository, dag, status, opts)
+	if err != nil || admission == nil {
+		return false, err
+	}
+	var enqueueErr error
+	if procGroup := retryProcGroup(dag, admission.Status); procGroup == "" {
+		enqueueErr = errors.New("proc group is empty")
+	} else {
+		enqueueErr = queueStore.Enqueue(ctx, procGroup, QueuePriorityLow, admission.Status.DAGRun())
+	}
+	if enqueueErr == nil {
+		return true, nil
+	}
+	if rollbackErr := admission.Rollback(ctx); rollbackErr != nil {
+		return false, fmt.Errorf("enqueue retry: %w; rollback queued retry status: %w", enqueueErr, rollbackErr)
+	}
+	return false, fmt.Errorf("enqueue retry: %w", enqueueErr)
+}
+
+// PrepareRetry accepts a retry only while the caller's attempt and status still
+// match. It returns nil for an already accepted retry or a deferred auto-retry.
+// The caller must queue or dispatch the admission, or roll it back on failure.
+func PrepareRetry(
+	ctx context.Context,
+	dagRunRepository *persis.DAGRunRepository,
+	dag *ir.DAG,
+	status *ir.DAGRunStatus,
+	opts EnqueueRetryOptions,
+) (*RetryAdmission, error) {
+	if dagRunRepository == nil {
+		return nil, errors.New("enqueue retry: DAG-run repository is not configured")
+	}
 	if status == nil {
-		return false, errors.New("enqueue retry: DAG-run status is nil")
+		return nil, errors.New("enqueue retry: DAG-run status is nil")
 	}
 	if status.Status == ir.Queued {
-		return false, nil
+		return nil, nil
 	}
 	released, err := awaitSourceRelease(ctx, opts.Processes, dag, status, !opts.AutoRetry)
 	if err != nil {
-		return false, fmt.Errorf("enqueue retry: %w", err)
+		return nil, fmt.Errorf("enqueue retry: %w", err)
 	}
 	if !released {
-		return false, nil
+		return nil, nil
 	}
 
 	dagRun := status.DAGRun()
@@ -154,33 +198,18 @@ func EnqueueRetry(
 		}, persis.DAGRunCompareAndSwapOptions{},
 	)
 	if err != nil {
-		return false, fmt.Errorf("persist queued retry status: %w", err)
+		return nil, fmt.Errorf("persist queued retry status: %w", err)
 	}
 	if !swapped {
 		if updatedStatus != nil &&
 			updatedStatus.AttemptID == status.AttemptID &&
 			updatedStatus.Status == ir.Queued {
-			return false, nil
+			return nil, nil
 		}
-		return false, ErrRetryStaleLatest
+		return nil, ErrRetryStaleLatest
 	}
-
-	var enqueueErr error
-	if procGroup := retryProcGroup(dag, updatedStatus); procGroup == "" {
-		enqueueErr = errors.New("proc group is empty")
-	} else {
-		enqueueErr = queueStore.Enqueue(ctx, procGroup, QueuePriorityLow, dagRun)
-	}
-	if enqueueErr == nil {
-		return true, nil
-	}
-
-	// The status swap above already published Queued, so every failure past
-	// this point must restore the prior status.
-	if rollbackErr := rollbackQueuedRetry(ctx, dagRunRepository, dagRun, updatedStatus, originalStatus); rollbackErr != nil {
-		return false, fmt.Errorf("enqueue retry: %w; rollback queued retry status: %w", enqueueErr, rollbackErr)
-	}
-	return false, fmt.Errorf("enqueue retry: %w", enqueueErr)
+	return &RetryAdmission{Status: updatedStatus, repository: dagRunRepository,
+		original: *originalStatus, queued: *updatedStatus}, nil
 }
 
 func nextRetryQueuedAt(previous string, now time.Time) string {
@@ -207,6 +236,9 @@ func rollbackQueuedRetry(
 		queued.AttemptID,
 		ir.Queued,
 		func(latest *ir.DAGRunStatus) error {
+			if latest.QueuedAt != queued.QueuedAt {
+				return ErrRetryStaleLatest
+			}
 			latest.Status = original.Status
 			latest.QueuedAt = original.QueuedAt
 			latest.Conditions = original.Conditions
@@ -221,7 +253,7 @@ func rollbackQueuedRetry(
 		return err
 	}
 	if !swapped {
-		return errors.New("DAG-run state changed before queued retry status could be rolled back")
+		return ErrRetryStaleLatest
 	}
 	return nil
 }
