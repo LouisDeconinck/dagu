@@ -82,6 +82,9 @@ Rules:
 - A repeat-condition evaluation error is a step failure for DAG-run status
   calculation, following normal step-failure rules for dependents and
   `continue_on`.
+- An aborted or timed-out attempt does not evaluate its repeat condition or
+  repeat. Its status and error remain those of the abort or timeout, even
+  when `continue_on.mark_success` is configured.
 - If workflow abort or timeout interrupts the check, the step follows the
   abort or timeout outcome instead of treating the interrupted check as a loop
   answer.

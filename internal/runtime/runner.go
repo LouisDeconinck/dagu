@@ -1807,6 +1807,10 @@ func (r *Runner) handleNodeExecutionError(ctx context.Context, plan *Plan, node 
 
 // shouldRepeatNode determines if a node should be repeated based on its repeat policy
 func (r *Runner) shouldRepeatNode(ctx context.Context, node *Node, execErr error) bool {
+	if r.isCanceled() || node.State().Status == ir.NodeAborted || errors.Is(execErr, context.DeadlineExceeded) {
+		return false
+	}
+
 	rp := node.Step().RepeatPolicy
 
 	// Check the hard limit first - this overrides everything
@@ -1828,14 +1832,17 @@ func (r *Runner) shouldRepeatNode(ctx context.Context, node *Node, execErr error
 	default:
 		return false
 	}
+	// Abort and timeout take precedence over a repeat condition result.
+	if r.isCanceled() || node.State().Status == ir.NodeAborted {
+		return false
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = fmt.Errorf("%w: %w", errConditionInterrupted, ctxErr)
+	}
 	if err == nil {
 		return repeat
 	}
 
-	// A repeat condition that cannot be evaluated is not a loop answer. As
-	// with step preconditions, an interrupted check leaves the step to the
-	// abort or timeout that cut it short, while any other evaluation error
-	// fails the step instead of repeating on a collapsed result.
 	if errors.Is(err, errConditionInterrupted) {
 		node.SetStatus(ir.NodeAborted)
 		node.SetError(err)

@@ -2761,6 +2761,96 @@ func TestRunner_CancelDuringHandlerExecution(t *testing.T) {
 	result.assertNodeStatus(t, "onExit", ir.NodeSucceeded)
 }
 
+func TestRunner_RepeatErrorCanceled(t *testing.T) {
+	for _, mode := range []ir.RepeatMode{ir.RepeatModeWhile, ir.RepeatModeUntil} {
+		for _, markSuccess := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/MarkSuccess=%t", mode, markSuccess), func(t *testing.T) {
+				executorType, execCh := registerStoppedStatusExecutor(t)
+				r := setupRunner(t)
+				plan := r.newPlan(t, newStep("1", withExecutorType(executorType),
+					withContinueOn(ir.ContinueOn{Failure: true, MarkSuccess: markSuccess}),
+					func(step *ir.Step) {
+						step.RepeatPolicy.RepeatMode = mode
+						step.RepeatPolicy.Condition = &ir.Condition{Condition: "not-a-number", Expected: "num:>=1"}
+					},
+				))
+				ctx := runtime.NewContext(r.Context, &ir.DAG{Name: "test_dag", WorkingDir: plan.workDir}, r.cfg.DAGRunID, "")
+				done := make(chan error, 1)
+				go func() {
+					done <- r.runner.Run(ctx, plan.Plan, nil)
+				}()
+
+				exec := <-execCh
+				<-exec.ready
+				// Cancellation precedes completion so the repeat check sees an aborted attempt.
+				r.runner.Cancel(plan.Plan)
+				require.NoError(t, exec.Kill(syscall.SIGTERM))
+
+				select {
+				case err := <-done:
+					require.NoError(t, err)
+				case <-time.After(platformTestDuration(2*time.Second, 10*time.Second)):
+					t.Fatal("runner did not finish after cancellation")
+				}
+				require.Equal(t, ir.Aborted, r.runner.Status(ctx, plan.Plan))
+				result := runResult{planHelper: plan}
+				result.assertNodeStatus(t, "1", ir.NodeAborted)
+				require.ErrorContains(t, result.nodeByName(t, "1").State().Error, "executor stopped")
+			})
+		}
+	}
+}
+
+func TestRunner_RepeatErrorTimeout(t *testing.T) {
+	for _, mode := range []ir.RepeatMode{ir.RepeatModeWhile, ir.RepeatModeUntil} {
+		for _, stepTimeout := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/StepTimeout=%t", mode, stepTimeout), func(t *testing.T) {
+				timeout := platformTestDuration(100*time.Millisecond, time.Second)
+				executorType, _ := registerStoppedStatusExecutor(t)
+				dagTimeout := timeout
+				if stepTimeout {
+					dagTimeout = 0
+				}
+				r := setupRunner(t, withTimeout(dagTimeout))
+				plan := r.newPlan(t, newStep("1", withExecutorType(executorType), func(step *ir.Step) {
+					if stepTimeout {
+						step.Timeout = timeout
+					}
+					step.RepeatPolicy.RepeatMode = mode
+					step.RepeatPolicy.Condition = &ir.Condition{Condition: "not-a-number", Expected: "num:>=1"}
+				}))
+
+				result := plan.assertRun(t, ir.Failed)
+				require.ErrorIs(t, result.Error, context.DeadlineExceeded)
+				if stepTimeout {
+					result.assertNodeStatus(t, "1", ir.NodeFailed)
+					assert.Equal(t, 124, result.nodeByName(t, "1").State().ExitCode)
+				} else {
+					result.assertNodeStatus(t, "1", ir.NodeAborted)
+				}
+				require.ErrorIs(t, result.nodeByName(t, "1").State().Error, context.DeadlineExceeded)
+			})
+		}
+	}
+}
+
+func TestRunner_RepeatConditionTimeout(t *testing.T) {
+	for _, mode := range []ir.RepeatMode{ir.RepeatModeWhile, ir.RepeatModeUntil} {
+		t.Run(string(mode), func(t *testing.T) {
+			r := setupRunner(t, withTimeout(platformTestDuration(200*time.Millisecond, 2*time.Second)))
+			plan := r.newPlan(t, newStep("1", withCommand(test.Output("tick")), func(step *ir.Step) {
+				step.RepeatPolicy.RepeatMode = mode
+				step.RepeatPolicy.Condition = &ir.Condition{Condition: test.Sleep(30 * time.Second)}
+			}))
+
+			result := plan.assertRun(t, ir.Failed)
+			require.ErrorIs(t, result.Error, context.DeadlineExceeded)
+			result.assertNodeStatus(t, "1", ir.NodeAborted)
+			assert.Equal(t, 1, result.nodeByName(t, "1").State().DoneCount)
+		})
+	}
+}
+
 func TestRunner_RepeatPolicyWithCancel(t *testing.T) {
 	if windowsShellTest() {
 		t.Skip("Skipping flaky shell-based repeat cancellation test on Windows")
