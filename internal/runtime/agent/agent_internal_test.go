@@ -4,11 +4,16 @@
 package agent
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/mailer/oauthconfig"
 	"github.com/dagucloud/dagu/v2/internal/ir"
+	"github.com/dagucloud/dagu/v2/internal/runtime"
+	"github.com/dagucloud/dagu/v2/internal/runtime/builtin/ssh"
+	"github.com/dagucloud/dagu/v2/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -102,6 +107,57 @@ func TestPanicToError(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := panicToError(tt.panicObj)
 			assert.Equal(t, tt.expectedMsg, result.Error())
+		})
+	}
+}
+
+// DAG-level ssh fields resolve Dagu-owned references with the steps[].with
+// rules, alongside unqualified environment syntax such as ${fqdn}. An
+// unresolved reference stays literal.
+func TestEvalSSHConfig(t *testing.T) {
+	t.Parallel()
+
+	dag, err := spec.LoadYAML(context.Background(), []byte(`
+name: ssh-config
+consts:
+  - user: deploy
+params:
+  - name: fqdn
+    type: string
+steps:
+  - name: ok
+    run: "true"
+`), spec.WithParams("fqdn=node.internal"))
+	require.NoError(t, err)
+	ctx := runtime.NewContext(context.Background(), dag, "test-run",
+		filepath.Join(t.TempDir(), "run.log"),
+		runtime.WithParams([]string{"fqdn=node.internal"}),
+	)
+	vars := runtime.GetEnv(ctx).UserEnvsMap()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "Param", raw: "${params.fqdn}", want: "node.internal"},
+		{name: "EnvShorthand", raw: "/keys/${fqdn}/id_rsa", want: "/keys/node.internal/id_rsa"},
+		{name: "Const", raw: "${consts.user}", want: "deploy"},
+		{name: "BuiltinContext", raw: "${context.dag.name}", want: "ssh-config"},
+		{name: "UnknownParam", raw: "${params.missing}", want: "${params.missing}"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := evalSSHConfig(ctx, ssh.Config{
+				Host:    tt.raw,
+				Bastion: &ssh.BastionConfig{Host: tt.raw},
+			}, vars)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got.Host)
+			require.NotNil(t, got.Bastion)
+			assert.Equal(t, tt.want, got.Bastion.Host)
 		})
 	}
 }

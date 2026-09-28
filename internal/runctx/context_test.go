@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/runenv"
-	"github.com/dagucloud/dagu/v2/internal/cmn/stringutil"
+	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
 	"github.com/dagucloud/dagu/v2/internal/ir"
@@ -476,7 +476,10 @@ func TestInheritedEnvs(t *testing.T) {
 		runctx.WithSecrets([]string{"DAG_SECRET=dag-secret"}),
 	)
 
-	inherited := stringutil.KeyValuesToMap(runctx.GetContext(ctx).InheritedEnvs())
+	inherited := make(map[string]string)
+	for _, entry := range runctx.GetContext(ctx).InheritedEnvs() {
+		inherited[entry.Key] = entry.Value
+	}
 	assert.Equal(t, "dag", inherited["SHARED"])
 	assert.Equal(t, "dag", inherited["DAG_ONLY"])
 	assert.Equal(t, "extra", inherited["EXTRA"])
@@ -485,6 +488,44 @@ func TestInheritedEnvs(t *testing.T) {
 	assert.NotContains(t, inherited, "DEFAULT_SECRET")
 	assert.NotContains(t, inherited, "PROFILE_ONLY")
 	assert.NotContains(t, inherited, "PROFILE_SECRET")
+}
+
+func TestNewContext_InheritedEnvs(t *testing.T) {
+	t.Parallel()
+
+	dag := &ir.DAG{
+		Name: "child",
+		Env:  []string{"DAG_VAR=child-env"},
+	}
+	ctx := runctx.NewContext(context.Background(), dag, "run-1", "test.log",
+		runctx.WithParams([]string{"PARAM_VAR=child-param"}),
+		runctx.WithSecrets([]string{"CHILD_SECRET=child-secret"}),
+		runctx.WithInheritedEnvs([]cmnvalue.EnvEntry{
+			{Key: "PARAM_VAR", Value: "parent-param", Source: cmnvalue.EnvSourceParam},
+			{Key: "DAG_VAR", Value: "parent-env", Source: cmnvalue.EnvSourceDAGEnv},
+			{Key: "CHILD_SECRET", Value: "parent-secret", Source: cmnvalue.EnvSourceSecret},
+			{Key: "INHERITED_SECRET", Value: "inherited-secret", Source: cmnvalue.EnvSourceSecret},
+			{Key: "ONLY_PARENT", Value: "inherited", Source: cmnvalue.EnvSourceDAGEnv},
+		}),
+	)
+
+	rCtx := runctx.GetContext(ctx)
+	envs := rCtx.UserEnvsMap()
+	// Inherited parent values are ambient: every value the child declares or
+	// resolves for itself wins on conflict, including params the calling step
+	// passed.
+	assert.Equal(t, "child-param", envs["PARAM_VAR"])
+	assert.Equal(t, "child-env", envs["DAG_VAR"])
+	assert.Equal(t, "child-secret", envs["CHILD_SECRET"])
+	// A name the child does not define still inherits the parent value.
+	assert.Equal(t, "inherited", envs["ONLY_PARENT"])
+
+	// Provenance survives the run boundary so secret-aware handling still
+	// applies: pass_env and output masking must keep seeing the secret.
+	entry, ok := rCtx.EnvScope.GetEntry("INHERITED_SECRET")
+	require.True(t, ok)
+	assert.Equal(t, cmnvalue.EnvSourceSecret, entry.Source)
+	assert.NotContains(t, rCtx.PassableEnvs(), "INHERITED_SECRET=inherited-secret")
 }
 
 func TestNewContext_AllEnvsUsesFilteredBaseEnv(t *testing.T) {

@@ -1218,3 +1218,101 @@ steps:
 	// dag.run step's own stdout still echoes the child run's result JSON.)
 	require.NotContains(t, string(summary), "child_step_default")
 }
+
+// TestSubDAG_ChildParamsOverrideInheritedEnv covers a local child run that
+// implicitly observes the parent run scope: values the calling step passes as
+// the child's own params must win over same-named parent params and parent
+// env values, while names the child does not declare still inherit.
+func TestSubDAG_ChildParamsOverrideInheritedEnv(t *testing.T) {
+	readChildResult := func(t *testing.T, th test.Command, parentName, dagRunID string) string {
+		t.Helper()
+		ctx := context.Background()
+		ref := ir.NewDAGRunRef(parentName, dagRunID)
+		parentAttempt, err := th.DAGRunRepository.FindAttempt(ctx, ref)
+		require.NoError(t, err)
+		parentStatus, err := parentAttempt.ReadStatus(ctx)
+		require.NoError(t, err)
+		require.Equal(t, ir.Succeeded, parentStatus.Status)
+		require.Len(t, parentStatus.Nodes[0].SubRuns, 1)
+		subAttempt, err := th.DAGRunRepository.FindSubAttempt(ctx, ref, parentStatus.Nodes[0].SubRuns[0].DAGRunID)
+		require.NoError(t, err)
+		subStatus, err := subAttempt.ReadStatus(ctx)
+		require.NoError(t, err)
+		require.Equal(t, ir.Succeeded, subStatus.Status)
+		require.NotNil(t, subStatus.Nodes[0].OutputVariables)
+		return strings.TrimSpace(subStatus.Nodes[0].OutputVariables.Variables()["RESULT"])
+	}
+
+	t.Run("NamedParams", func(t *testing.T) {
+		th := test.SetupCommand(t)
+
+		th.CreateDAGFile(t, "parent_param_precedence.yaml", `
+params:
+  - PARAM_ONLY=from-parent-param
+env:
+  - SHARED_ENV: from-parent-env
+  - ENV: prod-env
+  - KEEP: inherited
+steps:
+  - name: call_sub
+    action: dag.run
+    with:
+      dag: sub_param_precedence
+      params: "SHARED_ENV=from-step PARAM_ONLY=from-step ENV=staging"
+
+---
+
+name: sub_param_precedence
+params:
+  - SHARED_ENV: ""
+  - PARAM_ONLY: ""
+  - ENV: ""
+steps:
+  - name: report
+    run: |
+      echo "SHARED_ENV=${SHARED_ENV} PARAM_ONLY=${PARAM_ONLY} ENV=${ENV} KEEP=${KEEP}"
+    output: RESULT
+`)
+
+		dagRunID := uuid.Must(uuid.NewV7()).String()
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args:        []string{"start", "--run-id", dagRunID, "parent_param_precedence"},
+			ExpectedOut: []string{"DAG run finished"},
+		})
+
+		require.Equal(t,
+			"SHARED_ENV=from-step PARAM_ONLY=from-step ENV=staging KEEP=inherited",
+			readChildResult(t, th, "parent_param_precedence", dagRunID))
+	})
+
+	// Positional params enter both runs under the numeric name they declare, so
+	// the same precedence rule applies to the inherited positional value.
+	t.Run("CallWithPositionalParams", func(t *testing.T) {
+		th := test.SetupCommand(t)
+
+		th.CreateDAGFile(t, "parent_positional_precedence.yaml", `
+params: "parentpos"
+steps:
+  - name: call_sub
+    call: sub_positional_precedence
+    params: "childpos"
+
+---
+
+name: sub_positional_precedence
+steps:
+  - name: report
+    run: |
+      echo "P1=${1}"
+    output: RESULT
+`)
+
+		dagRunID := uuid.Must(uuid.NewV7()).String()
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args:        []string{"start", "--run-id", dagRunID, "parent_positional_precedence"},
+			ExpectedOut: []string{"DAG run finished"},
+		})
+
+		require.Equal(t, "P1=childpos", readChildResult(t, th, "parent_positional_precedence", dagRunID))
+	})
+}

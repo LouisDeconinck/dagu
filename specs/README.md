@@ -74,6 +74,7 @@ It must not be treated as product behavior until implementation catches up.
 | [072: Browser Actions](072-browser.md) | Partially implemented |
 | [073: Mailbox Actions](073-mailbox-actions.md) | Partially implemented |
 | [074: Computer Actions](074-computer.md) | Partially implemented |
+| [075: Repeat Policy](075-repeat-policy.md) | Implemented |
 
 **Writing guidelines:**
 

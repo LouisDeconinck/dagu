@@ -41,6 +41,19 @@ const (
 // pageTextExpression reads the text a person sees on the page.
 const pageTextExpression = `document.body ? document.body.innerText : ""`
 
+// documentExpression reads the time the page's document began loading, which
+// differs for every document the page loads.
+const documentExpression = `String(performance.timeOrigin)`
+
+// sessionLostMarkers are the texts by which the browser runtime reports a
+// command whose page session was detached: the browser's answer to a command
+// sent after the detach, and the runtime's own rejection of a command still
+// in flight.
+var sessionLostMarkers = []string{
+	"Session with given id not found",
+	"target closed before CDP",
+}
+
 // selectorVisibleExpression reports whether the selector, a JSON string
 // literal substituted for %s, matches any rendered, visible element.
 const selectorVisibleExpression = `Array.from(document.querySelectorAll(%s)).some((element) => {
@@ -252,6 +265,9 @@ func (e *stagehandEngine) Act(ctx context.Context, instruction string, variables
 	result, err := boundCall(ctx, timeout+callTimeoutSlack, func(ctx context.Context) (stagehand.ActResult, error) {
 		return e.client.Act(ctx, stagehand.ActInstruction(instruction), actOptions(variables, timeout))
 	})
+	if lost := sessionLost(result, err); lost != nil {
+		return actOutcome{}, lost
+	}
 	if err != nil {
 		return actOutcome{}, err
 	}
@@ -270,30 +286,64 @@ func (e *stagehandEngine) Act(ctx context.Context, instruction string, variables
 	return outcome, nil
 }
 
-func (e *stagehandEngine) Replay(ctx context.Context, actions []recordedAction, variables map[string]string, timeout time.Duration) (bool, error) {
-	for _, recorded := range actions {
-		action := stagehand.Action{
-			Selector:    recorded.Selector,
-			Description: recorded.Description,
-			Arguments:   recorded.Arguments,
+func (e *stagehandEngine) Replay(ctx context.Context, recorded recordedAction, variables map[string]string, timeout time.Duration) (bool, error) {
+	action := stagehand.Action{
+		Selector:    recorded.Selector,
+		Description: recorded.Description,
+		Arguments:   recorded.Arguments,
+	}
+	if recorded.Method != "" {
+		action.Method = new(recorded.Method)
+	}
+	result, err := boundCall(ctx, timeout+callTimeoutSlack, func(ctx context.Context) (stagehand.ActResult, error) {
+		return e.client.Act(ctx, stagehand.ObservedAction(action), actOptions(variables, timeout))
+	})
+	if lost := sessionLost(result, err); lost != nil {
+		return false, lost
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
 		}
-		if recorded.Method != "" {
-			action.Method = new(recorded.Method)
-		}
-		result, err := boundCall(ctx, timeout+callTimeoutSlack, func(ctx context.Context) (stagehand.ActResult, error) {
-			return e.client.Act(ctx, stagehand.ObservedAction(action), actOptions(variables, timeout))
-		})
-		if err != nil {
-			if ctx.Err() != nil {
-				return false, ctx.Err()
-			}
-			return false, nil
-		}
-		if !result.Data.Success {
-			return false, nil
+		return false, nil
+	}
+	return result.Data.Success, nil
+}
+
+// sessionLost returns an error wrapping errPageSessionLost when an act call
+// that returned result and err failed because the page's session was
+// detached, or nil. The runtime reports that detach in a failed result when
+// the action itself failed, and as an RPC error when the work around the
+// action did.
+func sessionLost(result stagehand.ActResult, err error) error {
+	message := result.Data.Message
+	var rpcErr *stagehand.RPCError
+	switch {
+	case errors.As(err, &rpcErr):
+		message = rpcErr.Message
+	case err != nil || result.Data.Success:
+		return nil
+	}
+	for _, marker := range sessionLostMarkers {
+		if strings.Contains(message, marker) {
+			return fmt.Errorf("%w: %s", errPageSessionLost, message)
 		}
 	}
-	return true, nil
+	return nil
+}
+
+func (e *stagehandEngine) DocumentID(ctx context.Context) (string, error) {
+	return boundCall(ctx, e.pageCallTimeout, func(ctx context.Context) (string, error) {
+		page, err := e.page(ctx)
+		if err != nil {
+			return "", err
+		}
+		origin, err := page.Evaluate(ctx, documentExpression)
+		if err != nil {
+			return "", err
+		}
+		return page.PageID() + ":" + string(origin), nil
+	})
 }
 
 func (e *stagehandEngine) Extract(ctx context.Context, instruction string, schema json.RawMessage, timeout time.Duration) (json.RawMessage, error) {

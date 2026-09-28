@@ -71,6 +71,7 @@ func (w *referenceFieldWalker) walkDAG(dag *ir.DAG) {
 	w.add(root.withPathValue("working_dir", dag.WorkingDir).withField(cmnvalue.DAGWorkingDirField("working_dir")))
 	w.walkConditions("preconditions", dag.Preconditions, root)
 	w.walkContainer("container", dag.Container, root)
+	w.walkSSH("ssh", dag.SSH, root)
 
 	for i := range dag.Steps {
 		w.walkStep(fmt.Sprintf("steps[%d]", i), dag.Steps[i])
@@ -349,6 +350,34 @@ func (w *referenceFieldWalker) walkContainer(path string, container *ir.Containe
 	for i, value := range container.Shell {
 		fieldPath := fmt.Sprintf("%s.shell[%d]", path, i)
 		w.add(base.withPathValue(fieldPath, value).withField(cmnvalue.ShellCommandField(fieldPath, cmnvalue.CommandContext{Target: cmnvalue.CommandTargetDocker, ShellConfigured: true})))
+	}
+}
+
+// walkSSH emits the DAG-level SSH fields that resolve with the steps[].with
+// rules. Shell arguments come from the ssh.shell value.
+func (w *referenceFieldWalker) walkSSH(path string, cfg *ir.SSHConfig, base ReferenceField) {
+	if cfg == nil {
+		return
+	}
+	add := func(fieldPath, value string) {
+		w.add(base.withPathValue(fieldPath, value).withField(cmnvalue.ExecutorConfigField(fieldPath)))
+	}
+	add(path+".user", cfg.User)
+	add(path+".host", cfg.Host)
+	add(path+".port", cfg.Port)
+	add(path+".key", cfg.Key)
+	add(path+".password", cfg.Password)
+	add(path+".known_host_file", cfg.KnownHostFile)
+	add(path+".shell", cfg.Shell)
+	for _, arg := range cfg.ShellArgs {
+		add(path+".shell", arg)
+	}
+	if cfg.Bastion != nil {
+		add(path+".bastion.host", cfg.Bastion.Host)
+		add(path+".bastion.port", cfg.Bastion.Port)
+		add(path+".bastion.user", cfg.Bastion.User)
+		add(path+".bastion.key", cfg.Bastion.Key)
+		add(path+".bastion.password", cfg.Bastion.Password)
 	}
 }
 

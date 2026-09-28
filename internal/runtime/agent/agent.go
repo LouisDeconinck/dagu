@@ -236,6 +236,8 @@ type Agent struct {
 	workspaceSeed *runtimeexec.WorkspaceSeed
 	// extraEnvs are additional execution-scoped env vars injected into the DAG run context.
 	extraEnvs []string
+	// inheritedEnvs are env entries inherited from the parent run scope.
+	inheritedEnvs []cmnvalue.EnvEntry
 	// expandSubRuns makes PrintSummary render sub-run step trees inline.
 	expandSubRuns bool
 	// profileName is the selected runtime profile name for this run.
@@ -315,6 +317,10 @@ type Options struct {
 	ExpandSubRuns bool
 	// ExtraEnvs are additional execution-scoped env vars injected into the DAG run context.
 	ExtraEnvs []string
+	// InheritedEnvs are env entries an in-process child run inherits from the
+	// parent run scope. They enter the run's environment below its own
+	// declared values, keeping each entry's source metadata.
+	InheritedEnvs []cmnvalue.EnvEntry
 	// WorkDir sets the existing per-run work directory.
 	WorkDir string
 	// WorkspaceSeed carries the workspace into inline child workflows.
@@ -437,6 +443,7 @@ func New(
 		profileResolver:          opts.ProfileResolver,
 		registry:                 opts.ServiceRegistry,
 		extraEnvs:                append([]string{}, opts.ExtraEnvs...),
+		inheritedEnvs:            append([]cmnvalue.EnvEntry{}, opts.InheritedEnvs...),
 		expandSubRuns:            opts.ExpandSubRuns,
 		workDir:                  opts.WorkDir,
 		workspaceSeed:            opts.WorkspaceSeed,
@@ -702,6 +709,9 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	if len(a.extraEnvs) > 0 {
 		contextOpts = append(contextOpts, runtime.WithEnvVars(a.extraEnvs...))
 	}
+	if len(a.inheritedEnvs) > 0 {
+		contextOpts = append(contextOpts, runtime.WithInheritedEnvs(a.inheritedEnvs))
+	}
 
 	if a.workDir != "" {
 		contextOpts = append(contextOpts, runtime.WithWorkDir(a.workDir))
@@ -943,7 +953,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 			}
 		}
 
-		sshConfig, err := evalHostConfigObject(ctx, ssh.Config{
+		sshConfig, err := evalSSHConfig(ctx, ssh.Config{
 			User:          a.dag.SSH.User,
 			Host:          a.dag.SSH.Host,
 			Port:          a.dag.SSH.Port,
@@ -955,7 +965,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 			ShellArgs:     a.dag.SSH.ShellArgs,
 			Timeout:       sshTimeout,
 			Bastion:       bastionCfg,
-		}, runtime.GetEnv(ctx).UserEnvsMap(), "ssh")
+		}, runtime.GetEnv(ctx).UserEnvsMap())
 		if err != nil {
 			initErr = fmt.Errorf("failed to evaluate ssh config: %w", err)
 			return initErr
@@ -2095,6 +2105,18 @@ func (a *Agent) evaluateMailConfigs(ctx context.Context) error {
 }
 
 func evalHostConfigObject[T any](ctx context.Context, obj T, vars map[string]string, path string) (T, error) {
+	resolver := cmnvalue.NewResolver(cmnvalue.StaticScope{}, cmnvalue.RuntimeScope{Env: hostConfigScope(ctx, vars)})
+	return resolveConfigObject(ctx, resolver, obj, cmnvalue.HostConfigObjectField(path))
+}
+
+// evalSSHConfig resolves the DAG-level SSH config with the steps[].with rules,
+// because it supplies the connection defaults for SSH steps.
+func evalSSHConfig(ctx context.Context, cfg ssh.Config, vars map[string]string) (ssh.Config, error) {
+	resolver := runtime.ValueResolverWithScope(ctx, hostConfigScope(ctx, vars))
+	return resolveConfigObject(ctx, resolver, cfg, cmnvalue.ExecutorConfigField("ssh"))
+}
+
+func hostConfigScope(ctx context.Context, vars map[string]string) *cmnvalue.EnvScope {
 	scope := cmnvalue.GetEnvScope(ctx)
 	if scope == nil {
 		env := runtime.GetEnv(ctx)
@@ -2106,8 +2128,11 @@ func evalHostConfigObject[T any](ctx context.Context, obj T, vars map[string]str
 		}
 		scope = scope.WithEntries(vars, cmnvalue.EnvSourceStepEnv)
 	}
-	resolver := cmnvalue.NewResolver(cmnvalue.StaticScope{}, cmnvalue.RuntimeScope{Env: scope})
-	got, err := resolver.Object(ctx, obj, cmnvalue.HostConfigObjectField(path))
+	return scope
+}
+
+func resolveConfigObject[T any](ctx context.Context, resolver cmnvalue.Resolver, obj T, field cmnvalue.Field) (T, error) {
+	got, err := resolver.Object(ctx, obj, field)
 	if err != nil {
 		return obj, err
 	}
