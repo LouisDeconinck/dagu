@@ -1264,6 +1264,26 @@ export interface paths {
         patch: operations["updateDAGRunStepStatus"];
         trace?: never;
     };
+    "/dag-runs/{name}/{dagRunId}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume work after a saved approval
+         * @description Retries resume admission for a root run without changing its approvals or inputs. Already queued or running resumes are not dispatched again.
+         */
+        post: operations["resumeDAGRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dag-runs/{name}/{dagRunId}/steps/{stepName}/approve": {
         parameters: {
             query?: never;
@@ -1275,7 +1295,7 @@ export interface paths {
         put?: never;
         /**
          * Approve a waiting step
-         * @description Approves a step that is in Waiting status, optionally providing input parameters that will be available as environment variables in subsequent steps
+         * @description Approves a waiting step and requests resume when work is ready. Approval and inputs remain saved if resume admission fails; use the run resume endpoint to retry without approving again.
          */
         post: operations["approveDAGRunStep"];
         delete?: never;
@@ -3821,7 +3841,7 @@ export interface components {
             dagRunId: string;
             /** @description The approved step name */
             stepName: string;
-            /** @description Whether the DAG run was re-enqueued for execution */
+            /** @description Whether resume execution was accepted, directly or through a queue */
             resumed: boolean;
         };
         /** @description A single chat message in an LLM session */
@@ -5310,6 +5330,8 @@ export interface components {
             sourceFileName?: components["schemas"]["DAGFileName"];
             /** @description Whether completed human-task input is durable but the same DAG-run still needs its retry queued */
             humanTaskResumePending?: boolean;
+            /** @description Whether a root run has a saved approval and ready work whose resume still needs to be accepted */
+            approvalResumePending?: boolean;
         };
         /** @description One file within a DAG-run's artifact directory */
         ArtifactListFile: {
@@ -11066,6 +11088,74 @@ export interface operations {
             };
         };
     };
+    resumeDAGRun: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run or 'latest' to get the most recent DAG-run */
+                dagRunId: components["parameters"]["DAGRunId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Resume accepted or already in progress */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        dagRunId: components["schemas"]["DAGRunId"];
+                        /** @description Whether execution has been accepted */
+                        resumed: boolean;
+                    };
+                };
+            };
+            /** @description DAG-run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Run has no approved work ready to resume or its state changed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Approval remains saved but resume admission failed; retry this endpoint */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     approveDAGRunStep: {
         parameters: {
             query?: {
@@ -11109,6 +11199,24 @@ export interface operations {
             };
             /** @description DAG-run or step not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Run state changed before resume admission */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Approval was saved but resume admission failed; use the run resume endpoint */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

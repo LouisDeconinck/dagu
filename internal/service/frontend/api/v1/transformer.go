@@ -414,6 +414,11 @@ func ToDAGRunDetails(s ir.DAGRunStatus) api.DAGRunDetails {
 		humanTaskResumePending = ptrOf(true)
 	}
 
+	var approvalPending *bool
+	if approvalResumePending(&s) {
+		approvalPending = ptrOf(true)
+	}
+
 	return api.DAGRunDetails{
 		AgentTasks:             agentTaskProgress(s.Nodes),
 		AgentEvents:            agentTimeline(s.Nodes),
@@ -441,6 +446,7 @@ func ToDAGRunDetails(s ir.DAGRunStatus) api.DAGRunDetails {
 		WorkerId:               ptrOf(s.WorkerID),
 		Process:                toDAGRunProcess(s),
 		HumanTaskResumePending: humanTaskResumePending,
+		ApprovalResumePending:  approvalPending,
 		TriggerType:            toTriggerType(s.TriggerType),
 		TriggerActor:           ptrOf(s.TriggerActor),
 		Preconditions:          ptrOf(preconditions),

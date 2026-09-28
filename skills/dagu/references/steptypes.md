@@ -186,7 +186,9 @@ Sub-DAGs do not inherit parent env vars. Pass values explicitly via `with.params
 
 An `approval:` gate pauses a step after its execution until an operator approves, rejects, or pushes it back. In a root run, approving a gate resumes ready dependent steps while independent manual steps remain waiting, provided no failed, aborted, rejected, or retrying step would be re-run. Steps with build inputs do not by themselves trigger a resume while other manual steps wait.
 
-Root approvals, push-backs, agent interaction responses, and agent-session restarts enqueue their resumes. Keep the scheduler running with `queues.enabled: true`; otherwise an accepted resume remains `Queued`. Use `dagu start-all` for local managed OpenCode sessions so the server and scheduler share the session host. The API's `resumed: true` indicates an accepted resume, not that execution has started.
+Root approvals, push-backs, agent interaction responses, and agent-session restarts resume directly unless the run belongs to an enabled global queue. Global queues require a running scheduler. For queued local managed OpenCode sessions, use `dagu start-all` so the server and scheduler share the session host. Standalone API servers resume unqueued local runs using their own session host; distributed runs retain their owning worker. The API's `resumed: true` indicates an accepted resume, not that execution has started.
+
+Approvals remain saved if resume admission fails. The approval endpoint returns HTTP 503 with `approvalStored: true` and `resumePending: true` in the error details. Use **Retry resume** in the run view or `POST /api/v1/dag-runs/{name}/{dagRunId}/resume` to retry without approving again. This recovery endpoint accepts no approval inputs and is limited to root runs with saved approvals and ready work. Repeated requests while queued or running do not create another execution.
 
 Child approvals and agent interaction responses resume only after every waiting step in the child is resolved. Independent branch resumption is supported only for root runs.
 

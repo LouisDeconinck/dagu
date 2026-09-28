@@ -142,7 +142,6 @@ func TestBrowserAskResumesSameBrowser(t *testing.T) {
 	t.Cleanup(model.Close)
 
 	server := test.SetupServer(t)
-	startResumeQueue(t, server)
 	const dagName = "intg_browser_ask"
 	spec := fmt.Sprintf(`llm:
   provider: local

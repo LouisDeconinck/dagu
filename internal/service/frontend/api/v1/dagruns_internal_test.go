@@ -7,10 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,6 +26,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/computerhost"
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/ir"
+	"github.com/dagucloud/dagu/v2/internal/launcher"
 	"github.com/dagucloud/dagu/v2/internal/persis"
 	"github.com/dagucloud/dagu/v2/internal/persis/file"
 	"github.com/dagucloud/dagu/v2/internal/persis/store"
@@ -502,7 +505,7 @@ func TestResumeWaitingDAGRun(t *testing.T) {
 					}
 					recorder := &retryCoordinatorRecorder{}
 					a := &API{
-						config: &config.Config{}, coordinatorCli: recorder,
+						config: &config.Config{Queues: config.Queues{Enabled: true, Config: []config.QueueConfig{{Name: current.Name, MaxActiveRuns: 1}}}}, coordinatorCli: recorder,
 						dagRunRepository: persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{}),
 						queueStore:       queueStore,
 					}
@@ -511,9 +514,7 @@ func TestResumeWaitingDAGRun(t *testing.T) {
 
 					assert.Empty(t, recorder.dispatched)
 					if tt.wantErr {
-						var apiErr *Error
-						require.ErrorAs(t, err, &apiErr)
-						assert.Equal(t, http.StatusBadRequest, apiErr.HTTPStatus)
+						require.ErrorIs(t, err, queue.ErrRetryStaleLatest)
 						assert.Equal(t, before, current)
 					} else {
 						require.NoError(t, err)
@@ -537,6 +538,206 @@ func TestResumeWaitingDAGRun(t *testing.T) {
 }
 
 // Failed queue admission must leave the approved checkpoint available to retry.
+func TestApprovalResumeFailure(t *testing.T) {
+	for _, humanTask := range []bool{false, true} {
+		t.Run(fmt.Sprintf("HumanTask=%t", humanTask), func(t *testing.T) {
+			status := &ir.DAGRunStatus{
+				Name: "manual-dag", DAGRunID: "run-1", AttemptID: "attempt-1", Status: ir.Waiting,
+				FinishedAt: time.Now().Format(time.RFC3339),
+				Nodes: []*ir.Node{
+					{Step: ir.Step{Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeWaiting},
+					{Step: ir.Step{Name: "after", Depends: []string{"gate"}}, Status: ir.NodeNotStarted},
+					{Step: ir.Step{ID: "human", Name: "human", HumanTask: &ir.HumanTaskConfig{Prompt: "Review"}}, Status: ir.NodeWaiting},
+				},
+			}
+			if !humanTask {
+				status.Nodes = status.Nodes[:2]
+			}
+			backend := &manualCASStore{status: status, attempt: &manualStepAttempt{
+				dag: &ir.DAG{Name: status.Name}, statuses: []*ir.DAGRunStatus{status},
+			}}
+			repository := persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{})
+			cfg := &config.Config{Queues: config.Queues{Enabled: true, Config: []config.QueueConfig{{Name: status.Name, MaxActiveRuns: 1}}}}
+			cfg.Server.Permissions = map[config.Permission]bool{config.PermissionRunDAGs: true}
+			queueStore := &testutil.MockQueueStore{}
+			queueStore.On("Enqueue", mock.Anything, status.Name, queue.QueuePriorityLow, status.DAGRun()).Return(errors.New("temporary queue failure")).Twice()
+			a := &API{config: cfg, dagRunRepository: repository, procRepository: &manualStepProcRepository{},
+				dagRunMgr: runtimepkg.NewManager(repository, nil, cfg), queueStore: queueStore}
+			ctx := auth.WithUser(t.Context(), &auth.User{ID: "reviewer-id", Username: "reviewer"})
+			response, err := a.ApproveDAGRunStep(ctx, openapiv1.ApproveDAGRunStepRequestObject{
+				Name: status.Name, DagRunId: status.DAGRunID, StepName: "gate", Body: &openapiv1.ApproveStepRequest{},
+			})
+			require.NoError(t, err)
+			failure, ok := response.(*openapiv1.ApproveDAGRunStep503JSONResponse)
+			require.True(t, ok)
+			require.NotNil(t, failure.Details)
+			assert.Equal(t, true, (*failure.Details)["approvalStored"])
+			assert.Equal(t, true, (*failure.Details)["resumePending"])
+			assert.Equal(t, ir.NodeSucceeded, status.Nodes[0].Status)
+			assert.Equal(t, "reviewer-id", status.Nodes[0].ApprovedByID)
+			assert.Equal(t, ir.Waiting, status.Status)
+			assert.True(t, approvalResumePending(status))
+			assert.Equal(t, ptrOf(true), ToDAGRunDetails(*status).ApprovalResumePending)
+			approved, err := cloneManualStatus(status)
+			require.NoError(t, err)
+			resume := openapiv1.ResumeDAGRunRequestObject{Name: status.Name, DagRunId: status.DAGRunID}
+			failedResume, err := a.ResumeDAGRun(ctx, resume)
+			require.NoError(t, err)
+			require.IsType(t, &openapiv1.ResumeDAGRun503JSONResponse{}, failedResume)
+			assert.Equal(t, approved, status)
+			queueStore.AssertExpectations(t)
+
+			a.queueStore = store.NewQueueStore(file.NewCollection(t.TempDir()))
+			for range 2 {
+				resumed, err := a.ResumeDAGRun(ctx, resume)
+				require.NoError(t, err)
+				require.IsType(t, &openapiv1.ResumeDAGRun200JSONResponse{}, resumed)
+				assert.True(t, resumed.(*openapiv1.ResumeDAGRun200JSONResponse).Resumed)
+			}
+			assert.Equal(t, ir.Queued, status.Status)
+			assert.Equal(t, approved.Nodes, status.Nodes)
+			assert.False(t, approvalResumePending(status))
+			items, err := a.queueStore.List(ctx, status.Name)
+			require.NoError(t, err)
+			assert.Len(t, items, 1)
+		})
+	}
+}
+
+func TestResumeApprovalStates(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		change          func(*ir.DAGRunStatus)
+		accepted        bool
+		denied          bool
+		workspaceDenied bool
+	}{
+		{name: "Queued", change: func(s *ir.DAGRunStatus) { s.Status = ir.Queued }, accepted: true},
+		{name: "Running", change: func(s *ir.DAGRunStatus) { s.Status = ir.Running }, accepted: true},
+		{name: "Rejected", change: func(s *ir.DAGRunStatus) { s.Status = ir.Rejected }},
+		{name: "Failed", change: func(s *ir.DAGRunStatus) { s.Status = ir.Failed }},
+		{name: "Finished", change: func(s *ir.DAGRunStatus) { s.Status = ir.Succeeded }},
+		{name: "Unapproved", change: func(s *ir.DAGRunStatus) { s.Nodes[0].ApprovedAt = "" }},
+		{name: "Child", change: func(s *ir.DAGRunStatus) { s.Parent = ir.NewDAGRunRef("parent", "parent-run") }},
+		{name: "Blocked", change: func(s *ir.DAGRunStatus) {
+			s.Nodes = append(s.Nodes, &ir.Node{Step: ir.Step{Name: "gate-2", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeWaiting})
+		}},
+		{name: "Permission", change: func(*ir.DAGRunStatus) {}, denied: true},
+		{name: "Workspace", change: func(*ir.DAGRunStatus) {}, workspaceDenied: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			status := &ir.DAGRunStatus{Name: "manual", DAGRunID: "run", AttemptID: "attempt", Status: ir.Waiting,
+				FinishedAt: time.Now().Format(time.RFC3339),
+				Nodes:      []*ir.Node{{Step: ir.Step{Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeSucceeded, ApprovedAt: time.Now().Format(time.RFC3339)}},
+			}
+			tt.change(status)
+			before, err := cloneManualStatus(status)
+			require.NoError(t, err)
+			backend := &manualCASStore{status: status, attempt: &manualStepAttempt{dag: &ir.DAG{Name: status.Name}, statuses: []*ir.DAGRunStatus{status}}}
+			cfg := &config.Config{}
+			cfg.Server.Permissions = map[config.Permission]bool{config.PermissionRunDAGs: !tt.denied}
+			a := &API{config: cfg, procRepository: &manualStepProcRepository{},
+				dagRunRepository: persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{}),
+			}
+			ctx := t.Context()
+			if tt.workspaceDenied {
+				a.authService = struct{ AuthService }{}
+				ctx = auth.WithUser(ctx, &auth.User{Role: auth.RoleViewer})
+			}
+			response, err := a.ResumeDAGRun(ctx, openapiv1.ResumeDAGRunRequestObject{Name: status.Name, DagRunId: status.DAGRunID})
+			if tt.denied {
+				require.ErrorIs(t, err, errPermissionDenied)
+			} else if tt.workspaceDenied {
+				require.ErrorIs(t, err, errInsufficientPermissions)
+			} else {
+				require.NoError(t, err)
+				if tt.accepted {
+					require.IsType(t, &openapiv1.ResumeDAGRun200JSONResponse{}, response)
+				} else {
+					require.IsType(t, &openapiv1.ResumeDAGRun409JSONResponse{}, response)
+				}
+			}
+			assert.Equal(t, before, status)
+		})
+	}
+}
+
+func TestManualResumeLaunchFailure(t *testing.T) {
+	goExecutable, err := exec.LookPath("go")
+	require.NoError(t, err)
+	for _, earlyExit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("EarlyExit=%t", earlyExit), func(t *testing.T) {
+			repository := testutil.NewFileDAGRunRepository(t.TempDir(), persis.DAGRunRepositoryOptions{})
+			dag := &ir.DAG{Name: "manual", BaseConfigWorkspace: new("")}
+			attempt, err := repository.CreateAttempt(t.Context(), dag, time.Now(), "run", persis.DAGRunCreateAttemptOptions{})
+			require.NoError(t, err)
+			status := ir.DAGRunStatus{Name: dag.Name, DAGRunID: "run", AttemptID: attempt.ID(), Status: ir.Waiting,
+				Nodes: []*ir.Node{{Step: ir.Step{Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeSucceeded, ApprovedAt: time.Now().Format(time.RFC3339)}},
+			}
+			require.NoError(t, attempt.Open(t.Context()))
+			require.NoError(t, attempt.Write(t.Context(), status))
+			require.NoError(t, attempt.Close(t.Context()))
+			cfg := &config.Config{Paths: config.PathsConfig{Executable: filepath.Join(t.TempDir(), "missing-dagu")}}
+			if earlyExit {
+				// The Go executable rejects "retry" before a Dagu attempt can start.
+				cfg.Paths.Executable = goExecutable
+			}
+			a := &API{config: cfg, dagRunRepository: repository, subCmdBuilder: launcher.NewSubCmdBuilder(cfg)}
+			err = a.resumeWaitingDAGRun(t.Context(), status.DAGRun(), &status)
+			if earlyExit {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+			require.Eventually(t, func() bool {
+				latest, readErr := attempt.ReadStatusUncached(t.Context())
+				return readErr == nil && latest.Status == ir.Waiting && approvalResumePending(latest)
+			}, 5*time.Second, 10*time.Millisecond)
+			latest, err := attempt.ReadStatusUncached(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, status.Nodes, latest.Nodes)
+		})
+	}
+}
+
+func TestManualResumeDispatch(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("Failure=%t", fail), func(t *testing.T) {
+			status := &ir.DAGRunStatus{Name: "manual", DAGRunID: "run", AttemptID: "attempt", Status: ir.Waiting,
+				Nodes: []*ir.Node{
+					{Step: ir.Step{Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeSucceeded, ApprovedAt: time.Now().Format(time.RFC3339)},
+					{Step: ir.Step{Name: "agent"}, Status: ir.NodeNotStarted, AgentSession: &ir.AgentSession{Provider: "opencode", OwnerWorkerID: "worker-1"}},
+				},
+			}
+			before, err := cloneManualStatus(status)
+			require.NoError(t, err)
+			backend := &manualCASStore{status: status, attempt: &manualStepAttempt{
+				dag: &ir.DAG{Name: status.Name, WorkerSelector: map[string]string{"region": "apac"}}, statuses: []*ir.DAGRunStatus{status},
+			}}
+			recorder := &retryCoordinatorRecorder{}
+			if fail {
+				recorder.dispatchErr = errors.New("coordinator unavailable")
+			}
+			a := &API{config: &config.Config{}, coordinatorCli: recorder,
+				dagRunRepository: persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{}),
+			}
+			err = a.resumeWaitingDAGRun(t.Context(), status.DAGRun(), before)
+			require.Len(t, recorder.dispatched, 1)
+			assert.Equal(t, "worker-1", recorder.dispatched[0].TargetWorkerID)
+			assert.Equal(t, before.Nodes, recorder.dispatched[0].PreviousStatus.Nodes)
+			if fail {
+				require.ErrorIs(t, err, recorder.dispatchErr)
+				assert.Equal(t, before, status)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, ir.Queued, status.Status)
+				require.NoError(t, a.resumeWaitingDAGRun(t.Context(), status.DAGRun(), before))
+				assert.Len(t, recorder.dispatched, 1)
+			}
+		})
+	}
+}
+
 func TestResumeQueueFailure(t *testing.T) {
 	queueErr := errors.New("queue unavailable")
 	for _, missing := range []bool{false, true} {
@@ -560,7 +761,7 @@ func TestResumeQueueFailure(t *testing.T) {
 			}
 			recorder := &retryCoordinatorRecorder{}
 			a := &API{
-				config: &config.Config{}, coordinatorCli: recorder,
+				config: &config.Config{Queues: config.Queues{Enabled: true, Config: []config.QueueConfig{{Name: current.Name, MaxActiveRuns: 1}}}}, coordinatorCli: recorder,
 				dagRunRepository: persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{}),
 			}
 			if !missing {
@@ -1341,17 +1542,20 @@ func TestStepLogLimitWithoutOffsetReadsFromBeginning(t *testing.T) {
 	require.True(t, result.HasMore)
 }
 
-// Root interaction responses and restarts queue their saved session state;
+// Root interaction responses and restarts resume their saved session state;
 // child responses keep waiting while an independent approval is unresolved.
 func TestAgentResumeQueue(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		child   bool
 		restart bool
+		direct  bool
 	}{
 		{name: "Response"},
 		{name: "Restart", restart: true},
 		{name: "ChildResponse", child: true},
+		{name: "DirectResponse", direct: true},
+		{name: "DirectRestart", direct: true, restart: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := ir.NewDAGRunRef("manual-dag", "run-1")
@@ -1380,6 +1584,9 @@ func TestAgentResumeQueue(t *testing.T) {
 			}}
 			repository := persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{})
 			cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
+			if !tt.direct {
+				cfg.Queues = config.Queues{Enabled: true, Config: []config.QueueConfig{{Name: status.Name, MaxActiveRuns: 1}}}
+			}
 			processes := &manualStepProcRepository{}
 			queueStore := store.NewQueueStore(file.NewCollection(t.TempDir()))
 			recorder := &retryCoordinatorRecorder{}
@@ -1405,13 +1612,19 @@ func TestAgentResumeQueue(t *testing.T) {
 			}
 			assert.Equal(t, ir.NodeNotStarted, status.Nodes[0].Status)
 			assert.Equal(t, ir.NodeWaiting, status.Nodes[1].Status)
-			assert.Empty(t, recorder.dispatched)
 			items, err := queueStore.List(t.Context(), status.Name)
 			require.NoError(t, err)
 			if tt.child {
 				assert.Equal(t, ir.Waiting, status.Status)
 				assert.Empty(t, items)
+				assert.Empty(t, recorder.dispatched)
+			} else if tt.direct {
+				assert.Equal(t, ir.Queued, status.Status)
+				assert.Empty(t, items)
+				require.Len(t, recorder.dispatched, 1)
+				assert.Equal(t, ir.Queued, recorder.dispatched[0].PreviousStatus.Status)
 			} else {
+				assert.Empty(t, recorder.dispatched)
 				assert.Equal(t, ir.Queued, status.Status)
 				require.Len(t, items, 1)
 				ref, err := items[0].Data()

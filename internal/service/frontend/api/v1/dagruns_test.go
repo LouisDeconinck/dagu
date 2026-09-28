@@ -958,8 +958,50 @@ steps:
 	).ExpectStatus(http.StatusNotFound).Send(t)
 }
 
+func TestResumeSavedApproval(t *testing.T) {
+	server := test.SetupServer(t, test.WithConfigMutator(func(cfg *config.Config) {
+		cfg.Queues.Enabled = false
+	}))
+	dag := server.DAG(t, `name: saved-approval
+steps:
+  - name: gate
+    run: echo approved
+    approval:
+      prompt: Approve
+  - name: after
+    depends: gate
+    run: echo resumed
+`)
+	ref := seedLatestDAGRunStatus(t, server, dag.DAG, "run-1", ir.Waiting, seedDAGRunStatusOptions{
+		nodeStatuses: map[string]ir.NodeStatus{"gate": ir.NodeSucceeded},
+	})
+	attempt, err := server.DAGRunRepository.FindAttempt(server.Context, ref)
+	require.NoError(t, err)
+	status, err := attempt.ReadStatus(server.Context)
+	require.NoError(t, err)
+	status.Nodes[0].ApprovedAt = stringutil.FormatTime(time.Now().Add(-time.Minute))
+	status.Nodes[0].ApprovedBy = "reviewer"
+	require.NoError(t, attempt.Open(server.Context))
+	require.NoError(t, attempt.Write(server.Context, *status))
+	require.NoError(t, attempt.Close(server.Context))
+	details := requireDAGRunDetails(t, server, ref.Name, ref.ID)
+	require.Equal(t, new(true), details.DagRunDetails.ApprovalResumePending)
+	path := fmt.Sprintf("/api/v1/dag-runs/%s/%s/resume?remoteNode=local", ref.Name, ref.ID)
+	response := server.Client().Post(path, nil).ExpectStatus(http.StatusOK).Send(t)
+	var resumed api.ResumeDAGRun200JSONResponse
+	response.Unmarshal(t, &resumed)
+	require.True(t, resumed.Resumed)
+	latest := waitForStoredDAGRunStatus(t, server, ref.Name, ref.ID, 10*time.Second, func(status *ir.DAGRunStatus) bool {
+		return status.Status == ir.Succeeded
+	})
+	require.Equal(t, status.Nodes[0].ApprovedAt, latest.Nodes[0].ApprovedAt)
+	require.Equal(t, "reviewer", latest.Nodes[0].ApprovedBy)
+}
+
 func TestApproveDAGRunStep(t *testing.T) {
-	server := test.SetupServer(t)
+	server := test.SetupServer(t, test.WithConfigMutator(func(cfg *config.Config) {
+		cfg.Queues.Enabled = false
+	}))
 
 	dagSpec := fmt.Sprintf(`type: graph
 steps:
@@ -1001,15 +1043,7 @@ steps:
 	require.Equal(t, "wait-step", approveBody.StepName)
 	require.True(t, approveBody.Resumed)
 
-	// The server persists the resume until a scheduler consumes it.
-	queued := waitForStoredDAGRunStatus(t, server, "approval_test_dag", startBody.DagRunId, 10*time.Second, func(status *ir.DAGRunStatus) bool {
-		return status.Status == ir.Queued && hasNodeWithStatus(status, "after-wait", ir.NodeNotStarted)
-	})
-	items, err := server.QueueStore.List(t.Context(), queued.Name)
-	require.NoError(t, err)
-	require.Len(t, items, 1)
-	startResumeQueue(t, server)
-
+	// A standalone server resumes directly, even with queues disabled.
 	waitForStoredDAGRunStatus(t, server, "approval_test_dag", startBody.DagRunId, 10*time.Second, func(status *ir.DAGRunStatus) bool {
 		return status.Status == ir.Succeeded
 	})
@@ -1019,7 +1053,6 @@ steps:
 // step on an independent branch still waits for approval.
 func TestApproveDAGRunStepResumesIndependentBranch(t *testing.T) {
 	server := test.SetupServer(t)
-	startResumeQueue(t, server)
 
 	dagSpec := `type: graph
 steps:
@@ -1247,7 +1280,9 @@ func TestPushBackHumanTask(t *testing.T) {
 // Approving the last dependency of a step that waits on a completed human task
 // queues the human-task resume, even while another task keeps waiting.
 func TestApproveQueuesUnblockedHumanTaskJoin(t *testing.T) {
-	server := test.SetupServer(t)
+	server := test.SetupServer(t, test.WithConfigMutator(func(cfg *config.Config) {
+		cfg.Queues = config.Queues{Enabled: true, Config: []config.QueueConfig{{Name: "human_task_approval_join", MaxActiveRuns: 1}}}
+	}))
 
 	dagSpec := `type: graph
 steps:
@@ -1314,7 +1349,9 @@ steps:
 // waits, so it stays stored. Approving the last waiting step must then queue
 // the resume like a human-task checkpoint instead of starting dagu retry.
 func TestApproveQueuesPendingHumanTaskPushBack(t *testing.T) {
-	server := test.SetupServer(t)
+	server := test.SetupServer(t, test.WithConfigMutator(func(cfg *config.Config) {
+		cfg.Queues = config.Queues{Enabled: true, Config: []config.QueueConfig{{Name: "human_task_push_back_approval", MaxActiveRuns: 1}}}
+	}))
 
 	dagSpec := `type: graph
 steps:
