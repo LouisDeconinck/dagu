@@ -91,6 +91,40 @@ func TestGenerateFailsWhenRequiredReferenceIsMissing(t *testing.T) {
 	}
 }
 
+func TestWriteFileWritesGeneratedContent(t *testing.T) {
+	t.Parallel()
+
+	sourceDir := writeSkillTree(t)
+	opts := llmsgen.Options{
+		SourceDir:    sourceDir,
+		SourcePrefix: "skills/dagu",
+	}
+	outputPath := filepath.Join(t.TempDir(), "llms.txt")
+
+	if err := llmsgen.WriteFile(outputPath, opts); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	want, err := llmsgen.Generate(opts)
+	if err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	got, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output file: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatal("WriteFile() content does not match Generate() output")
+	}
+	info, err := os.Stat(outputPath)
+	if err != nil {
+		t.Fatalf("stat output file: %v", err)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("WriteFile() perm = %o, want 644", info.Mode().Perm())
+	}
+}
+
 func writeSkillTree(t *testing.T) string {
 	t.Helper()
 
