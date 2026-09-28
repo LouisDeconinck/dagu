@@ -981,6 +981,7 @@ steps:
 	require.NoError(t, err)
 	status.Nodes[0].ApprovedAt = stringutil.FormatTime(time.Now().Add(-time.Minute))
 	status.Nodes[0].ApprovedBy = "reviewer"
+	status.Log = filepath.Join(t.TempDir(), "run.log")
 	require.NoError(t, attempt.Open(server.Context))
 	require.NoError(t, attempt.Write(server.Context, *status))
 	require.NoError(t, attempt.Close(server.Context))

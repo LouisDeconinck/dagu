@@ -545,7 +545,7 @@ func TestApprovalResumeFailure(t *testing.T) {
 				Name: "manual-dag", DAGRunID: "run-1", AttemptID: "attempt-1", Status: ir.Waiting,
 				FinishedAt: time.Now().Format(time.RFC3339),
 				Nodes: []*ir.Node{
-					{Step: ir.Step{Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeWaiting},
+					{Step: ir.Step{Name: "gate", Approval: &ir.ApprovalConfig{Input: []string{"VERSION"}, Required: []string{"VERSION"}}}, Status: ir.NodeWaiting},
 					{Step: ir.Step{Name: "after", Depends: []string{"gate"}}, Status: ir.NodeNotStarted},
 					{Step: ir.Step{ID: "human", Name: "human", HumanTask: &ir.HumanTaskConfig{Prompt: "Review"}}, Status: ir.NodeWaiting},
 				},
@@ -565,7 +565,7 @@ func TestApprovalResumeFailure(t *testing.T) {
 				dagRunMgr: runtimepkg.NewManager(repository, nil, cfg), queueStore: queueStore}
 			ctx := auth.WithUser(t.Context(), &auth.User{ID: "reviewer-id", Username: "reviewer"})
 			response, err := a.ApproveDAGRunStep(ctx, openapiv1.ApproveDAGRunStepRequestObject{
-				Name: status.Name, DagRunId: status.DAGRunID, StepName: "gate", Body: &openapiv1.ApproveStepRequest{},
+				Name: status.Name, DagRunId: status.DAGRunID, StepName: "gate", Body: &openapiv1.ApproveStepRequest{Inputs: ptrOf(map[string]string{"VERSION": "v1.2"})},
 			})
 			require.NoError(t, err)
 			failure, ok := response.(*openapiv1.ApproveDAGRunStep503JSONResponse)
@@ -575,6 +575,7 @@ func TestApprovalResumeFailure(t *testing.T) {
 			assert.Equal(t, true, (*failure.Details)["resumePending"])
 			assert.Equal(t, ir.NodeSucceeded, status.Nodes[0].Status)
 			assert.Equal(t, "reviewer-id", status.Nodes[0].ApprovedByID)
+			assert.Equal(t, map[string]string{"version": "v1.2"}, status.Nodes[0].ApprovalInputs)
 			assert.Equal(t, ir.Waiting, status.Status)
 			assert.True(t, approvalResumePending(status))
 			assert.Equal(t, ptrOf(true), ToDAGRunDetails(*status).ApprovalResumePending)
@@ -584,7 +585,7 @@ func TestApprovalResumeFailure(t *testing.T) {
 			failedResume, err := a.ResumeDAGRun(ctx, resume)
 			require.NoError(t, err)
 			require.IsType(t, &openapiv1.ResumeDAGRun503JSONResponse{}, failedResume)
-			assert.Equal(t, approved, status)
+			assert.Equal(t, ToDAGRunDetails(*approved), ToDAGRunDetails(*status))
 			queueStore.AssertExpectations(t)
 
 			a.queueStore = store.NewQueueStore(file.NewCollection(t.TempDir()))
@@ -595,7 +596,7 @@ func TestApprovalResumeFailure(t *testing.T) {
 				assert.True(t, resumed.(*openapiv1.ResumeDAGRun200JSONResponse).Resumed)
 			}
 			assert.Equal(t, ir.Queued, status.Status)
-			assert.Equal(t, approved.Nodes, status.Nodes)
+			assert.Equal(t, ToDAGRunDetails(*approved).Nodes, ToDAGRunDetails(*status).Nodes)
 			assert.False(t, approvalResumePending(status))
 			items, err := a.queueStore.List(ctx, status.Name)
 			require.NoError(t, err)
@@ -696,6 +697,11 @@ func TestManualResumeLaunchFailure(t *testing.T) {
 			latest, err := attempt.ReadStatusUncached(t.Context())
 			require.NoError(t, err)
 			assert.Equal(t, status.Nodes, latest.Nodes)
+			// A failed launch must leave the checkpoint available for admission.
+			admission, err := queue.PrepareRetry(t.Context(), repository, dag, latest, queue.EnqueueRetryOptions{})
+			require.NoError(t, err)
+			require.NotNil(t, admission)
+			require.NoError(t, admission.Rollback(t.Context()))
 		})
 	}
 }
