@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 
@@ -95,6 +96,14 @@ func (r *RegistryAuthManager) getAuthConfig(imageName string) (*registry.AuthCon
 		return convertToDockerAuth(authCfg, registryHost)
 	}
 
+	// Fall back to normalized keys so aliases such as
+	// "https://index.docker.io/v1/" resolve to the same registry.
+	for key, authCfg := range r.auths {
+		if matchRegistryKey(key, registryHost) {
+			return convertToDockerAuth(authCfg, registryHost)
+		}
+	}
+
 	// No match found
 	return nil, nil
 }
@@ -106,7 +115,7 @@ func convertToDockerAuth(auth *ir.AuthConfig, serverAddress string) (*registry.A
 	}
 
 	// Check if this is a JSON string
-	if auth.Auth != "" && strings.HasPrefix(auth.Auth, "{") {
+	if auth.Auth != "" && strings.HasPrefix(strings.TrimSpace(auth.Auth), "{") {
 		var dockerAuth registry.AuthConfig
 		if err := json.Unmarshal([]byte(auth.Auth), &dockerAuth); err != nil {
 			// Not JSON, treat as base64 encoded username:password
@@ -158,16 +167,61 @@ func getAuthFromDockerConfig(configJSON string, imageName string) (*registry.Aut
 		return &auth, nil
 	}
 
-	// Try without port if present
-	if strings.Contains(registryHost, ":") {
-		hostWithoutPort, _, _ := strings.Cut(registryHost, ":")
-		if auth, ok := config.Auths[hostWithoutPort]; ok {
+	// Fall back to normalized keys. This covers legacy Docker Hub keys such
+	// as "https://index.docker.io/v1/" and port-stripped matches without
+	// mangling bracketed IPv6 hosts like "[::1]:5000".
+	for key, auth := range config.Auths {
+		if matchRegistryKey(key, registryHost) {
 			auth.ServerAddress = registryHost
 			return &auth, nil
 		}
 	}
 
 	return nil, nil
+}
+
+// matchRegistryKey reports whether a docker config auths key refers to
+// registryHost. Keys are compared in normalized form and also against the
+// registry host with its port removed.
+func matchRegistryKey(key, registryHost string) bool {
+	normalizedKey := normalizeRegistryHost(key)
+	if normalizedKey == normalizeRegistryHost(registryHost) {
+		return true
+	}
+	if hostOnly := registryHostWithoutPort(registryHost); hostOnly != registryHost {
+		return normalizedKey == hostOnly
+	}
+	return false
+}
+
+// normalizeRegistryHost normalizes a registry host or auths key for
+// comparison: it drops any URL scheme and path, unwraps a bare bracketed
+// IPv6 literal, and maps the Docker Hub index host to "docker.io".
+func normalizeRegistryHost(host string) string {
+	host = strings.TrimSpace(host)
+	if i := strings.Index(host, "://"); i >= 0 {
+		host = host[i+3:]
+	}
+	if i := strings.Index(host, "/"); i >= 0 {
+		host = host[:i]
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	if host == "index.docker.io" {
+		return "docker.io"
+	}
+	return host
+}
+
+// registryHostWithoutPort returns registryHost without its port. It handles
+// bracketed IPv6 literals and returns the host unchanged when no port is
+// present.
+func registryHostWithoutPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
 }
 
 // extractRegistry extracts the registry hostname from an image name
