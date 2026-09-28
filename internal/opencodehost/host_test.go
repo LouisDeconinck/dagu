@@ -116,6 +116,20 @@ func TestStartupErrorKeepsValidUTF8(t *testing.T) {
 	assert.True(t, utf8.ValidString(err.Error()))
 }
 
+func TestStartupErrorCapsExpandedUTF8Tail(t *testing.T) {
+	t.Parallel()
+
+	// Invalid bytes expand to multi-byte replacement runes during
+	// normalization, so the cap must apply after it.
+	err := startupError("OpenCode server exited before startup", nil, strings.Repeat("\xff", 1024))
+
+	const prefix = "OpenCode server exited before startup; stderr: "
+	require.True(t, strings.HasPrefix(err.Error(), prefix))
+	stderr := strings.TrimPrefix(err.Error(), prefix)
+	assert.LessOrEqual(t, len(stderr), 1024)
+	assert.True(t, utf8.ValidString(stderr))
+}
+
 func TestSessionAvailableUsesPersistedProviderState(t *testing.T) {
 	t.Parallel()
 

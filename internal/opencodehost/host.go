@@ -266,6 +266,8 @@ func startupError(message string, waitErr error, stderr string) error {
 		details = append(details, "process: "+sanitizeError(waitErr))
 	}
 	stderr = strings.ReplaceAll(strings.TrimSpace(stderr), "\n", " ")
+	// ToValidUTF8 can expand the string, so the tail cap runs after it.
+	stderr = strings.ToValidUTF8(stderr, string(utf8.RuneError))
 	if len(stderr) > 1024 {
 		stderr = stderr[len(stderr)-1024:]
 		// A byte-level tail cut can leave a partial rune at the start.
@@ -273,7 +275,6 @@ func startupError(message string, waitErr error, stderr string) error {
 			stderr = stderr[1:]
 		}
 	}
-	stderr = strings.ToValidUTF8(stderr, string(utf8.RuneError))
 	if stderr != "" {
 		details = append(details, "stderr: "+stderr)
 	}
