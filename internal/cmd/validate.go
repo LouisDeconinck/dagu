@@ -163,25 +163,14 @@ func validateWorkflowData(data []byte) error {
 	if err != nil {
 		return err
 	}
-	if file == nil {
+	if file == nil || len(file.Docs) == 0 {
 		return errors.New("yaml stream must contain at least one DAG document")
 	}
 
 	var errs workflowValidationErrors
 	names := map[string]struct{}{}
-	index := 0
-	for _, doc := range file.Docs {
-		// A document separator after the last document leaves an empty
-		// document in the stream; the loader skips it, so validation must
-		// too, and document indexes count only real DAG documents.
-		if doc == nil || doc.Body == nil {
-			continue
-		}
-		errs.add(validateWorkflowDocument(index, doc, names)...)
-		index++
-	}
-	if index == 0 {
-		return errors.New("yaml stream must contain at least one DAG document")
+	for i, doc := range file.Docs {
+		errs.add(validateWorkflowDocument(i, doc, names)...)
 	}
 	if len(errs) > 0 {
 		return errs
