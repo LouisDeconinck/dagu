@@ -989,6 +989,20 @@ func TestDAGRunListOptionsFromQueryStringRejectsInvalidFilters(t *testing.T) {
 	}
 }
 
+func TestBuildDAGListOptionsRejectsMalformedQuery(t *testing.T) {
+	t.Parallel()
+
+	api := &API{}
+	_, err := api.buildDAGListOptions(context.Background(), "name=%zz")
+	require.Error(t, err)
+
+	apiErr, ok := err.(*Error)
+	require.True(t, ok)
+	require.Equal(t, http.StatusBadRequest, apiErr.HTTPStatus)
+	require.Equal(t, openapiv1.ErrorCodeBadRequest, apiErr.Code)
+	require.Contains(t, apiErr.Message, "invalid query parameters")
+}
+
 func TestGetDAGRunsListDataReturnsBadRequestForInvalidParams(t *testing.T) {
 	t.Parallel()
 
