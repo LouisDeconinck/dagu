@@ -13,7 +13,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -135,7 +134,9 @@ func isLikelyLocalDAGArg(arg string) bool {
 	if strings.HasSuffix(arg, ".yaml") || strings.HasSuffix(arg, ".yml") {
 		return true
 	}
-	if strings.ContainsRune(arg, filepath.Separator) {
+	// Match both separators so a path written for the other OS still reads as
+	// a local file rather than a remote DAG name.
+	if strings.ContainsAny(arg, `/\`) {
 		return true
 	}
 	return false

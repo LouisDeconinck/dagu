@@ -63,6 +63,31 @@ func TestToExecStatus_MapsRemoteFieldsExplicitly(t *testing.T) {
 	assert.Equal(t, []string{"hello"}, status.Nodes[0].Step.Commands[0].Args)
 }
 
+func TestIsLikelyLocalDAGArg(t *testing.T) {
+	t.Parallel()
+
+	// Both separators must read as a local path on any platform; a remote DAG
+	// name never contains either one.
+	tests := []struct {
+		name string
+		arg  string
+		want bool
+	}{
+		{name: "yaml suffix", arg: "workflow.yaml", want: true},
+		{name: "yml suffix", arg: "workflow.yml", want: true},
+		{name: "posix separator", arg: "dir/workflow", want: true},
+		{name: "windows separator", arg: `dir\workflow`, want: true},
+		{name: "remote dag name", arg: "workflow", want: false},
+		{name: "remote dag fileName", arg: "etl-dag", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isLikelyLocalDAGArg(tt.arg))
+		})
+	}
+}
+
 func TestRemoteStatusValueRejectsNone(t *testing.T) {
 	t.Parallel()
 

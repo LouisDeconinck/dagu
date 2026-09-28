@@ -133,6 +133,12 @@ func (s *cliContextStore) ValidateContext(ctx *cliContext) error {
 	if u.Host == "" {
 		return errors.New("server URL must include a host")
 	}
+	if u.User != nil {
+		return errors.New("server URL must not include credentials")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("server URL must not include query parameters or fragments")
+	}
 	if ctx.TimeoutSeconds < 0 {
 		return errors.New("timeout must not be negative")
 	}
