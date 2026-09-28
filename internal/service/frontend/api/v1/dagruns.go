@@ -420,6 +420,9 @@ func applyInlineEnqueueLabels(data []byte, labels string) ([]byte, error) {
 		return data, nil
 	}
 
+	// Normalize once so every reader below sees the same documents.
+	data = yamlutil.ClearEmptyDocumentSeparators(data)
+
 	existingLabels, err := extractInlineEnqueueLabelStrings(data)
 	if err != nil {
 		return nil, err
@@ -439,7 +442,7 @@ func applyInlineEnqueueLabels(data []byte, labels string) ([]byte, error) {
 		return nil, fmt.Errorf("marshal patched document: %w", err)
 	}
 
-	file, err := parser.ParseBytes(yamlutil.ClearEmptyDocumentSeparators(data), 0)
+	file, err := parser.ParseBytes(data, 0)
 	if err != nil {
 		return nil, fmt.Errorf("parse yaml documents: %w", err)
 	}

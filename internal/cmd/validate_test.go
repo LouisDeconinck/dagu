@@ -297,6 +297,32 @@ steps:
 		})
 	})
 
+	t.Run("TrailingEmptyDocumentIsSkipped", func(t *testing.T) {
+		// A trailing `---` leaves an empty document in the stream; the loader
+		// skips it, so validation must not reject the file.
+		dagFile := th.CreateDAGFile(t, "trailing_empty_doc.yaml", `
+steps:
+  - run: echo ok
+---
+`)
+
+		th.RunCommand(t, cmd.Validate(), test.CmdTest{
+			Args: []string{"validate", dagFile},
+		})
+	})
+
+	t.Run("OnlyEmptyDocumentsFails", func(t *testing.T) {
+		dagFile := th.CreateDAGFile(t, "only_empty_docs.yaml", `---
+---
+`)
+
+		err := th.RunCommandWithError(t, cmd.Validate(), test.CmdTest{
+			Args: []string{"validate", dagFile},
+		})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "must contain at least one DAG document")
+	})
+
 	t.Run("InvalidYAML", func(t *testing.T) {
 		// This DAG has invalid YAML syntax
 		dagFile := th.CreateDAGFile(t, "invalid_yaml.yaml", `
