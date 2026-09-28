@@ -258,7 +258,7 @@ func TestEnrichRemoteHistoryStatusPopulatesErrorAndMetadata(t *testing.T) {
 func TestRemoteClientDecodesAPIErrorMessage(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"message":"boom"}`))
@@ -280,7 +280,7 @@ func TestRemoteClientCapsErrorResponseBody(t *testing.T) {
 
 	// Multibyte content makes the byte cap land mid-rune; the surfaced
 	// message must stay bounded and valid UTF-8.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(strings.Repeat("界", maxRemoteErrorBodyBytes)))
 	}))
