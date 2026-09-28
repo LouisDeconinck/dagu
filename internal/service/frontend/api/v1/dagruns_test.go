@@ -6,6 +6,7 @@ package api_test
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,11 +26,31 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/persis"
+	"github.com/dagucloud/dagu/v2/internal/service/scheduler"
 	"github.com/dagucloud/dagu/v2/internal/test"
 	"github.com/dagucloud/dagu/v2/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// startResumeQueue runs the scheduler's queue consumer against the API stores.
+func startResumeQueue(t *testing.T, server test.Server) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(server.Context)
+	processor := scheduler.NewQueueProcessor(server.QueueStore, server.DAGRunRepository, server.ProcRepository,
+		scheduler.NewDAGExecutor(nil, server.SubCmdBuilder, server.Config.DefaultExecMode, server.Config.Paths.BaseConfig),
+		server.Config.Queues,
+	)
+	watcher := server.QueueStore.QueueWatcher(ctx)
+	notify, err := watcher.Start(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		cancel()
+		processor.Stop()
+		watcher.Stop(server.Context)
+	})
+	processor.Start(ctx, notify)
+}
 
 func dagRunEventuallyTimeout(base time.Duration) time.Duration {
 	if runtime.GOOS == "windows" {
@@ -980,7 +1001,15 @@ steps:
 	require.Equal(t, "wait-step", approveBody.StepName)
 	require.True(t, approveBody.Resumed)
 
-	// Wait for DAG to complete
+	// The server persists the resume until a scheduler consumes it.
+	queued := waitForStoredDAGRunStatus(t, server, "approval_test_dag", startBody.DagRunId, 10*time.Second, func(status *ir.DAGRunStatus) bool {
+		return status.Status == ir.Queued && hasNodeWithStatus(status, "after-wait", ir.NodeNotStarted)
+	})
+	items, err := server.QueueStore.List(t.Context(), queued.Name)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	startResumeQueue(t, server)
+
 	waitForStoredDAGRunStatus(t, server, "approval_test_dag", startBody.DagRunId, 10*time.Second, func(status *ir.DAGRunStatus) bool {
 		return status.Status == ir.Succeeded
 	})
@@ -990,6 +1019,7 @@ steps:
 // step on an independent branch still waits for approval.
 func TestApproveDAGRunStepResumesIndependentBranch(t *testing.T) {
 	server := test.SetupServer(t)
+	startResumeQueue(t, server)
 
 	dagSpec := `type: graph
 steps:
@@ -1273,6 +1303,11 @@ steps:
 	waitForStoredDAGRunStatus(t, server, "human_task_approval_join", startBody.DagRunId, 10*time.Second, func(status *ir.DAGRunStatus) bool {
 		return status.Status == ir.Queued && hasNodeWithStatus(status, "other", ir.NodeWaiting)
 	})
+	startResumeQueue(t, server)
+	waitForStoredDAGRunStatus(t, server, "human_task_approval_join", startBody.DagRunId, 10*time.Second, func(status *ir.DAGRunStatus) bool {
+		return status.Status == ir.Waiting && hasNodeWithStatus(status, "join", ir.NodeSucceeded) &&
+			hasNodeWithStatus(status, "other", ir.NodeWaiting)
+	})
 }
 
 // A push-back cannot resume while a failed step would re-run and another step
@@ -1344,6 +1379,7 @@ steps:
 
 func TestManualStepActionsRejectWhileDAGRunIsRunning(t *testing.T) {
 	server := test.SetupServer(t)
+	startResumeQueue(t, server)
 	release := newHoldFile(t)
 
 	dagName := "approval_running_dag"
@@ -1454,11 +1490,19 @@ steps:
 
 ---
 name: child_dag
+type: graph
 steps:
   - name: child-wait
     run: "exit 0"
     approval:
-      prompt: "Approve child"`, indentCommandBlock(holdUntilFileExistsCommand(release), 6))
+      prompt: "Approve child"
+  - name: other-wait
+    run: "exit 0"
+    approval:
+      prompt: "Approve other branch"
+  - name: after-child
+    depends: [child-wait]
+    run: "exit 0"`, indentCommandBlock(holdUntilFileExistsCommand(release), 6))
 
 	_ = server.Client().Post("/api/v1/dags", api.CreateNewDAGJSONRequestBody{
 		Name: dagName,
@@ -1488,7 +1532,8 @@ steps:
 
 	waitForStoredSubDAGRunStatus(t, server, rootRef, subDAGRunID, 10*time.Second, func(status *ir.DAGRunStatus) bool {
 		return status.Status == ir.Waiting &&
-			hasNodeWithStatus(status, "child-wait", ir.NodeWaiting)
+			hasNodeWithStatus(status, "child-wait", ir.NodeWaiting) &&
+			hasNodeWithStatus(status, "other-wait", ir.NodeWaiting)
 	})
 
 	resp := server.Client().Post(
@@ -1548,6 +1593,18 @@ steps:
 
 	var approveBody api.ApproveSubDAGRunStep200JSONResponse
 	approveResp.Unmarshal(t, &approveBody)
+	require.False(t, approveBody.Resumed)
+
+	// Child approvals remain waiting until every manual gate is resolved.
+	waitForStoredSubDAGRunStatus(t, server, rootRef, subDAGRunID, 10*time.Second, func(status *ir.DAGRunStatus) bool {
+		return status.Status == ir.Waiting && hasNodeWithStatus(status, "child-wait", ir.NodeSucceeded) &&
+			hasNodeWithStatus(status, "other-wait", ir.NodeWaiting) && hasNodeWithStatus(status, "after-child", ir.NodeNotStarted)
+	})
+	approveResp = server.Client().Post(
+		fmt.Sprintf("/api/v1/dag-runs/%s/%s/sub-dag-runs/%s/steps/other-wait/approve", dagName, startBody.DagRunId, subDAGRunID),
+		api.ApproveStepRequest{},
+	).ExpectStatus(http.StatusOK).Send(t)
+	approveResp.Unmarshal(t, &approveBody)
 	require.True(t, approveBody.Resumed)
 
 	waitForStoredSubDAGRunStatus(t, server, rootRef, subDAGRunID, 10*time.Second, func(status *ir.DAGRunStatus) bool {
@@ -1565,6 +1622,7 @@ func TestApproveDAGRunStepResumeRefreshesProcessIdentity(t *testing.T) {
 		cfg.Proc.HeartbeatInterval = procHeartbeatInterval
 		cfg.Proc.StaleThreshold = procStaleThreshold
 	}))
+	startResumeQueue(t, server)
 	release := newHoldFile(t)
 
 	dagName := "approval_long_resume_dag"

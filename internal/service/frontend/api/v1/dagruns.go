@@ -1364,7 +1364,7 @@ func (a *API) ApproveDAGRunStep(ctx context.Context, request api.ApproveDAGRunSt
 	shouldResume := !hasWaitingSteps(updated.Nodes) || humantask.ResumePending(updated) ||
 		humantask.UnblockedNodeReady(updated)
 	if shouldResume {
-		if resumeErr := a.resumeWaitingDAGRun(ctx, ref, request.DagRunId, updated); resumeErr != nil {
+		if resumeErr := a.resumeWaitingDAGRun(ctx, ref, updated); resumeErr != nil {
 			logger.Error(ctx, "Failed to resume DAG", tag.Error(resumeErr))
 			shouldResume = false
 		} else {
@@ -1491,9 +1491,8 @@ func (a *API) ApproveSubDAGRunStep(ctx context.Context, request api.ApproveSubDA
 		}, nil
 	}
 
-	// Resume the sub-DAG if no more steps wait, or if the approval unblocked a
-	// step while other manual steps keep waiting.
-	shouldResume := !hasWaitingSteps(updated.Nodes) || humantask.UnblockedNodeReady(updated)
+	// Child runs resume directly only after every manual step is resolved.
+	shouldResume := !hasWaitingSteps(updated.Nodes)
 	if shouldResume {
 		if err := a.resumeSubDAGRun(ctx, rootRef, request.SubDAGRunId); err != nil {
 			logger.Error(ctx, "Failed to resume sub DAG", tag.Error(err))
@@ -1931,7 +1930,7 @@ func (a *API) PushBackDAGRunStep(ctx context.Context, request api.PushBackDAGRun
 	}
 	approvalIteration := updatedNode.ApprovalIteration
 
-	if err := a.resumeWaitingDAGRun(ctx, ref, request.DagRunId, updated); err != nil {
+	if err := a.resumeWaitingDAGRun(ctx, ref, updated); err != nil {
 		logger.Error(ctx, "Failed to resume DAG after push-back, rolling back", tag.Error(err))
 		if rollbackErr := a.rollbackPushBack(ctx, ref, applied, original); rollbackErr != nil {
 			logger.Error(ctx, "Failed to rollback push-back state", tag.Error(rollbackErr))
@@ -3958,15 +3957,9 @@ func applyRejection(ctx context.Context, node *ir.Node, status *ir.DAGRunStatus,
 	status.FinishedAt = time.Now().Format(time.RFC3339)
 }
 
-// resumeWaitingDAGRun resumes a waiting run after a manual action. It uses a
-// direct dagu retry unless a human-task checkpoint makes that path reject
-// (humantask.ValidateRetry) or a push-back still waits to run; those resumes
-// are queued like human-task resumes, which run from Queued instead.
-func (a *API) resumeWaitingDAGRun(ctx context.Context, ref ir.DAGRunRef, dagRunID string, status *ir.DAGRunStatus) error {
-	directOK := humantask.ValidateRetry(status, "") == nil && !humantask.PushBackPending(status)
-	if directOK {
-		return a.resumeDAGRun(ctx, ref, dagRunID)
-	}
+// resumeWaitingDAGRun queues a manual resume only while its attempt and status
+// still match the accepted action.
+func (a *API) resumeWaitingDAGRun(ctx context.Context, ref ir.DAGRunRef, status *ir.DAGRunStatus) error {
 	if a.queueStore == nil {
 		return errors.New("queue store is not configured")
 	}
@@ -3979,25 +3972,6 @@ func (a *API) resumeWaitingDAGRun(ctx context.Context, ref ir.DAGRunRef, dagRunI
 		return fmt.Errorf("read DAG: %w", err)
 	}
 	return a.enqueueRetry(ctx, status, dag)
-}
-
-func (a *API) resumeDAGRun(ctx context.Context, ref ir.DAGRunRef, dagRunID string) error {
-	attempt, err := a.dagRunRepository.FindAttempt(ctx, ref)
-	if err != nil {
-		return fmt.Errorf("find attempt: %w", err)
-	}
-
-	dag, err := attempt.ReadDAG(ctx)
-	if err != nil {
-		return fmt.Errorf("read DAG: %w", err)
-	}
-
-	status, err := attempt.ReadStatus(ctx)
-	if err != nil {
-		return fmt.Errorf("read status: %w", err)
-	}
-
-	return a.resumeManagedAttempt(ctx, dag, status, dagRunID)
 }
 
 func (a *API) resumeSubDAGRun(ctx context.Context, rootRef ir.DAGRunRef, subDAGRunID string) error {

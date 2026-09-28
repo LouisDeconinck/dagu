@@ -380,10 +380,10 @@ func (a *API) respondAgentInteraction(ctx context.Context, root ir.DAGRunRef, su
 	if err != nil {
 		return api.AgentInteractionResponse{}, err
 	}
-	resumed := !hasWaitingSteps(updated.Nodes) || humantask.UnblockedNodeReady(updated)
+	resumed := !hasWaitingSteps(updated.Nodes) || (subDAGRunID == "" && humantask.UnblockedNodeReady(updated))
 	if resumed {
 		if subDAGRunID == "" {
-			err = a.resumeWaitingDAGRun(ctx, root, root.ID, updated)
+			err = a.resumeWaitingDAGRun(ctx, root, updated)
 		} else {
 			err = a.resumeSubDAGRun(ctx, root, subDAGRunID)
 		}
@@ -442,7 +442,7 @@ func (a *API) restartAgentSession(ctx context.Context, root ir.DAGRunRef, subDAG
 		return api.AgentSessionRestartResponse{}, err
 	}
 	if subDAGRunID == "" {
-		err = a.resumeWaitingDAGRun(ctx, root, root.ID, updated)
+		err = a.resumeWaitingDAGRun(ctx, root, updated)
 	} else {
 		err = a.resumeSubDAGRun(ctx, root, subDAGRunID)
 	}

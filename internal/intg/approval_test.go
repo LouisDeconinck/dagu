@@ -4,6 +4,7 @@
 package intg_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,10 +17,30 @@ import (
 	api "github.com/dagucloud/dagu/v2/api/v1"
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
 	"github.com/dagucloud/dagu/v2/internal/ir"
+	"github.com/dagucloud/dagu/v2/internal/service/scheduler"
 	"github.com/dagucloud/dagu/v2/internal/test"
 	"github.com/dagucloud/dagu/v2/internal/test/intgharness"
 	"github.com/stretchr/testify/require"
 )
+
+// startResumeQueue runs the scheduler's queue consumer against the API stores.
+func startResumeQueue(t *testing.T, server test.Server) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(server.Context)
+	processor := scheduler.NewQueueProcessor(server.QueueStore, server.DAGRunRepository, server.ProcRepository,
+		scheduler.NewDAGExecutor(nil, server.SubCmdBuilder, server.Config.DefaultExecMode, server.Config.Paths.BaseConfig),
+		server.Config.Queues,
+	)
+	watcher := server.QueueStore.QueueWatcher(ctx)
+	notify, err := watcher.Start(ctx)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		cancel()
+		processor.Stop()
+		watcher.Stop(server.Context)
+	})
+	processor.Start(ctx, notify)
+}
 
 func TestWaitStepApproval(t *testing.T) {
 	t.Run("WaitStepEntersWaitStatus", func(t *testing.T) {
@@ -346,6 +367,8 @@ func TestApprovalPushBackExposesHistoricalFeedbackEnvAcrossRewoundScope(t *testi
 		cfg.Server.Auth.Basic.Username = username
 		cfg.Server.Auth.Basic.Password = password
 	}))
+
+	startResumeQueue(t, server)
 
 	dagName := "intg_pushback_scope_env"
 	snippet := indentTestScript(pushBackSnapshotScript(), 6)

@@ -33,6 +33,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/testutil"
 	"github.com/goccy/go-yaml"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -448,74 +449,136 @@ func TestRollbackPushBackIgnoresCancellationAndPreservesConcurrentUnrelatedNodeC
 // when the replacement is a new attempt that is also waiting.
 func TestResumeWaitingDAGRun(t *testing.T) {
 	const attemptID = "attempt-1"
-	for _, tt := range []struct {
-		name      string
-		status    ir.Status
-		attemptID string
-		wantErr   bool
-	}{
-		{name: "Ready", status: ir.Waiting, attemptID: attemptID},
-		{name: "Rejected", status: ir.Rejected, attemptID: attemptID, wantErr: true},
-		{name: "Running", status: ir.Running, attemptID: attemptID, wantErr: true},
-		{name: "NewAttempt", status: ir.Waiting, attemptID: "attempt-2", wantErr: true},
-		{name: "AlreadyQueued", status: ir.Queued, attemptID: attemptID},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, humanTask := range []bool{false, true} {
+		name := "ApprovalOnly"
+		if humanTask {
+			name = "HumanTask"
+		}
+		t.Run(name, func(t *testing.T) {
+			for _, tt := range []struct {
+				name      string
+				status    ir.Status
+				attemptID string
+				wantErr   bool
+			}{
+				{name: "Ready", status: ir.Waiting, attemptID: attemptID},
+				{name: "Rejected", status: ir.Rejected, attemptID: attemptID, wantErr: true},
+				{name: "Running", status: ir.Running, attemptID: attemptID, wantErr: true},
+				{name: "NewAttempt", status: ir.Waiting, attemptID: "attempt-2", wantErr: true},
+				{name: "AlreadyQueued", status: ir.Queued, attemptID: attemptID},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					approved := &ir.DAGRunStatus{
+						Name: "manual-dag", DAGRunID: "run-1", AttemptID: attemptID, Status: ir.Waiting,
+						Nodes: []*ir.Node{
+							{Step: ir.Step{Name: "gate_a", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeSucceeded},
+							{Step: ir.Step{Name: "gate_b", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeWaiting},
+							{Step: ir.Step{Name: "after_a", Depends: []string{"gate_a"}}, Status: ir.NodeNotStarted},
+						},
+					}
+					if humanTask {
+						approved.Nodes = append(approved.Nodes, &ir.Node{
+							Step: ir.Step{Name: "human", HumanTask: &ir.HumanTaskConfig{Prompt: "Review"}}, Status: ir.NodeWaiting,
+						})
+					}
+					current, err := cloneManualStatus(approved)
+					require.NoError(t, err)
+					current.Status = tt.status
+					current.AttemptID = tt.attemptID
+					if tt.status == ir.Rejected {
+						applyRejection(t.Context(), current.Nodes[1], current, nil)
+					}
+					before, err := cloneManualStatus(current)
+					require.NoError(t, err)
+					backend := &manualCASStore{
+						status: current,
+						attempt: &manualStepAttempt{
+							dag: &ir.DAG{Name: current.Name, WorkerSelector: map[string]string{"region": "apac"}}, statuses: []*ir.DAGRunStatus{current},
+						},
+					}
+					queueStore := store.NewQueueStore(file.NewCollection(t.TempDir()))
+					if tt.status == ir.Queued {
+						require.NoError(t, queueStore.Enqueue(t.Context(), current.Name, queue.QueuePriorityLow, current.DAGRun()))
+					}
+					recorder := &retryCoordinatorRecorder{}
+					a := &API{
+						config: &config.Config{}, coordinatorCli: recorder,
+						dagRunRepository: persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{}),
+						queueStore:       queueStore,
+					}
+
+					err = a.resumeWaitingDAGRun(t.Context(), approved.DAGRun(), approved)
+
+					assert.Empty(t, recorder.dispatched)
+					if tt.wantErr {
+						var apiErr *Error
+						require.ErrorAs(t, err, &apiErr)
+						assert.Equal(t, http.StatusBadRequest, apiErr.HTTPStatus)
+						assert.Equal(t, before, current)
+					} else {
+						require.NoError(t, err)
+						assert.Equal(t, ir.Queued, current.Status)
+						assert.Equal(t, before.Nodes, current.Nodes)
+					}
+					items, err := queueStore.List(t.Context(), current.Name)
+					require.NoError(t, err)
+					if tt.wantErr {
+						assert.Empty(t, items)
+					} else {
+						require.Len(t, items, 1)
+						ref, err := items[0].Data()
+						require.NoError(t, err)
+						assert.Equal(t, approved.DAGRun(), *ref)
+					}
+				})
+			}
+		})
+	}
+}
+
+// Failed queue admission must leave the approved checkpoint available to retry.
+func TestResumeQueueFailure(t *testing.T) {
+	queueErr := errors.New("queue unavailable")
+	for _, missing := range []bool{false, true} {
+		name := "Unavailable"
+		if missing {
+			name = "Missing"
+		}
+		t.Run(name, func(t *testing.T) {
 			approved := &ir.DAGRunStatus{
-				Name: "manual-dag", DAGRunID: "run-1", AttemptID: attemptID, Status: ir.Waiting,
-				Nodes: []*ir.Node{
-					{Step: ir.Step{Name: "gate_a", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeSucceeded},
-					{Step: ir.Step{Name: "gate_b", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeWaiting},
-					{Step: ir.Step{Name: "human", HumanTask: &ir.HumanTaskConfig{Prompt: "Review"}}, Status: ir.NodeWaiting},
-					{Step: ir.Step{Name: "after_a", Depends: []string{"gate_a"}}, Status: ir.NodeNotStarted},
-				},
+				Name: "manual-dag", DAGRunID: "run-1", AttemptID: "attempt-1", Status: ir.Waiting,
+				Nodes: []*ir.Node{{Step: ir.Step{Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeSucceeded}},
 			}
 			current, err := cloneManualStatus(approved)
-			require.NoError(t, err)
-			current.Status = tt.status
-			current.AttemptID = tt.attemptID
-			if tt.status == ir.Rejected {
-				applyRejection(t.Context(), current.Nodes[1], current, nil)
-			}
-			before, err := cloneManualStatus(current)
 			require.NoError(t, err)
 			backend := &manualCASStore{
 				status: current,
 				attempt: &manualStepAttempt{
-					dag: &ir.DAG{Name: current.Name}, statuses: []*ir.DAGRunStatus{current},
+					dag:      &ir.DAG{Name: current.Name, WorkerSelector: map[string]string{"region": "apac"}},
+					statuses: []*ir.DAGRunStatus{current},
 				},
 			}
-			queueStore := store.NewQueueStore(file.NewCollection(t.TempDir()))
-			if tt.status == ir.Queued {
-				require.NoError(t, queueStore.Enqueue(t.Context(), current.Name, queue.QueuePriorityLow, current.DAGRun()))
-			}
+			recorder := &retryCoordinatorRecorder{}
 			a := &API{
+				config: &config.Config{}, coordinatorCli: recorder,
 				dagRunRepository: persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{}),
-				queueStore:       queueStore,
+			}
+			if !missing {
+				queueStore := &testutil.MockQueueStore{}
+				queueStore.On("Enqueue", mock.Anything, approved.Name, queue.QueuePriorityLow, approved.DAGRun()).Return(queueErr).Once()
+				t.Cleanup(func() { queueStore.AssertExpectations(t) })
+				a.queueStore = queueStore
 			}
 
-			err = a.resumeWaitingDAGRun(t.Context(), approved.DAGRun(), approved.DAGRunID, approved)
+			err = a.resumeWaitingDAGRun(t.Context(), approved.DAGRun(), approved)
 
-			if tt.wantErr {
-				var apiErr *Error
-				require.ErrorAs(t, err, &apiErr)
-				assert.Equal(t, http.StatusBadRequest, apiErr.HTTPStatus)
-				assert.Equal(t, before, current)
+			if missing {
+				require.ErrorContains(t, err, "queue store is not configured")
 			} else {
-				require.NoError(t, err)
-				assert.Equal(t, ir.Queued, current.Status)
-				assert.Equal(t, before.Nodes, current.Nodes)
+				require.ErrorIs(t, err, queueErr)
 			}
-			items, err := queueStore.List(t.Context(), current.Name)
-			require.NoError(t, err)
-			if tt.wantErr {
-				assert.Empty(t, items)
-			} else {
-				require.Len(t, items, 1)
-				ref, err := items[0].Data()
-				require.NoError(t, err)
-				assert.Equal(t, approved.DAGRun(), *ref)
-			}
+			assert.Equal(t, approved, current)
+			assert.Empty(t, recorder.dispatched)
 		})
 	}
 }
@@ -527,6 +590,10 @@ type manualCASStore struct {
 }
 
 func (s *manualCASStore) FindAttempt(context.Context, ir.DAGRunRef) (dagrun.Attempt, error) {
+	return s.attempt, nil
+}
+
+func (s *manualCASStore) FindSubAttempt(context.Context, ir.DAGRunRef, string) (dagrun.Attempt, error) {
 	return s.attempt, nil
 }
 
@@ -1272,6 +1339,87 @@ func TestStepLogLimitWithoutOffsetReadsFromBeginning(t *testing.T) {
 	require.Equal(t, "one\ntwo", result.StdoutContent)
 	require.Equal(t, 2, result.LineCount)
 	require.True(t, result.HasMore)
+}
+
+// Root interaction responses and restarts queue their saved session state;
+// child responses keep waiting while an independent approval is unresolved.
+func TestAgentResumeQueue(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		child   bool
+		restart bool
+	}{
+		{name: "Response"},
+		{name: "Restart", restart: true},
+		{name: "ChildResponse", child: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := ir.NewDAGRunRef("manual-dag", "run-1")
+			status := &ir.DAGRunStatus{
+				Name: root.Name, DAGRunID: root.ID, AttemptID: "attempt-1", Status: ir.Waiting,
+				FinishedAt: time.Now().Format(time.RFC3339),
+				Nodes: []*ir.Node{
+					{Step: ir.Step{Name: "agent"}, Status: ir.NodeWaiting, AgentSession: &ir.AgentSession{
+						Provider: computerhost.AgentProvider, Generation: 1, State: ir.AgentSessionWaiting,
+						Interactions: []ir.AgentInteraction{{ID: "ask-1", Kind: ir.AgentInteractionQuestion, Status: ir.AgentInteractionPending,
+							Questions: []ir.AgentQuestion{{Question: "Continue?", Custom: true}},
+						}},
+					}},
+					{Step: ir.Step{Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeWaiting},
+				},
+			}
+			subRunID := ""
+			if tt.child {
+				subRunID = "child-1"
+				status.Name, status.DAGRunID = "child", subRunID
+				status.Root, status.Parent = root, root
+			}
+			backend := &manualCASStore{status: status, attempt: &manualStepAttempt{
+				dag:      &ir.DAG{Name: status.Name, BaseConfigWorkspace: new(""), WorkerSelector: map[string]string{"region": "apac"}},
+				statuses: []*ir.DAGRunStatus{status},
+			}}
+			repository := persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{})
+			cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
+			processes := &manualStepProcRepository{}
+			queueStore := store.NewQueueStore(file.NewCollection(t.TempDir()))
+			recorder := &retryCoordinatorRecorder{}
+			a := &API{
+				config: cfg, dagRunRepository: repository, procRepository: processes, queueStore: queueStore,
+				dagRunMgr: runtimepkg.NewManager(repository, nil, cfg), coordinatorCli: recorder,
+			}
+			require.NoError(t, computerhost.NewStore(filepath.Join(cfg.Paths.DataDir, computerhost.DataDirName)).Save(computerhost.Record{
+				DAGRunID: root.ID, StepName: "agent", Deadline: time.Now().Add(time.Hour),
+			}))
+
+			if tt.restart {
+				response, err := a.restartAgentSession(t.Context(), root, "", "agent")
+				require.NoError(t, err)
+				require.True(t, response.Resumed)
+				assert.Equal(t, 2, response.Generation)
+			} else {
+				answers := [][]string{{"yes"}}
+				response, err := a.respondAgentInteraction(t.Context(), root, subRunID, "agent", "ask-1", &openapiv1.AgentInteractionResponseRequest{Answers: &answers})
+				require.NoError(t, err)
+				assert.Equal(t, !tt.child, response.Resumed)
+				assert.Equal(t, answers, status.Nodes[0].AgentSession.Interactions[0].Answers)
+			}
+			assert.Equal(t, ir.NodeNotStarted, status.Nodes[0].Status)
+			assert.Equal(t, ir.NodeWaiting, status.Nodes[1].Status)
+			assert.Empty(t, recorder.dispatched)
+			items, err := queueStore.List(t.Context(), status.Name)
+			require.NoError(t, err)
+			if tt.child {
+				assert.Equal(t, ir.Waiting, status.Status)
+				assert.Empty(t, items)
+			} else {
+				assert.Equal(t, ir.Queued, status.Status)
+				require.Len(t, items, 1)
+				ref, err := items[0].Data()
+				require.NoError(t, err)
+				assert.Equal(t, root, *ref)
+			}
+		})
+	}
 }
 
 func TestApplyAgentInteractionResponse(t *testing.T) {
