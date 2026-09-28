@@ -12,6 +12,7 @@ import (
 	"log"
 	"maps"
 	"net"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -1183,6 +1184,21 @@ func (l *ConfigLoader) loadServerDefaults(cfg *Config, def Definition) {
 		}
 		l.warnings = append(l.warnings, warning)
 		break
+	}
+	for _, origin := range cfg.Server.CORSAllowedOrigins {
+		o := strings.TrimSpace(origin)
+		if o == "" || strings.Contains(o, "*") {
+			continue
+		}
+		u, err := url.Parse(o)
+		if err != nil || u.Host == "" {
+			continue
+		}
+		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			l.warnings = append(l.warnings, fmt.Sprintf(
+				"cors_allowed_origins entry %q includes a path or query; only the origin (scheme://host[:port]) is enforced",
+				origin))
+		}
 	}
 
 	cfg.Server.Metrics = MetricsAccessPrivate
