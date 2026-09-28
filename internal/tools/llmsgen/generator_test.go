@@ -6,6 +6,7 @@ package llmsgen_test
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -120,8 +121,12 @@ func TestWriteFileWritesGeneratedContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat output file: %v", err)
 	}
-	if info.Mode().Perm() != 0o644 {
-		t.Fatalf("WriteFile() perm = %o, want 644", info.Mode().Perm())
+	wantPerm := os.FileMode(0o644)
+	if runtime.GOOS == "windows" {
+		wantPerm = 0o666
+	}
+	if info.Mode().Perm() != wantPerm {
+		t.Fatalf("WriteFile() perm = %o, want %o", info.Mode().Perm(), wantPerm)
 	}
 }
 
