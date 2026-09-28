@@ -6,7 +6,9 @@ package main
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/cmd"
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
@@ -112,6 +114,17 @@ func TestRootCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestEmbeddedZoneinfo(t *testing.T) {
+	// Named zones (CRON_TZ, tz) resolve via the embedded time/tzdata when the
+	// host has no system database. Pointing ZONEINFO at a missing directory
+	// exercises that fallback on hosts without /usr/share/zoneinfo.
+	t.Setenv("ZONEINFO", filepath.Join(t.TempDir(), "missing"))
+
+	loc, err := time.LoadLocation("Asia/Tokyo")
+	assert.NoError(t, err)
+	assert.Equal(t, "Asia/Tokyo", loc.String())
 }
 
 func TestMainFunction(t *testing.T) {

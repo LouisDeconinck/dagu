@@ -5,6 +5,7 @@ package main
 
 import (
 	"os"
+	_ "time/tzdata" // Embed zoneinfo for hosts without a system database (e.g. Windows)
 
 	"github.com/dagucloud/dagu/v2/internal/cmd"
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
