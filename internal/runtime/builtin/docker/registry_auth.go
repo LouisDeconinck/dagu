@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/dagucloud/dagu/v2/internal/ir"
@@ -98,14 +99,46 @@ func (r *RegistryAuthManager) getAuthConfig(imageName string) (*registry.AuthCon
 
 	// Fall back to normalized keys so aliases such as
 	// "https://index.docker.io/v1/" resolve to the same registry.
-	for key, authCfg := range r.auths {
+	return resolveAuthMatch(registryHost, r.auths, func(authCfg *ir.AuthConfig) (*registry.AuthConfig, error) {
+		return convertToDockerAuth(authCfg, registryHost)
+	})
+}
+
+// resolveAuthMatch returns the auth config for registryHost among the auths
+// keys that match it in normalized form. Several keys can alias the same
+// registry (for example "index.docker.io" and "https://index.docker.io/v1/"),
+// so matches are visited in sorted key order: identical credentials collapse
+// into a single result, while matches carrying different credentials are a
+// configuration error rather than a nondeterministic pick from map
+// iteration. convert maps an auths entry to its docker auth representation.
+func resolveAuthMatch[V any](registryHost string, auths map[string]V, convert func(V) (*registry.AuthConfig, error)) (*registry.AuthConfig, error) {
+	matching := make([]string, 0, len(auths))
+	for key := range auths {
 		if matchRegistryKey(key, registryHost) {
-			return convertToDockerAuth(authCfg, registryHost)
+			matching = append(matching, key)
 		}
 	}
+	slices.Sort(matching)
 
-	// No match found
-	return nil, nil
+	var result *registry.AuthConfig
+	var resultKey string
+	for _, key := range matching {
+		auth, err := convert(auths[key])
+		if err != nil {
+			return nil, err
+		}
+		if auth == nil {
+			continue
+		}
+		if result == nil {
+			result, resultKey = auth, key
+			continue
+		}
+		if *auth != *result {
+			return nil, fmt.Errorf("conflicting auth entries for registry %q: %q and %q provide different credentials", registryHost, resultKey, key)
+		}
+	}
+	return result, nil
 }
 
 // convertToDockerAuth converts our AuthConfig to Docker's registry.AuthConfig
@@ -170,14 +203,10 @@ func getAuthFromDockerConfig(configJSON string, imageName string) (*registry.Aut
 	// Fall back to normalized keys. This covers legacy Docker Hub keys such
 	// as "https://index.docker.io/v1/" and port-stripped matches without
 	// mangling bracketed IPv6 hosts like "[::1]:5000".
-	for key, auth := range config.Auths {
-		if matchRegistryKey(key, registryHost) {
-			auth.ServerAddress = registryHost
-			return &auth, nil
-		}
-	}
-
-	return nil, nil
+	return resolveAuthMatch(registryHost, config.Auths, func(auth registry.AuthConfig) (*registry.AuthConfig, error) {
+		auth.ServerAddress = registryHost
+		return &auth, nil
+	})
 }
 
 // matchRegistryKey reports whether a docker config auths key refers to

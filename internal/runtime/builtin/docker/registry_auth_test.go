@@ -317,6 +317,76 @@ func TestGetAuthFromDockerConfigIPv6(t *testing.T) {
 	}
 }
 
+func TestGetAuthFromDockerConfigConflictingAliases(t *testing.T) {
+	// Multiple keys can alias the same registry; differing credentials must
+	// be rejected instead of picked nondeterministically.
+	t.Run("Conflicting", func(t *testing.T) {
+		config := `{"auths":{
+			"index.docker.io":{"auth":"b25lOnBhc3M="},
+			"https://index.docker.io/v1/":{"auth":"dHdvOnBhc3M="}
+		}}`
+		_, err := getAuthFromDockerConfig(config, "alpine:latest")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "conflicting auth entries")
+	})
+
+	// Aliases carrying identical credentials collapse into a single result.
+	t.Run("Identical", func(t *testing.T) {
+		config := `{"auths":{
+			"index.docker.io":{"auth":"c2FtZTpwYXNz"},
+			"https://index.docker.io/v1/":{"auth":"c2FtZTpwYXNz"}
+		}}`
+		auth, err := getAuthFromDockerConfig(config, "alpine:latest")
+		require.NoError(t, err)
+		require.NotNil(t, auth)
+		assert.Equal(t, "c2FtZTpwYXNz", auth.Auth)
+		assert.Equal(t, "docker.io", auth.ServerAddress)
+	})
+
+	// An exact registry key takes precedence over conflicting aliases.
+	t.Run("ExactMatchPrecedence", func(t *testing.T) {
+		config := `{"auths":{
+			"docker.io":{"auth":"ZXhhY3Q6cGFzcw=="},
+			"index.docker.io":{"auth":"b3RoZXI6cGFzcw=="},
+			"https://index.docker.io/v1/":{"auth":"dGhpcmQ6cGFzcw=="}
+		}}`
+		auth, err := getAuthFromDockerConfig(config, "alpine:latest")
+		require.NoError(t, err)
+		require.NotNil(t, auth)
+		assert.Equal(t, "ZXhhY3Q6cGFzcw==", auth.Auth)
+	})
+}
+
+func TestRegistryAuthManager_ConflictingAliases(t *testing.T) {
+	// DAG-level auth follows the same collision policy as DOCKER_AUTH_CONFIG.
+	t.Run("Conflicting", func(t *testing.T) {
+		manager := NewRegistryAuthManager(map[string]*ir.AuthConfig{
+			"index.docker.io":             {Username: "one", Password: "pass"},
+			"https://index.docker.io/v1/": {Username: "two", Password: "pass"},
+		})
+
+		_, err := manager.GetAuthHeader("alpine:latest")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "conflicting auth entries")
+	})
+
+	t.Run("Identical", func(t *testing.T) {
+		manager := NewRegistryAuthManager(map[string]*ir.AuthConfig{
+			"index.docker.io":             {Username: "user", Password: "pass"},
+			"https://index.docker.io/v1/": {Username: "user", Password: "pass"},
+		})
+
+		header, err := manager.GetAuthHeader("alpine:latest")
+		require.NoError(t, err)
+		require.NotEmpty(t, header)
+
+		decoded, err := authconfig.Decode(header)
+		require.NoError(t, err)
+		assert.Equal(t, "user", decoded.Username)
+		assert.Equal(t, "pass", decoded.Password)
+	})
+}
+
 func TestRegistryAuthManager_GetAuthHeader(t *testing.T) {
 	// Test with DAG-level auth
 	t.Run("DAGLevelAuth", func(t *testing.T) {
