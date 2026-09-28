@@ -134,12 +134,15 @@ func isLikelyLocalDAGArg(arg string) bool {
 	if strings.HasSuffix(arg, ".yaml") || strings.HasSuffix(arg, ".yml") {
 		return true
 	}
-	// Match both separators so a path written for the other OS still reads as
-	// a local file rather than a remote DAG name.
-	if strings.ContainsAny(arg, `/\`) {
+	if strings.Contains(arg, "/") {
 		return true
 	}
-	return false
+	// A bare backslash can be a valid character in a remote file ID, so only
+	// unambiguous Windows path prefixes read as local.
+	if strings.HasPrefix(arg, `\\`) {
+		return true
+	}
+	return len(arg) > 2 && arg[1] == ':' && arg[2] == '\\'
 }
 
 func (c *remoteClient) startDAG(ctx context.Context, fileName string, body api.ExecuteDAGJSONBody) (*api.DAGRunSummary, error) {

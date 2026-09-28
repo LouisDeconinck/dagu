@@ -136,7 +136,9 @@ func (s *cliContextStore) ValidateContext(ctx *cliContext) error {
 	if u.User != nil {
 		return errors.New("server URL must not include credentials")
 	}
-	if u.RawQuery != "" || u.Fragment != "" {
+	// url.Parse records a bare trailing ? only as ForceQuery and drops a bare #
+	// entirely, so reject either delimiter in the raw string.
+	if strings.ContainsAny(ctx.ServerURL, "?#") {
 		return errors.New("server URL must not include query parameters or fragments")
 	}
 	if ctx.TimeoutSeconds < 0 {

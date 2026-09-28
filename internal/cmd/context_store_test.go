@@ -145,6 +145,24 @@ func TestStore_ValidateContext(t *testing.T) {
 			wantErr: "must not include query parameters or fragments",
 		},
 		{
+			name: "url with empty query delimiter",
+			ctx: &cliContext{
+				Name:      "prod",
+				ServerURL: "https://example.com?",
+				APIKey:    "dagu_test",
+			},
+			wantErr: "must not include query parameters or fragments",
+		},
+		{
+			name: "url with empty fragment delimiter",
+			ctx: &cliContext{
+				Name:      "prod",
+				ServerURL: "https://example.com#",
+				APIKey:    "dagu_test",
+			},
+			wantErr: "must not include query parameters or fragments",
+		},
+		{
 			name: "url with credentials",
 			ctx: &cliContext{
 				Name:      "prod",
