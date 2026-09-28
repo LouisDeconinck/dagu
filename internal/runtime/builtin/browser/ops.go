@@ -22,6 +22,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/runenv"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/runtime"
+	"github.com/dagucloud/dagu/v2/internal/runtime/builtin/internal/agentstep"
 )
 
 const (
@@ -63,8 +64,8 @@ type run struct {
 	masker    *masking.Masker
 	bridge    *modelBridge
 	cache     *replayCache
-	artifacts *artifactStore
-	timeline  *timeline
+	artifacts *agentstep.ArtifactStore
+	timeline  *agentstep.Timeline
 	eng       engine
 	record    browserhost.Record
 	profile   *profileLease
@@ -95,7 +96,7 @@ func newRun(ctx context.Context, e *browserExecutor) (*run, error) {
 		secrets = env.Scope.AllSecrets()
 		artifactsDir, _ = env.Scope.Get(runenv.EnvKeyDAGRunArtifactsDir)
 	}
-	if err := checkSecrets(e.cfg, secrets); err != nil {
+	if err := agentstep.CheckSecrets(executorType, e.cfg.operationTexts(), secrets); err != nil {
 		return nil, err
 	}
 	dagName := ""
@@ -106,7 +107,7 @@ func newRun(ctx context.Context, e *browserExecutor) (*run, error) {
 	if stepKey == "" {
 		stepKey = e.step.Name
 	}
-	masker := newMasker(secrets, nil)
+	masker := agentstep.NewMasker(secrets, nil)
 	bridge, err := newModelBridge(ctx, e.step.LLM, masker, e.newProvider)
 	if err != nil {
 		return nil, err
@@ -124,7 +125,7 @@ func newRun(ctx context.Context, e *browserExecutor) (*run, error) {
 		secrets:   secrets,
 		masker:    masker,
 		bridge:    bridge,
-		artifacts: newArtifactStore(artifactsDir, stepKey),
+		artifacts: agentstep.NewArtifactStore(artifactsDir, artifactsSubdir, stepKey),
 		variables: maps.Clone(e.cfg.Variables),
 		answers:   map[string]string{},
 		outputs:   map[string]any{},
@@ -138,7 +139,7 @@ func newRun(ctx context.Context, e *browserExecutor) (*run, error) {
 			return nil, err
 		}
 	}
-	r.timeline = &timeline{log: e.stderr, masker: masker, total: len(e.cfg.Do), update: e.updateSession}
+	r.timeline = &agentstep.Timeline{Log: e.stderr, Masker: masker, Total: len(e.cfg.Do), Update: e.updateSession, Provider: providerName}
 	return r, nil
 }
 
@@ -168,9 +169,9 @@ func (r *run) execute(ctx context.Context) error {
 				return r.fail(ctx, i, op.kind(), fmt.Errorf("evaluate when: %w", err))
 			}
 			if !holds {
-				r.timeline.operation(operationReport{
-					index: i, kind: op.kind(), subject: op.When.String(), status: statusSkipped, detail: reason,
-					tokens: r.bridge.totals().sub(before).total(), duration: time.Since(began),
+				r.timeline.Operation(agentstep.Report{
+					Index: i, Kind: op.kind(), Subject: op.When.String(), Status: agentstep.StatusSkipped, Detail: reason,
+					Tokens: r.bridge.totals().sub(before).total(), Duration: time.Since(began),
 				})
 				continue
 			}
@@ -211,8 +212,8 @@ func (r *run) reportDialogs(index int) {
 		return
 	}
 	for _, d := range r.eng.TakeDialogs() {
-		r.timeline.operation(operationReport{
-			index: index, kind: kindDialog, subject: d.Message, status: statusCompleted, detail: "accepted " + d.Type,
+		r.timeline.Operation(agentstep.Report{
+			Index: index, Kind: kindDialog, Subject: d.Message, Status: agentstep.StatusCompleted, Detail: "accepted " + d.Type,
 		})
 	}
 }
@@ -226,7 +227,7 @@ func (r *run) reportBlocked(index int) {
 	blocked, err := r.eng.TakeBlockedRequests()
 	if err != nil && !r.blockedUncounted {
 		r.blockedUncounted = true
-		_, _ = fmt.Fprintf(r.timeline.log, "warning: stopped counting requests blocked by allowed_domains: %s\n",
+		_, _ = fmt.Fprintf(r.timeline.Log, "warning: stopped counting requests blocked by allowed_domains: %s\n",
 			r.masker.MaskString(err.Error()))
 	}
 	if len(blocked) == 0 {
@@ -235,7 +236,7 @@ func (r *run) reportBlocked(index int) {
 	for host, count := range blocked {
 		r.blocked[host] += count
 	}
-	r.timeline.blocked(index, describeBlocked(blocked))
+	logBlocked(r.timeline, index, describeBlocked(blocked))
 }
 
 // checkPage fails when the page has left browser.allowed_domains, which a
@@ -269,10 +270,10 @@ func (r *run) settleDownloads(ctx context.Context, index int, final bool) error 
 	}
 	names, err := r.eng.WaitForDownloads(ctx, grace, r.downloadWindow)
 	for _, name := range names {
-		rel := r.artifacts.downloadPath(name)
-		r.timeline.operation(operationReport{
-			index: index, kind: kindDownload, subject: name, status: statusCompleted,
-			detail: rel, files: []string{rel},
+		rel := downloadPath(r.artifacts, name)
+		r.timeline.Operation(agentstep.Report{
+			Index: index, Kind: kindDownload, Subject: name, Status: agentstep.StatusCompleted,
+			Detail: rel, Files: []string{rel},
 		})
 	}
 	return err
@@ -283,7 +284,7 @@ func (r *run) settleDownloads(ctx context.Context, index int, final bool) error 
 func (r *run) startSession(ctx context.Context) (int, error) {
 	session := r.exec.GetAgentSession()
 	recordID := browserhost.RecordID(r.dagRunID, r.stepName)
-	answer, answered := pendingAnswer(session)
+	answer, answered := agentstep.PendingAnswer(session, providerName)
 	if answered {
 		return r.resumeSession(ctx, recordID, session, answer)
 	}
@@ -319,7 +320,7 @@ func (r *run) startSession(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	r.timeline.lifecycle(statusRunning, "Starting browser")
+	r.timeline.Lifecycle(agentstep.StatusRunning, "Starting browser")
 	eng, err := r.exec.launcher.Launch(ctx, opts)
 	if err != nil {
 		r.releaseProfile(ctx, opts)
@@ -356,7 +357,7 @@ func (r *run) startSession(ctx context.Context) (int, error) {
 }
 
 func (r *run) launchOptions(ctx context.Context, recordID string) (launchOptions, error) {
-	downloads, err := r.artifacts.downloadsDir()
+	downloads, err := downloadsDir(r.artifacts)
 	if err != nil {
 		return launchOptions{}, err
 	}
@@ -434,14 +435,14 @@ func (r *run) gotoURL(ctx context.Context, index int, target string, timeout tim
 	if err := r.eng.Goto(ctx, target, timeout); err != nil {
 		return err
 	}
-	r.report(ctx, operationReport{index: index, kind: opGoto, subject: target, status: statusCompleted, duration: time.Since(began)})
+	r.report(ctx, agentstep.Report{Index: index, Kind: opGoto, Subject: target, Status: agentstep.StatusCompleted, Duration: time.Since(began)})
 	return nil
 }
 
 func (r *run) act(ctx context.Context, index int, spec actSpec, timeout time.Duration) error {
 	// Validation guarantees every reference names a variable or an earlier
 	// ask, so a missing value means that ask was skipped.
-	for _, name := range variableReferences(spec.Instruction) {
+	for _, name := range agentstep.VariableReferences(spec.Instruction) {
 		if _, ok := r.variables[name]; !ok {
 			return fmt.Errorf("the instruction uses %%%s%%, but the ask that sets it did not run", name)
 		}
@@ -456,20 +457,20 @@ func (r *run) act(ctx context.Context, index int, spec actSpec, timeout time.Dur
 		}
 		key = replayKey(index, spec.Instruction, pageURL)
 	}
-	status := statusCompleted
+	status := agentstep.StatusCompleted
 	if actions, ok := r.lookupCache(key); ok {
 		replayed, err := r.eng.Replay(ctx, actions, r.variables, timeout)
 		if err != nil {
 			return err
 		}
 		if replayed {
-			r.report(ctx, operationReport{
-				index: index, kind: opAct, subject: spec.Instruction, status: statusCacheHit,
-				detail: describeActions(actions), duration: time.Since(began),
+			r.report(ctx, agentstep.Report{
+				Index: index, Kind: opAct, Subject: spec.Instruction, Status: agentstep.StatusCacheHit,
+				Detail: describeActions(actions), Duration: time.Since(began),
 			})
 			return nil
 		}
-		status = statusHealed
+		status = agentstep.StatusHealed
 	}
 	outcome, err := r.eng.Act(ctx, spec.Instruction, r.variables, timeout)
 	if err != nil {
@@ -484,12 +485,12 @@ func (r *run) act(ctx context.Context, index int, spec actSpec, timeout time.Dur
 		return fmt.Errorf("act did not complete: %s", outcome.Message)
 	}
 	if useCache && len(outcome.Actions) > 0 {
-		r.cache.stage(key, outcome.Actions)
+		r.cache.Stage(key, outcome.Actions)
 	}
-	r.report(ctx, operationReport{
-		index: index, kind: opAct, subject: spec.Instruction, status: status,
-		detail: describeActions(outcome.Actions), tokens: r.bridge.totals().sub(before).total(),
-		duration: time.Since(began),
+	r.report(ctx, agentstep.Report{
+		Index: index, Kind: opAct, Subject: spec.Instruction, Status: status,
+		Detail: describeActions(outcome.Actions), Tokens: r.bridge.totals().sub(before).total(),
+		Duration: time.Since(began),
 	})
 	return nil
 }
@@ -498,7 +499,8 @@ func (r *run) lookupCache(key string) ([]recordedAction, bool) {
 	if key == "" {
 		return nil, false
 	}
-	return r.cache.lookup(key)
+	actions, ok := r.cache.Lookup(key)
+	return actions, ok && len(actions) > 0
 }
 
 func (r *run) extract(ctx context.Context, index int, spec extractSpec, timeout time.Duration) error {
@@ -524,9 +526,9 @@ func (r *run) extract(ctx context.Context, index int, spec extractSpec, timeout 
 		}
 		r.outputs[name] = value
 	}
-	r.report(ctx, operationReport{
-		index: index, kind: opExtract, subject: spec.Instruction, status: statusCompleted,
-		detail: string(data), tokens: r.bridge.totals().sub(before).total(), duration: time.Since(began),
+	r.report(ctx, agentstep.Report{
+		Index: index, Kind: opExtract, Subject: spec.Instruction, Status: agentstep.StatusCompleted,
+		Detail: string(data), Tokens: r.bridge.totals().sub(before).total(), Duration: time.Since(began),
 	})
 	return nil
 }
@@ -543,9 +545,9 @@ func (r *run) expect(ctx context.Context, index int, c condition, timeout time.D
 	if !holds {
 		return fmt.Errorf("expectation not met: %s", reason)
 	}
-	r.report(ctx, operationReport{
-		index: index, kind: opExpect, subject: c.String(), status: statusCompleted, detail: reason,
-		tokens: r.bridge.totals().sub(before).total(), duration: time.Since(began),
+	r.report(ctx, agentstep.Report{
+		Index: index, Kind: opExpect, Subject: c.String(), Status: agentstep.StatusCompleted, Detail: reason,
+		Tokens: r.bridge.totals().sub(before).total(), Duration: time.Since(began),
 	})
 	return nil
 }
@@ -622,7 +624,7 @@ func (r *run) wait(ctx context.Context, index int, spec waitSpec, timeout time.D
 	} else if err := r.eng.WaitForSelector(ctx, spec.Selector, timeout); err != nil {
 		return err
 	}
-	r.report(ctx, operationReport{index: index, kind: opWait, subject: subject, status: statusCompleted, duration: time.Since(began)})
+	r.report(ctx, agentstep.Report{Index: index, Kind: opWait, Subject: subject, Status: agentstep.StatusCompleted, Duration: time.Since(began)})
 	return nil
 }
 
@@ -632,13 +634,13 @@ func (r *run) screenshot(ctx context.Context, index int, name string) error {
 	if err != nil {
 		return err
 	}
-	rel, err := r.artifacts.writeScreenshot(name, data)
+	rel, err := r.artifacts.WriteScreenshot(name, data)
 	if err != nil {
 		return err
 	}
-	r.timeline.operation(operationReport{
-		index: index, kind: opScreenshot, subject: name, status: statusCompleted,
-		detail: rel, duration: time.Since(began), files: []string{rel},
+	r.timeline.Operation(agentstep.Report{
+		Index: index, Kind: opScreenshot, Subject: name, Status: agentstep.StatusCompleted,
+		Detail: rel, Duration: time.Since(began), Files: []string{rel},
 	})
 	return nil
 }
@@ -662,13 +664,13 @@ func (r *run) judge(ctx context.Context, statement string, timeout time.Duration
 
 // report records a finished operation, attaching a screenshot when every
 // operation is captured.
-func (r *run) report(ctx context.Context, report operationReport) {
-	if r.cfg.screenshotPolicy() == screenshotsEach && r.artifacts.enabled() {
-		if rel, err := r.capture(ctx, report.kind); err == nil {
-			report.files = append(report.files, rel)
+func (r *run) report(ctx context.Context, report agentstep.Report) {
+	if r.cfg.screenshotPolicy() == screenshotsEach && r.artifacts.Enabled() {
+		if rel, err := r.capture(ctx, report.Kind); err == nil {
+			report.Files = append(report.Files, rel)
 		}
 	}
-	r.timeline.operation(report)
+	r.timeline.Operation(report)
 }
 
 func (r *run) capture(ctx context.Context, label string) (string, error) {
@@ -679,12 +681,12 @@ func (r *run) capture(ctx context.Context, label string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return r.artifacts.writeScreenshot(label, data)
+	return r.artifacts.WriteScreenshot(label, data)
 }
 
 func (r *run) succeed(ctx context.Context) error {
 	var files []string
-	if r.cfg.capturesFinalScreenshot() && r.artifacts.enabled() {
+	if r.cfg.capturesFinalScreenshot() && r.artifacts.Enabled() {
 		if rel, err := r.capture(ctx, finalShotLabel); err == nil {
 			files = append(files, rel)
 		}
@@ -692,17 +694,17 @@ func (r *run) succeed(ctx context.Context) error {
 	// The operations succeeded; leftover browser files are reported, not
 	// treated as a step failure.
 	if err := r.shutdown(ctx); err != nil {
-		_, _ = fmt.Fprintf(r.timeline.log, "warning: browser cleanup: %s\n", r.masker.MaskString(err.Error()))
+		_, _ = fmt.Fprintf(r.timeline.Log, "warning: browser cleanup: %s\n", r.masker.MaskString(err.Error()))
 	}
 	if r.cache != nil {
-		if err := r.cache.commit(ctx); err != nil {
-			_, _ = fmt.Fprintf(r.timeline.log, "warning: keep replay recordings: %s\n", r.masker.MaskString(err.Error()))
+		if err := r.cache.Commit(ctx); err != nil {
+			_, _ = fmt.Fprintf(r.timeline.Log, "warning: keep replay recordings: %s\n", r.masker.MaskString(err.Error()))
 		}
 	}
 	usage := r.bridge.totals()
 	summary := fmt.Sprintf("Completed %d operations using %d tokens", len(r.cfg.Do), usage.total())
-	r.timeline.appendEvent(ir.AgentSessionEvent{Type: eventLifecycle, Status: statusCompleted, Content: summary, Files: files})
-	_, _ = fmt.Fprintln(r.timeline.log, summary)
+	r.timeline.AppendEvent(ir.AgentSessionEvent{Type: agentstep.EventLifecycle, Status: agentstep.StatusCompleted, Content: summary, Files: files})
+	_, _ = fmt.Fprintln(r.timeline.Log, summary)
 	r.exec.updateSession(func(s *ir.AgentSession) {
 		s.State = ir.AgentSessionSucceeded
 		s.Usage = ir.AgentUsage{InputTokens: int64(usage.Input), OutputTokens: int64(usage.Output), TotalTokens: int64(usage.total())}
@@ -726,7 +728,7 @@ func (r *run) fail(ctx context.Context, index int, kind string, cause error) err
 	}
 	r.reportBlocked(index)
 	var files []string
-	if r.cfg.screenshotPolicy() != screenshotsNever && r.artifacts.enabled() && r.eng != nil {
+	if r.cfg.screenshotPolicy() != screenshotsNever && r.artifacts.Enabled() && r.eng != nil {
 		if rel, err := r.capture(context.WithoutCancel(ctx), failureShotLabel); err == nil {
 			files = append(files, rel)
 		}
@@ -743,7 +745,7 @@ func (r *run) fail(ctx context.Context, index int, kind string, cause error) err
 		message += "; browser.allowed_domains blocked " + r.masker.MaskString(describeBlocked(r.blocked))
 	}
 	usage := r.bridge.totals()
-	r.timeline.appendEvent(ir.AgentSessionEvent{Type: eventLifecycle, Status: statusFailed, Content: message, Files: files})
+	r.timeline.AppendEvent(ir.AgentSessionEvent{Type: agentstep.EventLifecycle, Status: agentstep.StatusFailed, Content: message, Files: files})
 	r.exec.updateSession(func(s *ir.AgentSession) {
 		s.State = ir.AgentSessionFailed
 		s.LastError = message
@@ -763,11 +765,11 @@ func (r *run) forgetReplays(ctx context.Context, index int, kind string, cause e
 	}
 	if index < 0 || ctx.Err() != nil || kind == opAsk || kind == kindDownload ||
 		errors.Is(cause, errBrowserUnresponsive) || r.bridge.failedRequest() {
-		r.cache.discard()
+		r.cache.Discard()
 		return
 	}
-	if err := r.cache.evict(ctx); err != nil {
-		_, _ = fmt.Fprintf(r.timeline.log, "warning: drop replay recordings: %s\n", r.masker.MaskString(err.Error()))
+	if err := r.cache.Evict(ctx); err != nil {
+		_, _ = fmt.Fprintf(r.timeline.Log, "warning: drop replay recordings: %s\n", r.masker.MaskString(err.Error()))
 	}
 }
 

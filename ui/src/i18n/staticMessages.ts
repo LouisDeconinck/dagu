@@ -305,6 +305,7 @@ const english = {
   by: 'by',
   'By request': 'By request',
   'By:': 'By:',
+  'Bypass step preconditions': 'Bypass step preconditions',
   bytes: 'bytes',
   'Calling:': 'Calling:',
   Cancel: 'Cancel',
@@ -1107,6 +1108,11 @@ const english = {
   'Start this browser step over?': 'Start this browser step over?',
   'This closes the browser if it is still open and runs the step again from its first operation.':
     'This closes the browser if it is still open and runs the step again from its first operation.',
+  'The computer step needs an answer': 'The computer step needs an answer',
+  'Computer session': 'Computer session',
+  'Start this computer step over?': 'Start this computer step over?',
+  'This runs the step again from its first operation. Windows the step opened stay as they are.':
+    'This runs the step again from its first operation. Windows the step opened stay as they are.',
   'Opens on final failure and resolves on recovery.':
     'Opens on final failure and resolves on recovery.',
   Operations: 'Operations',
@@ -1461,6 +1467,8 @@ const english = {
   'Since startup': 'Since startup',
   'Size:': 'Size:',
   'Skip TLS verification': 'Skip TLS verification',
+  'Skip precondition checks for the retried steps. Workflow-level preconditions still apply.':
+    'Skip precondition checks for the retried steps. Workflow-level preconditions still apply.',
   skipped: 'skipped',
   Skipped: 'Skipped',
   'Slack message template': 'Slack message template',
@@ -2554,6 +2562,7 @@ const chinese = {
   by: '由',
   'By request': '按请求',
   'By:': '由:',
+  'Bypass step preconditions': '跳过步骤前置条件',
   bytes: '字节',
   'Calling:': '调用:',
   Cancel: '取消',
@@ -3335,6 +3344,11 @@ const chinese = {
   'Start this browser step over?': '要重新开始此浏览器步骤吗？',
   'This closes the browser if it is still open and runs the step again from its first operation.':
     '如果浏览器仍处于打开状态，将关闭它，并从第一个操作重新运行此步骤。',
+  'The computer step needs an answer': '计算机步骤需要回答',
+  'Computer session': '计算机会话',
+  'Start this computer step over?': '要重新开始此计算机步骤吗？',
+  'This runs the step again from its first operation. Windows the step opened stay as they are.':
+    '将从第一个操作重新运行此步骤。此步骤打开的窗口将保持原样。',
   'Opens on final failure and resolves on recovery.':
     '在最终失败时打开，并在恢复时解决。',
   Operations: '操作',
@@ -3682,6 +3696,8 @@ const chinese = {
   'Since startup': '自启动以来',
   'Size:': '大小：',
   'Skip TLS verification': '跳过 TLS 验证',
+  'Skip precondition checks for the retried steps. Workflow-level preconditions still apply.':
+    '跳过所重试步骤的前置条件检查。工作流级前置条件仍然适用。',
   skipped: '已跳过',
   Skipped: '已跳过',
   'Slack message template': 'Slack 消息模板',
@@ -4756,6 +4772,7 @@ const japanese = {
   by: '作成者:',
   'By request': 'リクエストごと',
   'By:': '作成者:',
+  'Bypass step preconditions': 'ステップの前提条件をバイパス',
   bytes: 'バイト',
   'Calling:': '呼び出し中:',
   Cancel: 'キャンセル',
@@ -5571,6 +5588,11 @@ const japanese = {
   'Start this browser step over?': 'このブラウザステップを最初からやり直しますか？',
   'This closes the browser if it is still open and runs the step again from its first operation.':
     'ブラウザが開いたままの場合は閉じ、最初の操作からステップを再実行します。',
+  'The computer step needs an answer': 'コンピューターステップは回答が必要です',
+  'Computer session': 'コンピューターセッション',
+  'Start this computer step over?': 'このコンピューターステップを最初からやり直しますか？',
+  'This runs the step again from its first operation. Windows the step opened stay as they are.':
+    '最初の操作からステップを再実行します。ステップが開いたウィンドウはそのまま残ります。',
   'Opens on final failure and resolves on recovery.':
     '最終的な失敗時に開き、回復時に解決されます。',
   Operations: '操作',
@@ -5930,6 +5952,8 @@ const japanese = {
   'Since startup': '起動以来',
   'Size:': 'サイズ:',
   'Skip TLS verification': 'TLS 検証をスキップ',
+  'Skip precondition checks for the retried steps. Workflow-level preconditions still apply.':
+    '再試行されるステップの前提条件チェックをスキップします。ワークフローレベルの前提条件は引き続き適用されます。',
   skipped: 'スキップ',
   Skipped: 'スキップ済み',
   'Slack message template': 'Slack メッセージテンプレート',

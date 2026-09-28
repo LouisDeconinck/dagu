@@ -696,6 +696,113 @@ func TestCreateAttemptForTaskCarriesDAGLabels(t *testing.T) {
 	assert.Equal(t, "ops", *dag.BaseConfigWorkspace)
 }
 
+// Fresh starts have no previous status from which to copy the queue identity.
+// A run that is already queued keeps its queue, which may be an enqueue-time
+// override absent from the YAML.
+func TestDispatchQueueIdentity(t *testing.T) {
+	registerCommandExecutorCapsForCoordinatorTest()
+
+	for _, tt := range []struct {
+		name       string
+		definition string
+		baseConfig string
+		queueName  string
+		queued     string
+		wantQueue  string
+	}{
+		{name: "Global", definition: "queue: normal\n", wantQueue: "normal"},
+		{name: "Inherited", baseConfig: "queue: normal\n", wantQueue: "normal"},
+		{name: "Pinned", definition: "queue: normal\n", queueName: "original", wantQueue: "original"},
+		{name: "Queued", definition: "queue: normal\n", queued: "high", wantQueue: "high"},
+		{name: "Local", wantQueue: "test-dag"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			baseDir := t.TempDir()
+			dispatchStore := newTestDispatchTaskStore(baseDir)
+			leaseStore := newTestDAGRunLeaseStore(baseDir)
+			heartbeatStore := newTestWorkerHeartbeatStore(baseDir)
+			require.NoError(t, heartbeatStore.Upsert(ctx, dispatch.WorkerHeartbeatRecord{
+				WorkerID: "worker-1", LastHeartbeatAt: time.Now().UnixMilli(),
+			}))
+			runs := newMockDAGRunStore()
+			h := NewHandler(HandlerConfig{
+				DAGRunRepository:     runs.repository,
+				DispatchTaskStore:    dispatchStore,
+				DAGRunLeaseStore:     leaseStore,
+				WorkerHeartbeatStore: heartbeatStore,
+			})
+			t.Cleanup(func() { h.Close(context.Background()) })
+
+			for i := range 2 {
+				runID := fmt.Sprintf("run-%d", i)
+				if tt.queued != "" {
+					runs.addAttempt(ir.DAGRunRef{Name: "test-dag", ID: runID}, &ir.DAGRunStatus{
+						Name: "test-dag", DAGRunID: runID, AttemptID: "queued-" + runID,
+						Status: ir.Queued, ProcGroup: tt.queued,
+					}).SetDAG(&ir.DAG{Name: "test-dag", Queue: "normal"})
+				}
+				task := &coordinatorv1.Task{
+					Operation:  coordinatorv1.Operation_OPERATION_START,
+					DagRunId:   runID,
+					Target:     "test-dag",
+					Definition: tt.definition + "steps:\n  - name: wait\n    run: sleep 2\n",
+					BaseConfig: tt.baseConfig,
+					QueueName:  tt.queueName,
+				}
+				_, err := h.Dispatch(ctx, &coordinatorv1.DispatchRequest{Task: task})
+				require.NoError(t, err)
+
+				attempt := runs.attempts[task.DagRunId]
+				require.NotNil(t, attempt)
+				// The worker reports the queue parsed from the YAML.
+				dag, err := attempt.ReadDAG(ctx)
+				require.NoError(t, err)
+				initial, err := attempt.ReadStatus(ctx)
+				require.NoError(t, err)
+
+				polled, err := h.Poll(ctx, &coordinatorv1.PollRequest{
+					WorkerId: "worker-1", PollerId: "poller-1",
+				})
+				require.NoError(t, err)
+				require.NotNil(t, polled.Task)
+				assert.Equal(t, tt.wantQueue, polled.Task.QueueName)
+				ack, err := h.AckTaskClaim(ctx, &coordinatorv1.AckTaskClaimRequest{
+					WorkerId: "worker-1", ClaimToken: polled.Task.ClaimToken,
+					AttemptKey: polled.Task.AttemptKey,
+				})
+				require.NoError(t, err)
+				require.True(t, ack.Accepted)
+				lease, err := leaseStore.Get(ctx, task.AttemptKey)
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantQueue, lease.QueueName)
+
+				// A later worker status must keep the queue assigned at claim time.
+				running := *initial
+				running.Status = ir.Running
+				running.AttemptID = task.AttemptId
+				running.AttemptKey = task.AttemptKey
+				running.WorkerID = "worker-1"
+				running.ProcGroup = dag.ProcGroup()
+				protoStatus, err := convert.DAGRunStatusToProto(&running)
+				require.NoError(t, err)
+				report, err := h.ReportStatus(ctx, &coordinatorv1.ReportStatusRequest{
+					Status: protoStatus, WorkerId: "worker-1",
+				})
+				require.NoError(t, err)
+				require.True(t, report.Accepted, report.Error)
+				lease, err = leaseStore.Get(ctx, task.AttemptKey)
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantQueue, lease.QueueName)
+			}
+
+			leases, err := leaseStore.ListByQueue(ctx, tt.wantQueue)
+			require.NoError(t, err)
+			assert.Len(t, leases, 2)
+		})
+	}
+}
+
 func TestCreateAttemptForTaskReturnsStorageErrors(t *testing.T) {
 	registerCommandExecutorCapsForCoordinatorTest()
 
@@ -1213,7 +1320,7 @@ func TestHandlerDispatchPreparesAuthoritativeDAGWorkspace(t *testing.T) {
 
 	ctx := context.Background()
 	dagDir := t.TempDir()
-	definition := []byte("name: remote-child\nsteps:\n  - name: consume\n    run: cat input.txt\n    dependencies: input.txt\n")
+	definition := []byte("name: remote-child\nqueue: normal\nsteps:\n  - name: consume\n    run: cat input.txt\n    dependencies: input.txt\n")
 	require.NoError(t, os.WriteFile(filepath.Join(dagDir, "remote-child.yaml"), definition, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dagDir, "input.txt"), []byte("coordinator-owned"), 0o600))
 
@@ -1242,7 +1349,6 @@ func TestHandlerDispatchPreparesAuthoritativeDAGWorkspace(t *testing.T) {
 		DagRunId:       "run-remote-child",
 		Target:         "remote-child",
 		Definition:     string(definition),
-		QueueName:      "default",
 	}})
 	require.NoError(t, err)
 
@@ -1255,6 +1361,7 @@ func TestHandlerDispatchPreparesAuthoritativeDAGWorkspace(t *testing.T) {
 	require.NotNil(t, claimed)
 	require.NotNil(t, claimed.Task)
 	require.NotEmpty(t, claimed.Task.WorkspaceBundleDigest)
+	assert.Equal(t, "normal", claimed.Task.QueueName)
 	assert.Empty(t, claimed.Task.SourceFile)
 
 	archive, err := h.workspaceBundleStore.Get(ctx, claimed.Task.WorkspaceBundleDigest)

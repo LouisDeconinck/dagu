@@ -711,13 +711,26 @@ SMTP server settings come from global configuration. With `mailbox`, the message
 goes through that entry of `mail_accounts` instead, and `from` defaults to its
 address.
 
+With `mailbox`, `in_reply_to` answers one found email (its `id`, or the email
+from `mail.search`): `to` defaults to its Reply-To or sender, `subject` to
+`Re: <subject>`, and the reply is threaded under it.
+
+```yaml
+- action: mail.send
+  with:
+    mailbox: support@example.com
+    in_reply_to: ${foreach.email.id}
+    message: Thanks, we are on it.
+```
+
 ## mail.search / mail.organize
 
 Read and organize a mailbox over IMAP. Accounts live in the DAG-level (or base
 config) `mail_accounts` map, keyed by email address. `provider: google` or
 `provider: microsoft` fills in the servers; any other server sets `imap.host`.
 Authenticate with `password` or with `oauth` (`google_refresh` or
-`microsoft_refresh` and a refresh token).
+`microsoft_refresh` and a refresh token). `microsoft_refresh` accepts optional
+`scopes` to request instead of `https://outlook.office.com/.default`.
 
 ```yaml
 mail_accounts:
@@ -754,7 +767,7 @@ steps:
 `mail.search` `with` fields: `mailbox`, `folder` (default `INBOX`), `unread`,
 `from`, `subject`, `within` (such as `24h` or `7d`), `has_attachments`,
 `save_attachments`, `limit` (1-50, default 20). It publishes `messages` (oldest
-first, each with `id`, `folder`, `from_name`, `from_address`, `to`, `cc`,
+first, each with `id`, `message_id`, `folder`, `from_name`, `from_address`, `to`, `cc`,
 `subject`, `date`, `unread`, `flagged`, `text`, `attachments`), `count`, and
 `truncated`. Searching never marks email read.
 
@@ -897,6 +910,64 @@ Browser behavior:
 - Where the browser sandbox cannot start, the host setting `browser.sandbox: false` or `DAGU_BROWSER_SANDBOX=false` turns it off for every browser step; a compromised page then runs with the Dagu process's permissions, so prefer the seccomp profile. DAGs cannot change it. With the sandbox on, a browser step fails when `CI` is set or Dagu runs as root on Linux, because the browser would run without the sandbox there; set `DAGU_BROWSER_SANDBOX=false` to allow it.
 - Profiles and the replay cache live on the host that runs the step. Pin such steps with `worker_selector` in distributed mode.
 - After a site redesign, clear recorded acts with `dagu browser cache clear <dag> [--step <id>]` on that host instead of editing the instruction or setting `cache: false`.
+
+## computer.extract / computer.run
+
+Automate desktop applications, such as an ERP client or a legacy Windows program, on the desktop of a macOS or Windows worker. The model looks at screenshots and clicks and types; it comes from the DAG-level `llm` block, or `with.llm`, which replaces it entirely. `anthropic`, `openai`, and `gemini` models use their native computer-use tools when they support them (Claude Opus 4.8 or Sonnet 5 and later, Gemini 3.5 and later); other providers, older models, or `mode: generic` use plain function tools with any tool-calling vision model.
+
+The Dagu process that runs the step must run in a logged-in user session: on Windows not as a service, with the screen unlocked; on macOS with Screen Recording and Accessibility granted to the app that starts Dagu. Run `dagu computer check` on the host to verify. Route computer DAGs to such workers with a DAG-level `worker_selector`; other systems fail the step.
+
+```yaml
+secrets:
+  - name: ERP_PASSWORD
+    provider: env
+    key: ERP_PASSWORD
+
+params:
+  INVOICE_ID: INV-0001
+
+llm:
+  provider: anthropic
+  model: claude-opus-5
+
+worker_selector:
+  desktop: finance
+
+steps:
+  - id: post
+    action: computer.run
+    with:
+      variables:
+        password: ${ERP_PASSWORD}
+      do:
+        - launch: C:\Program Files\ERP\client.exe
+        - act: Log in as clerk with password %password%
+        - act: Open the invoice entry form and post invoice ${params.INVOICE_ID}
+        - expect: {statement: A document number is shown, within: 30s}
+        - extract:
+            instruction: The document number in the status bar
+            schema:
+              type: object
+              properties:
+                document_number: {type: string}
+
+  - id: record
+    depends: post
+    run: echo "${steps.post.outputs.document_number}"
+```
+
+Computer behavior:
+
+- Each `do` item sets exactly one of `launch` (a command, or `{command, args}`; on macOS use `{command: open, args: [-a, TextEdit]}`), `act`, `extract`, `expect`, `wait` (a duration), `screenshot`, or `ask`, plus optional `when` and `timeout` (default 5m).
+- An `act` is a whole task: the model acts until it reports the task done, up to `max_actions` actions (default 50). It fails when the model reports it cannot finish.
+- `expect` and `when` are statements the model judges against a screenshot; `{statement, within: 30s}` rechecks a false statement until it holds.
+- Declare secrets under `secrets:`, pass them in `variables`, and reference them as `%name%`. The model sees only the placeholder, which is replaced when typed. Typed values can appear in later screenshots sent to the model and saved as artifacts. An instruction containing a declared secret value (4+ characters) fails the step.
+- The top-level properties of each `extract` schema become `${steps.<id>.outputs.<name>}`.
+- The acts of a step that succeeded are replayed on later runs on the same host without a model while every screen still matches what the model saw; when a screen differs, the model continues from there. When a later operation fails, the step's replays are dropped and the next run asks the model again. Clear recordings with `dagu computer cache clear <dag> [--step <id>]`.
+- When a model provider asks for confirmation before sensitive actions, the step fails unless `on_confirmation: allow`. Put an `ask` before such an act instead.
+- `ask: {prompt, as}` puts the step in Waiting and leaves the desktop as it is; the answer becomes `%<as>%` and the step resumes at the next operation.
+- One computer step at a time uses a user's desktop, across Dagu processes with different data directories; others wait. While a step holds the desktop, the display stays awake; a locked screen fails the step. Screenshots are saved under `computer/<step id>/` in the run artifacts on failure by default and are not masked.
+- Before sending input, a step waits until nobody has touched the desktop for `with.idle` (default `15s`). Actions the model chose on a screen a person has since used are not run; the model gets the new screen instead. `idle: 0` turns this off, for example on a dedicated host.
 
 ## router.route
 

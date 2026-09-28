@@ -296,6 +296,9 @@ type container struct {
 	PullPolicy any `yaml:"pull_policy,omitempty"`
 	// Env specifies environment variables for the container.
 	Env any `yaml:"env,omitempty"` // Can be a map or struct
+	// EnvFile lists dotenv-syntax files whose variables are injected into the
+	// container environment. Accepts a string or []string.
+	EnvFile types.StringOrArray `yaml:"env_file,omitempty"`
 	// Volumes specifies the volumes to mount in the container.
 	Volumes []string `yaml:"volumes,omitempty"` // Map of volume names to volume definitions
 	// User is the user to run the container as.
@@ -1190,10 +1193,11 @@ func buildLogDir(_ buildContext, d *dag) (string, error) {
 func buildArtifacts(_ buildContext, d *dag) (*ir.ArtifactsConfig, error) {
 	usesArtifactAction := dagUsesBuiltinArtifactAction(d)
 	usesArtifactOutput := dagUsesArtifactOutput(d)
-	// Browser actions store screenshots and downloads as artifacts but still
-	// run, without them, when artifacts are disabled explicitly.
-	usesBrowserAction := dagUsesBuiltinAction(d, browserActionPrefix)
-	autoEnable := dagReferencesRunArtifactsDir(d) || usesArtifactAction || usesArtifactOutput || usesBrowserAction ||
+	// Browser and computer actions store screenshots, and browser downloads,
+	// as artifacts but still run, without them, when artifacts are disabled
+	// explicitly.
+	usesScreenAction := dagUsesBuiltinAction(d, browserActionPrefix) || dagUsesBuiltinAction(d, computerActionPrefix)
+	autoEnable := dagReferencesRunArtifactsDir(d) || usesArtifactAction || usesArtifactOutput || usesScreenAction ||
 		dagSavesMailAttachments(d)
 
 	if usesArtifactAction && d.Artifacts != nil && d.Artifacts.Enabled != nil && !*d.Artifacts.Enabled {
@@ -2235,6 +2239,7 @@ func buildContainerField(ctx buildContext, raw any) (*ir.Container, error) {
 			ErrorUnused:      true,
 			WeaklyTypedInput: true,
 			TagName:          "yaml",
+			DecodeHook:       typedUnionDecodeHook(),
 		})
 		if err != nil {
 			return nil, ir.NewValidationError("container", nil,
@@ -2336,6 +2341,7 @@ func buildContainerFromSpec(_ buildContext, c *container) (*ir.Container, error)
 			User:       c.User,
 			WorkingDir: c.WorkingDir,
 			Env:        envs,
+			EnvFile:    c.EnvFile.Values(),
 			Shell:      c.Shell,
 		}, nil
 	}
@@ -2368,6 +2374,7 @@ func buildContainerFromSpec(_ buildContext, c *container) (*ir.Container, error)
 		Image:         c.Image,
 		PullPolicy:    pullPolicy,
 		Env:           envs,
+		EnvFile:       c.EnvFile.Values(),
 		Volumes:       c.Volumes,
 		User:          c.User,
 		WorkingDir:    c.WorkingDir,

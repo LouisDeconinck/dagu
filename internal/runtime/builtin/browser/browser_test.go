@@ -19,11 +19,13 @@ import (
 
 	"github.com/dagucloud/dagu/v2/internal/browserhost"
 	cmnconfig "github.com/dagucloud/dagu/v2/internal/cmn/config"
+	"github.com/dagucloud/dagu/v2/internal/cmn/replaycache"
 	"github.com/dagucloud/dagu/v2/internal/cmn/runenv"
 	"github.com/dagucloud/dagu/v2/internal/cmn/value"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	llmpkg "github.com/dagucloud/dagu/v2/internal/llm"
 	"github.com/dagucloud/dagu/v2/internal/runtime"
+	"github.com/dagucloud/dagu/v2/internal/runtime/builtin/internal/agentstep"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -117,7 +119,7 @@ func (r *testRun) records() []browserhost.Record {
 func eventNames(session *ir.AgentSession) []string {
 	names := make([]string, 0, len(session.Events))
 	for _, event := range session.Events {
-		if event.Type == eventOperation {
+		if event.Type == agentstep.EventOperation {
 			names = append(names, event.Name+":"+event.Status)
 		}
 	}
@@ -408,7 +410,7 @@ func TestReplayCommitKeepsClear(t *testing.T) {
 	run := newTestRun(t, pageModel(nil))
 	require.NoError(t, run.execute(first, nil).err)
 
-	cache := browserhost.NewReplayCache(filepath.Join(run.dataDir, browserhost.DataDirName))
+	cache := replaycache.New(filepath.Join(run.dataDir, browserhost.DataDirName))
 	run.engine.onAct = func() {
 		_, err := cache.Clear("orders", "shop")
 		require.NoError(t, err)
@@ -477,6 +479,37 @@ func TestAskWaitsAndResumesSameBrowser(t *testing.T) {
 	assert.Empty(t, run.records())
 }
 
+// An answer whose browser record cannot be read for now stays pending, so a
+// retry reattaches to the same browser once the record is readable again.
+func TestAskResumeAfterUnreadableRecord(t *testing.T) {
+	t.Parallel()
+
+	run := newTestRun(t, pageModel(map[string]string{"The account name": `{"account":"acme"}`}))
+	waiting := run.execute(loginSteps, nil)
+	require.NoError(t, waiting.err)
+	session := waiting.exec.GetAgentSession()
+	session.Interactions[0].Status = ir.AgentInteractionAnswered
+	session.Interactions[0].Answers = [][]string{{"123456"}}
+
+	// A directory in place of the record cannot be read as a file by any
+	// process, whatever its privileges.
+	record := filepath.Join(run.dataDir, browserhost.DataDirName, "sessions", browserhost.RecordID("run-1", "shop")+".json")
+	data, err := os.ReadFile(record)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(record))
+	require.NoError(t, os.Mkdir(record, 0o700))
+	failed := run.execute(loginSteps, session)
+	require.NoError(t, os.Remove(record))
+	require.NoError(t, os.WriteFile(record, data, 0o600))
+	require.ErrorContains(t, failed.err, "read the waiting browser's record")
+	retry := failed.exec.GetAgentSession()
+	assert.False(t, retry.Interactions[0].Applied, "the answer stays pending")
+
+	require.NoError(t, run.execute(loginSteps, retry).err)
+	assert.Equal(t, []browserHandle{run.engine.handle}, run.launcher.reattaches, "the retry reattaches to the waiting browser")
+	assert.Len(t, run.launcher.launches, 1)
+}
+
 // A resumed step applies allowed_domains to the browser it reattaches, as the
 // first launch did.
 func TestAskResumeKeepsAllowedDomains(t *testing.T) {
@@ -533,12 +566,15 @@ func TestAskRejectionFailsStep(t *testing.T) {
 	require.NoError(t, waiting.err)
 
 	session := waiting.exec.GetAgentSession()
+	used := session.Usage.TotalTokens
+	require.Positive(t, used)
 	session.Interactions[0].Status = ir.AgentInteractionRejected
 	rejected := run.execute(loginSteps, session)
 
 	require.ErrorContains(t, rejected.err, "the input request was rejected")
 	assert.Empty(t, run.launcher.reattaches)
 	assert.Empty(t, run.records(), "the waiting browser is released")
+	assert.Equal(t, used, rejected.exec.GetAgentSession().Usage.TotalTokens, "tokens used before the wait still count")
 }
 
 // A step that waits for a person keeps what it recorded and the tokens it
@@ -609,7 +645,7 @@ func TestModelBridgeFallsBackAndMasks(t *testing.T) {
 		return working, nil
 	}
 	ctx := runtime.WithEnv(t.Context(), runtime.Env{Scope: value.NewEnvScope(nil, false)})
-	bridge, err := newModelBridge(ctx, cfg, newMasker(map[string]string{"TOKEN": "s3cr3t-token"}, nil), factory)
+	bridge, err := newModelBridge(ctx, cfg, agentstep.NewMasker(map[string]string{"TOKEN": "s3cr3t-token"}, nil), factory)
 	require.NoError(t, err)
 
 	resp, err := bridge.generate(ctx, generateRequest{
@@ -626,17 +662,6 @@ func TestModelBridgeFallsBackAndMasks(t *testing.T) {
 	assert.Equal(t, toolChoiceRequired, request.ToolChoice)
 	assert.NotContains(t, request.Tools[0].Function.Parameters, "$schema")
 	assert.Equal(t, "tree contains *******", lastUserText(request))
-}
-
-func TestStructuredAnswerFromText(t *testing.T) {
-	t.Parallel()
-
-	answer, err := structuredAnswer(&llmpkg.ChatResponse{Content: "```json\n{\"ok\":true}\n```"})
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"ok":true}`, string(answer))
-
-	_, err = structuredAnswer(&llmpkg.ChatResponse{Content: "I cannot help"})
-	assert.Error(t, err)
 }
 
 func TestCheckAllowedDomain(t *testing.T) {
@@ -749,7 +774,7 @@ func TestUnfinishedDownloadFailsStep(t *testing.T) {
 func TestMaskerHidesSecretsAndAnswers(t *testing.T) {
 	t.Parallel()
 
-	masker := newMasker(
+	masker := agentstep.NewMasker(
 		map[string]string{"TOKEN": "s3cr3t-token", "PIN": "12", "SHORT": "éé", "WORD": "パスワード"},
 		map[string]string{"otp": "424242", "choice": "2"},
 	)

@@ -41,6 +41,7 @@ type actionNormalizer func(normalized map[string]any, with map[string]any) error
 const (
 	artifactActionPrefix = "artifact."
 	browserActionPrefix  = "browser."
+	computerActionPrefix = "computer."
 )
 
 var builtinActionNormalizers = map[string]actionNormalizer{
@@ -53,6 +54,8 @@ var builtinActionNormalizers = map[string]actionNormalizer{
 	"browser.extract":     normalizeBrowserExtractAction,
 	"browser.run":         normalizeBrowserRunAction,
 	"chat.completion":     normalizeChatAction,
+	"computer.extract":    normalizeComputerExtractAction,
+	"computer.run":        normalizeComputerRunAction,
 	"container.run":       optionalCommandAction("container", "command"),
 	"dag.enqueue":         normalizeDagEnqueueAction,
 	"dag.run":             normalizeDagRunAction,
@@ -431,11 +434,35 @@ func normalizeBrowserRunAction(normalized map[string]any, with map[string]any) e
 	if _, ok := with["do"]; !ok {
 		return ir.NewValidationError("with", with, fmt.Errorf("browser.run requires with.do"))
 	}
+	moveActionLLM(normalized, with)
+	return finishAction(normalized, ir.ExecutorTypeBrowser, with)
+}
+
+// moveActionLLM moves with.llm to the step llm field.
+func moveActionLLM(normalized map[string]any, with map[string]any) {
 	if llm, ok := with["llm"]; ok {
 		normalized["llm"] = llm
 		delete(with, "llm")
 	}
-	return finishAction(normalized, ir.ExecutorTypeBrowser, with)
+}
+
+// normalizeComputerRunAction moves with.llm to the step llm field, as
+// browser.run does.
+func normalizeComputerRunAction(normalized map[string]any, with map[string]any) error {
+	if _, ok := with["do"]; !ok {
+		return ir.NewValidationError("with", with, fmt.Errorf("computer.run requires with.do"))
+	}
+	moveActionLLM(normalized, with)
+	return finishAction(normalized, ir.ExecutorTypeComputer, with)
+}
+
+// normalizeComputerExtractAction rewrites computer.extract into computer.run
+// with a single extract operation.
+func normalizeComputerExtractAction(normalized map[string]any, with map[string]any) error {
+	if err := singleExtractOperation(with); err != nil {
+		return err
+	}
+	return normalizeComputerRunAction(normalized, with)
 }
 
 // normalizeBrowserExtractAction rewrites browser.extract into browser.run
@@ -444,6 +471,15 @@ func normalizeBrowserExtractAction(normalized map[string]any, with map[string]an
 	if _, err := requireActionStringField(with, "url"); err != nil {
 		return err
 	}
+	if err := singleExtractOperation(with); err != nil {
+		return err
+	}
+	return normalizeBrowserRunAction(normalized, with)
+}
+
+// singleExtractOperation replaces with.instruction, with.schema, and
+// with.timeout by a with.do holding one extract operation.
+func singleExtractOperation(with map[string]any) error {
 	instruction, err := requireActionStringField(with, "instruction")
 	if err != nil {
 		return err
@@ -462,7 +498,7 @@ func normalizeBrowserExtractAction(normalized map[string]any, with map[string]an
 	delete(with, "instruction")
 	delete(with, "schema")
 	with["do"] = []any{extract}
-	return normalizeBrowserRunAction(normalized, with)
+	return nil
 }
 
 func normalizeHTTPRequestAction(normalized map[string]any, with map[string]any) error {

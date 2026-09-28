@@ -294,6 +294,9 @@ func (b *SubCmdBuilder) Retry(dag *ir.DAG, opts RetryOptions) CmdSpec {
 	if opts.IncludeDownstream && opts.Step != "" {
 		args = append(args, "--downstream")
 	}
+	if opts.BypassPreconditions && opts.Step != "" {
+		args = append(args, "--bypass-preconditions")
+	}
 	if !opts.Root.Zero() {
 		args = append(args, fmt.Sprintf("--root=%s", opts.Root.String()))
 	}
@@ -382,10 +385,12 @@ type RetryOptions struct {
 	DAGRunID          string
 	Step              string
 	IncludeDownstream bool
-	Root              ir.DAGRunRef
-	RetryPath         dagrun.RetryPath
-	TriggerActor      string
-	QueueDispatch     bool
+	// BypassPreconditions skips step precondition evaluation for retried steps.
+	BypassPreconditions bool
+	Root                ir.DAGRunRef
+	RetryPath           dagrun.RetryPath
+	TriggerActor        string
+	QueueDispatch       bool
 }
 
 // RestartOptions contains options for restarting a dag-run.

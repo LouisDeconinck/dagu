@@ -488,7 +488,8 @@ func (r *Local) newAgent(
 	opts.TriggerActor = req.TriggerActor
 	opts.ParallelItem = req.ParallelItem
 	opts.RetryPath = req.RetryPath
-	opts.ExtraEnvs = append(inProcessExtraEnvs(rCtx, req), toolEnvs...)
+	opts.ExtraEnvs = append(inProcessExtraEnvs(req), toolEnvs...)
+	opts.InheritedEnvs = inheritedEnvForLocalRunner(rCtx.InheritedEnvs())
 	opts.WorkerID = r.workerID
 	opts.StatusPusher = r.statusPusher
 	opts.SubWorkflowRunnerFactory = r.subWorkflowRunnerFactory
@@ -674,10 +675,13 @@ func inProcessLoadOptions(
 	return loadOpts
 }
 
-func inProcessExtraEnvs(rCtx runctx.Context, req executor.SubWorkflowRequest) []string {
-	envs := inheritedEnvForLocalRunner(rCtx.InheritedEnvs())
-	// A local child already receives the parent run scope implicitly. Values the
-	// step passed explicitly are applied after it so they win on conflict.
+// inProcessExtraEnvs returns the execution-scoped values a local child run
+// receives on top of its own declarations: the pass_env values the step opted
+// to share plus run-control markers. The parent run scope reaches the child
+// separately through Options.InheritedEnvs, where it sits below the child's
+// own params and declarations.
+func inProcessExtraEnvs(req executor.SubWorkflowRequest) []string {
+	var envs []string
 	envs = append(envs, req.PassedEnv...)
 	if req.ParallelItem != "" {
 		envs = append(envs, ir.ParallelItemVariable+"="+req.ParallelItem)

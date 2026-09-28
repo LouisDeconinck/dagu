@@ -236,6 +236,8 @@ type Agent struct {
 	workspaceSeed *runtimeexec.WorkspaceSeed
 	// extraEnvs are additional execution-scoped env vars injected into the DAG run context.
 	extraEnvs []string
+	// inheritedEnvs are env entries inherited from the parent run scope.
+	inheritedEnvs []cmnvalue.EnvEntry
 	// profileName is the selected runtime profile name for this run.
 	profileName string
 
@@ -310,6 +312,10 @@ type Options struct {
 	ProgressDisplay bool
 	// ExtraEnvs are additional execution-scoped env vars injected into the DAG run context.
 	ExtraEnvs []string
+	// InheritedEnvs are env entries an in-process child run inherits from the
+	// parent run scope. They enter the run's environment below its own
+	// declared values, keeping each entry's source metadata.
+	InheritedEnvs []cmnvalue.EnvEntry
 	// WorkDir sets the existing per-run work directory.
 	WorkDir string
 	// WorkspaceSeed carries the workspace into inline child workflows.
@@ -432,6 +438,7 @@ func New(
 		profileResolver:          opts.ProfileResolver,
 		registry:                 opts.ServiceRegistry,
 		extraEnvs:                append([]string{}, opts.ExtraEnvs...),
+		inheritedEnvs:            append([]cmnvalue.EnvEntry{}, opts.InheritedEnvs...),
 		workDir:                  opts.WorkDir,
 		workspaceSeed:            opts.WorkspaceSeed,
 		profileName:              opts.ProfileName,
@@ -695,6 +702,9 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	}
 	if len(a.extraEnvs) > 0 {
 		contextOpts = append(contextOpts, runtime.WithEnvVars(a.extraEnvs...))
+	}
+	if len(a.inheritedEnvs) > 0 {
+		contextOpts = append(contextOpts, runtime.WithInheritedEnvs(a.inheritedEnvs))
 	}
 
 	if a.workDir != "" {

@@ -72,11 +72,11 @@
       }
     },
     "schedule": {
-      "examples": ["@daily", "0 * * * *", "*/15 8-18 * * MON-FRI"],
+      "examples": ["@daily", "@every 1h", "0 * * * *", "*/15 8-18 * * MON-FRI"],
       "oneOf": [
         {
           "type": "string",
-          "description": "Single cron expression or schedule alias for starting the DAG (e.g., '@daily' runs at midnight)"
+          "description": "Single cron expression or descriptor for starting the DAG (e.g., '@daily' runs at midnight, '@every 1h' runs hourly)"
         },
         {
           "type": "array",
@@ -142,7 +142,7 @@
           "description": "Advanced scheduling with separate start, stop, and restart schedules."
         }
       ],
-      "description": "Schedule configuration for the DAG. Start schedules support cron expressions and schedule aliases, profile-scoped cron object entries, and one-off RFC 3339 timestamps with explicit offsets. Stop and restart remain cron-only but may still use profile-scoped cron objects."
+      "description": "Schedule configuration for the DAG. Start schedules support cron expressions and descriptors (e.g. '@daily', '@weekly', '@every 1h30m'), profile-scoped cron object entries, and one-off RFC 3339 timestamps with explicit offsets. Stop and restart remain cron-only but may still use profile-scoped cron objects."
     },
     "skip_if_successful": {
       "type": "boolean",
@@ -869,7 +869,7 @@
         },
         "expression": {
           "type": "string",
-          "description": "Cron expression for a recurring schedule entry"
+          "description": "Cron expression or descriptor (e.g. '@daily', '@every 30m') for a recurring schedule entry"
         },
         "profile": {
           "type": "string",
@@ -2844,6 +2844,30 @@
         },
         {
           "if": {
+            "properties": { "action": { "const": "computer.extract" } },
+            "required": ["action"]
+          },
+          "then": {
+            "required": ["with"],
+            "properties": {
+              "with": { "$ref": "#/definitions/computerExtractActionConfig" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "action": { "const": "computer.run" } },
+            "required": ["action"]
+          },
+          "then": {
+            "required": ["with"],
+            "properties": {
+              "with": { "$ref": "#/definitions/computerRunActionConfig" }
+            }
+          }
+        },
+        {
+          "if": {
             "properties": { "action": { "const": "template.render" } },
             "required": ["action"]
           },
@@ -3278,7 +3302,7 @@
       "properties": {
         "exec": {
           "type": "string",
-          "description": "Name of an existing running container to exec into. Dagu waits up to 120 seconds for the container to be running; fails if not running within timeout. Mutually exclusive with 'image'. When used, only 'user', 'working_dir', and 'env' are applicable."
+          "description": "Name of an existing running container to exec into. Dagu waits up to 120 seconds for the container to be running; fails if not running within timeout. Mutually exclusive with 'image'. When used, only 'user', 'working_dir', 'env', 'env_file', and 'shell' are applicable."
         },
         "name": {
           "type": "string",
@@ -3326,6 +3350,22 @@
             }
           ],
           "description": "Environment variables to set in the container. Supports maps or arrays combining maps and KEY=value strings. Entries are evaluated in YAML source order, and names must match ^[A-Za-z_][A-Za-z0-9_]*$. Values can include variable expansion (e.g., 'API_KEY=${API_KEY}')."
+        },
+        "env_file": {
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Path to a .env file whose variables are injected into the container environment"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "List of paths to .env files whose variables are injected into the container environment"
+            }
+          ],
+          "description": ".env files to load into the container environment. Files use the same dotenv syntax as root 'dotenv', not docker's literal --env-file format: surrounding quotes are removed, and $VAR or ${VAR} in unquoted or double-quoted values expands from variables defined earlier in the same file; single-quoted values are literal. Files are read in order; later files override earlier values, and 'env' entries override file variables with the same name. Relative paths are searched in the working directory first, then in the DAG file directory. Unlike 'dotenv', a missing file fails the run."
         },
         "volumes": {
           "type": "array",
@@ -4060,6 +4100,11 @@
         "refresh_token": {
           "type": "string",
           "description": "Refresh token exchanged for an access token before each connection."
+        },
+        "scopes": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "microsoft_refresh only: scopes to refresh for, replacing https://outlook.office.com/.default. offline_access is always requested."
         }
       },
       "description": "OAuth refresh-token credentials."
@@ -4102,13 +4147,26 @@
     "mailExecutorConfig": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["to", "subject", "message"],
-      "if": { "not": { "required": ["mailbox"] } },
-      "then": { "required": ["from"] },
+      "required": ["message"],
+      "allOf": [
+        {
+          "if": { "not": { "required": ["mailbox"] } },
+          "then": { "required": ["from"] }
+        },
+        {
+          "if": { "not": { "required": ["in_reply_to"] } },
+          "then": { "required": ["to", "subject"] }
+        }
+      ],
+      "dependencies": { "in_reply_to": ["mailbox"] },
       "properties": {
         "mailbox": {
           "type": "string",
           "description": "Send through this mail account from mail_accounts instead of the DAG-level smtp configuration."
+        },
+        "in_reply_to": {
+          "oneOf": [{ "type": "string" }, { "type": "object" }],
+          "description": "Reply to this email: an ID or an email from mail.search. Requires mailbox. to defaults to the email's Reply-To or sender, subject to Re: and its subject, and the reply is threaded under it."
         },
         "from": {
           "type": "string",
@@ -6440,6 +6498,8 @@
             "browser.extract",
             "browser.run",
             "chat.completion",
+            "computer.extract",
+            "computer.run",
             "container.run",
             "dag.enqueue",
             "dag.run",
@@ -7262,7 +7322,7 @@
           "description": "What to extract, in natural language. Its text is sent to the model; pass secrets through variables."
         },
         "schema": {
-          "$ref": "#/definitions/browserExtractSchema"
+          "$ref": "#/definitions/extractSchema"
         },
         "timeout": {
           "type": "string",
@@ -7361,7 +7421,7 @@
       "additionalProperties": { "type": "string" },
       "description": "Values referenced as %name% in act instructions. The browser receives the values; the model sees only the names."
     },
-    "browserExtractSchema": {
+    "extractSchema": {
       "type": "object",
       "required": ["type"],
       "properties": {
@@ -7451,7 +7511,7 @@
           "required": ["instruction", "schema"],
           "properties": {
             "instruction": { "type": "string", "minLength": 1 },
-            "schema": { "$ref": "#/definitions/browserExtractSchema" }
+            "schema": { "$ref": "#/definitions/extractSchema" }
           },
           "description": "Extract structured data from the page into step outputs."
         },
@@ -7517,6 +7577,225 @@
         }
       },
       "description": "One browser operation. Set exactly one of goto, act, extract, expect, wait, screenshot, or ask."
+    },
+    "computerExtractActionConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instruction", "schema"],
+      "properties": {
+        "instruction": {
+          "type": "string",
+          "minLength": 1,
+          "description": "What to read from the screen, in natural language. Its text is sent to the model."
+        },
+        "schema": {
+          "$ref": "#/definitions/extractSchema"
+        },
+        "timeout": {
+          "type": "string",
+          "description": "Maximum time for the extraction, such as 90s. Defaults to 5m."
+        },
+        "llm": {
+          "$ref": "#/definitions/standardLLMConfig",
+          "description": "Model for this step. Replaces the DAG-level llm block entirely."
+        },
+        "mode": { "$ref": "#/definitions/computerMode" },
+        "screenshots": { "$ref": "#/definitions/computerScreenshots" }
+      },
+      "description": "Configuration for action: computer.extract. Reads the screen of the worker's desktop and publishes the top-level fields of schema as step outputs."
+    },
+    "computerRunActionConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["do"],
+      "properties": {
+        "do": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/definitions/computerOperation" },
+          "description": "Operations run in order on the desktop of the worker's user session."
+        },
+        "mode": { "$ref": "#/definitions/computerMode" },
+        "variables": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+          "additionalProperties": { "type": "string" },
+          "description": "Values referenced as %name% in act instructions. The model sees only the names; the values are typed for it."
+        },
+        "screenshots": { "$ref": "#/definitions/computerScreenshots" },
+        "cache": {
+          "type": "boolean",
+          "default": true,
+          "description": "Record the act operations of a step that succeeds and replay them on later runs without a model call while the screens match."
+        },
+        "max_actions": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 50,
+          "description": "Most desktop actions one act may take."
+        },
+        "on_confirmation": {
+          "type": "string",
+          "enum": ["fail", "allow"],
+          "default": "fail",
+          "description": "What to do when the model provider asks a person to confirm actions: fail the step, or allow them."
+        },
+        "idle": {
+          "type": "string",
+          "default": "15s",
+          "description": "How long nobody may have used the desktop before the step sends input or launches an application, such as 30s. Actions the model chose on a screen a person has since used are not run. 0 turns this off."
+        },
+        "llm": {
+          "$ref": "#/definitions/standardLLMConfig",
+          "description": "Model for this step. Replaces the DAG-level llm block entirely."
+        }
+      },
+      "description": "Configuration for action: computer.run. Operates the desktop of a macOS or Windows worker; extract operations publish their schema fields as step outputs."
+    },
+    "computerMode": {
+      "type": "string",
+      "enum": ["auto", "native", "generic"],
+      "default": "auto",
+      "description": "auto uses the provider's native computer-use tool when it has one (anthropic, openai, gemini), native requires it, generic uses plain function tools with any vision model."
+    },
+    "computerScreenshots": {
+      "type": "string",
+      "enum": ["on_failure", "final", "each", "never"],
+      "default": "on_failure",
+      "description": "Automatic screenshots stored as run artifacts, unmasked: on_failure only when the step fails, final also at the end of a successful step, each also after every operation, never none."
+    },
+    "computerCondition": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "description": "Statement about the screen, judged by the model."
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["statement"],
+          "properties": {
+            "statement": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Statement about the screen, judged by the model."
+            },
+            "within": {
+              "type": "string",
+              "description": "How long to keep rechecking a false statement, such as 30s."
+            }
+          }
+        }
+      ]
+    },
+    "computerOperation": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [
+        { "required": ["launch"] },
+        { "required": ["act"] },
+        { "required": ["extract"] },
+        { "required": ["expect"] },
+        { "required": ["wait"] },
+        { "required": ["screenshot"] },
+        { "required": ["ask"] }
+      ],
+      "properties": {
+        "launch": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["command"],
+              "properties": {
+                "command": { "type": "string", "minLength": 1 },
+                "args": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          ],
+          "description": "Start an application without waiting for it, such as notepad.exe, or open with args [-a, TextEdit] on macOS."
+        },
+        "act": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["instruction"],
+              "properties": {
+                "instruction": { "type": "string", "minLength": 1 },
+                "cache": {
+                  "type": "boolean",
+                  "description": "Replay recorded actions for this operation. Defaults to with.cache."
+                },
+                "max_actions": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "description": "Most desktop actions this act may take. Defaults to with.max_actions."
+                }
+              }
+            }
+          ],
+          "description": "Complete a task described in natural language by clicking and typing. Reference variables as %name%."
+        },
+        "extract": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["instruction", "schema"],
+          "properties": {
+            "instruction": { "type": "string", "minLength": 1 },
+            "schema": { "$ref": "#/definitions/extractSchema" }
+          },
+          "description": "Read structured data from the screen into step outputs."
+        },
+        "expect": {
+          "$ref": "#/definitions/computerCondition",
+          "description": "Statement that must hold for the screen, or the step fails."
+        },
+        "wait": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Time to pause, such as 2s."
+        },
+        "screenshot": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "description": "Save a screenshot with this name as a run artifact."
+        },
+        "ask": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prompt", "as"],
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Question shown to the person who answers in the Web UI."
+            },
+            "as": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "description": "Variable that receives the answer, referenced as %name% in later act operations."
+            },
+            "timeout": {
+              "type": "string",
+              "description": "How long the step waits for the answer, such as 30m. Defaults to 1h."
+            }
+          },
+          "description": "Pause the step until a person answers. The desktop is left as it is and other computer steps may use it meanwhile."
+        },
+        "when": {
+          "$ref": "#/definitions/computerCondition",
+          "description": "Statement checked before the operation; the operation is skipped unless it holds."
+        },
+        "timeout": {
+          "type": "string",
+          "description": "Maximum time for this operation, such as 30s. Defaults to 5m."
+        }
+      },
+      "description": "One computer operation. Set exactly one of launch, act, extract, expect, wait, screenshot, or ask."
     },
     "templateRenderActionConfig": {
       "type": "object",

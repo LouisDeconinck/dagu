@@ -21,6 +21,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/build"
 	"github.com/dagucloud/dagu/v2/internal/executor/registry"
 	"github.com/dagucloud/dagu/v2/internal/runctx"
+	"github.com/dagucloud/dagu/v2/internal/runtimeenv"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/cmdutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
@@ -77,6 +78,8 @@ type Runner struct {
 	pause         time.Duration
 	lastError     error
 	preconditions []ir.ConditionResult
+	// preconditionCancel interrupts the running DAG-level precondition check.
+	preconditionCancel context.CancelFunc
 
 	handlerMu sync.RWMutex
 	handlers  map[ir.HandlerType]*Node
@@ -178,11 +181,15 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUp
 			r.setFailed()
 			r.Cancel(plan)
 		} else {
-			results, conditionErr := EvaluateConditions(ctx, shell, rCtx.DAG.Preconditions)
+			checkCtx, stopCheck := r.watchPreconditionStop(ctx)
+			results, conditionErr := EvaluateConditions(checkCtx, shell, rCtx.DAG.Preconditions)
+			stopCheck()
 			r.setPreconditionResults(results)
 			if conditionErr != nil {
 				logger.Info(ctx, "Preconditions are not met", tag.Error(conditionErr))
-				if !errors.Is(conditionErr, ErrConditionNotMet) {
+				// A check interrupted by abort leaves the run aborted.
+				abortedCheck := errors.Is(conditionErr, errConditionInterrupted) && r.isCanceled()
+				if !errors.Is(conditionErr, ErrConditionNotMet) && !abortedCheck {
 					r.setLastError(conditionErr)
 					r.setFailed()
 				}
@@ -579,8 +586,7 @@ func (r *Runner) runNodeExecution(ctx context.Context, plan *Plan, node *Node, p
 	met, err := r.meetsPreconditions(ctx, node, preconditionProgress)
 	if err != nil {
 		r.markBuildPrecondition(ctx, buildSession, node, ir.BuildReasonPreconditionError, "", progressCh)
-		r.setLastError(err)
-		r.Cancel(plan)
+		r.handlePreconditionError(plan, err)
 		return
 	}
 	if !met {
@@ -761,8 +767,7 @@ func (r *Runner) runHumanTask(ctx context.Context, plan *Plan, node *Node, progr
 	ctx = r.setupNodeExecutionEnv(ctx, node)
 	met, err := r.meetsPreconditions(ctx, node, progressCh)
 	if err != nil {
-		r.setLastError(err)
-		r.Cancel(plan)
+		r.handlePreconditionError(plan, err)
 		return
 	}
 	if !met {
@@ -939,12 +944,15 @@ func (r *Runner) setupVariables(ctx context.Context, plan *Plan, node *Node) (co
 
 	// Add container environment variables (step-level takes precedence over DAG-level)
 	// This ensures container env vars are available when evaluating command arguments
-	if ct := node.Step().Container; ct != nil {
+	ct := node.Step().Container
+	if ct == nil && env.DAG != nil {
+		ct = env.DAG.Container
+	}
+	if ct != nil {
 		if err := addResolvedEnvVars(ctx, &env, ct.Env, "container.env.", cmnvalue.ContainerEnvField); err != nil {
 			return ctx, err
 		}
-	} else if dag := env.DAG; dag != nil && dag.Container != nil {
-		if err := addResolvedEnvVars(ctx, &env, dag.Container.Env, "container.env.", cmnvalue.ContainerEnvField); err != nil {
+		if err := addContainerEnvFileVars(ctx, &env, ct); err != nil {
 			return ctx, err
 		}
 	}
@@ -986,6 +994,47 @@ func addResolvedEnvVars(ctx context.Context, env *Env, envList []string, fieldPr
 			return fmt.Errorf("failed to evaluate environment variable %q: %w", v, err)
 		}
 		env.Scope = env.Scope.WithEntry(key, evaluatedValue, cmnvalue.EnvSourceStepEnv)
+	}
+	return nil
+}
+
+// addContainerEnvFileVars adds the variables of the container's env_file
+// entries to the scope without evaluating their values. Keys declared in the
+// container's env keep their values, so env_file variables sit between step
+// env and container env (spec 006).
+func addContainerEnvFileVars(ctx context.Context, env *Env, ct *ir.Container) error {
+	if len(ct.EnvFile) == 0 {
+		return nil
+	}
+
+	paths := make([]string, len(ct.EnvFile))
+	for i, path := range ct.EnvFile {
+		field := cmnvalue.ContainerField(fmt.Sprintf("container.env_file[%d]", i))
+		resolved, err := resolverFromEnv(ctx, *env).String(ctx, path, field)
+		if err != nil {
+			return fmt.Errorf("failed to evaluate container env_file %q: %w", path, err)
+		}
+		paths[i] = resolved
+	}
+	var dagLocation string
+	if env.DAG != nil {
+		dagLocation = env.DAG.Location
+	}
+	vars, err := runtimeenv.LoadEnvFiles(paths, env.WorkingDir, dagLocation)
+	if err != nil {
+		return fmt.Errorf("failed to load container env_file: %w", err)
+	}
+
+	declared := make(map[string]struct{}, len(ct.Env))
+	for _, entry := range ct.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		declared[key] = struct{}{}
+	}
+	for _, entry := range vars {
+		key, value, _ := strings.Cut(entry, "=")
+		if _, ok := declared[key]; !ok {
+			env.Scope = env.Scope.WithEntry(key, value, cmnvalue.EnvSourceStepEnv)
+		}
 	}
 	return nil
 }
@@ -1093,6 +1142,12 @@ func (r *Runner) Stop(
 		plan.requestCancel()
 		if !r.isCanceled() {
 			r.setCanceled()
+		}
+		r.mu.RLock()
+		cancelCheck := r.preconditionCancel
+		r.mu.RUnlock()
+		if cancelCheck != nil {
+			cancelCheck()
 		}
 	}
 
@@ -1405,6 +1460,25 @@ func (r *Runner) setFailed() {
 	r.failed = 1
 }
 
+// watchPreconditionStop returns a context for the DAG-level precondition check
+// that Stop cancels, including a stop that arrived before the check started.
+// The returned func ends the watch and must be called once the check returns.
+func (r *Runner) watchPreconditionStop(ctx context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	r.mu.Lock()
+	r.preconditionCancel = cancel
+	r.mu.Unlock()
+	if r.isCanceled() {
+		cancel()
+	}
+	return ctx, func() {
+		r.mu.Lock()
+		r.preconditionCancel = nil
+		r.mu.Unlock()
+		cancel()
+	}
+}
+
 func (r *Runner) resetRunState(plan *Plan) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1625,6 +1699,21 @@ func externalStepRetryEnabled(ctx context.Context) bool {
 	return false
 }
 
+// handlePreconditionError records a step precondition error and cancels the
+// run. An interrupted check leaves the run to the abort or timeout that
+// interrupted it, so the run ends as that event defines: an abort records no
+// error, and a timeout records the interruption as the failure.
+func (r *Runner) handlePreconditionError(plan *Plan, err error) {
+	if !errors.Is(err, errConditionInterrupted) {
+		r.setLastError(err)
+		r.Cancel(plan)
+		return
+	}
+	if !r.isCanceled() {
+		r.setLastError(err)
+	}
+}
+
 // checkPreconditions evaluates the preconditions for a node and updates its status accordingly.
 func (r *Runner) meetsPreconditions(ctx context.Context, node *Node, progressCh chan ProgressUpdate) (bool, error) {
 	err := node.evalPreconditions(ctx)
@@ -1634,7 +1723,11 @@ func (r *Runner) meetsPreconditions(ctx context.Context, node *Node, progressCh 
 			r.report(ctx, progressCh, node)
 			return false, nil
 		}
-		node.SetStatus(ir.NodeFailed)
+		status := ir.NodeFailed
+		if errors.Is(err, errConditionInterrupted) {
+			status = ir.NodeAborted
+		}
+		node.SetStatus(status)
 		node.SetError(err)
 		r.report(ctx, progressCh, node)
 		return false, err

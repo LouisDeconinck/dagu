@@ -236,7 +236,7 @@ Dagu-owned references are supported only in value-resolved fields and dynamic-ev
 | `preconditions[].condition` | Value-resolved | Before checking the precondition | Root precondition condition strings resolve Dagu-owned references. Value-match conditions treat `$()` and backtick text as ordinary text. Command-check conditions may hand shell syntax to the selected shell. |
 | `preconditions[].eval` | Dynamic-evaluated | Before checking the precondition | Root precondition eval strings are allowed only with `expected`. Dagu resolves Dagu-owned references, then runs dynamic evaluation as defined by Spec 011. |
 | `preconditions[].expected` numeric comparison number | Value-resolved | Before checking the precondition | Only the number of a `num:` comparison resolves Dagu-owned references, and it must be exactly one whole reference. Every other form of `expected`, including literal and `re:` patterns, stays literal. Command substitution is never executed. |
-| `container` | Value-resolved | Before root container settings are used | Root container string form resolves Dagu-owned references. In object form, `exec`, `image`, `name`, `user`, `working_dir`, `network`, `volumes[]`, `ports[]`, `env` values, `command[]`, and `shell[]` resolve Dagu-owned references. |
+| `container` | Value-resolved | Before root container settings are used | Root container string form resolves Dagu-owned references. In object form, `exec`, `image`, `name`, `user`, `working_dir`, `network`, `volumes[]`, `ports[]`, `env` values, `env_file[]`, `command[]`, and `shell[]` resolve Dagu-owned references. |
 | `steps[].run` | Value-resolved | Step start | The string `run` value and each array-form `run` entry resolve Dagu-owned references. Dagu leaves shell syntax for the selected shell or script interpreter. |
 | `steps[].with` | Value-resolved | Step start | Nested string values under the step `with` object resolve Dagu-owned references unless a more specific row or owning action or executor spec defines another evaluation mode. This includes action inputs and run-step shell settings. |
 | `steps[].working_dir` | Value-resolved | Step start | Step working directory resolves Dagu-owned references. |
@@ -256,7 +256,7 @@ Dagu-owned references are supported only in value-resolved fields and dynamic-ev
 | `steps[].with.artifacts[]` (`human.task`) | Value-resolved | Before the human task opens | Human-task artifact path strings resolve Dagu-owned references and are then re-checked as artifact-relative paths. For unqualified environment syntax in these path strings, backslashes remain path text unless Spec 006 assigns them escape behavior. Spec 031 defines the path rules and the failure behavior. |
 | `steps[].stdout.outputs.fields.*` | Value-resolved | Output publication | Literal string values under field entries resolve Dagu-owned references. Selection and decode metadata remain literal unless an owning spec opts in. |
 | `steps[].output.*` | Value-resolved | Output publication | Literal string values and `path` strings under structured step `output` entries resolve Dagu-owned references. |
-| `steps[].container` | Value-resolved | Step start | Step container string form resolves Dagu-owned references. In object form, `exec`, `image`, `name`, `user`, `working_dir`, `network`, `volumes[]`, `ports[]`, `env` values, `command[]`, and `shell[]` resolve Dagu-owned references. |
+| `steps[].container` | Value-resolved | Step start | Step container string form resolves Dagu-owned references. In object form, `exec`, `image`, `name`, `user`, `working_dir`, `network`, `volumes[]`, `ports[]`, `env` values, `env_file[]`, `command[]`, and `shell[]` resolve Dagu-owned references. |
 | `steps[].messages[].content` | Value-resolved | Step start | Message content strings resolve Dagu-owned references. |
 | LLM prompt, selection, and endpoint text fields | Value-resolved | Step start | For LLM-capable steps, `steps[].llm.system`, `steps[].llm.provider`, string-form `steps[].llm.model`, `steps[].llm.base_url`, and array-form `steps[].llm.model[].provider`, `steps[].llm.model[].name`, and `steps[].llm.model[].base_url` resolve Dagu-owned references. A provider name that carries a reference is checked against the supported provider list after resolution, at step start rather than at load time. When a step inherits root LLM settings, the inherited fields follow the same rule. |
 | `worker_selector` (map form) | Value-resolved | DAG build, after base-config composition | Root worker selector keys and values resolve Dagu-owned references, including references to base-config env entries. The string form `worker_selector: local` stays literal. |
@@ -409,6 +409,9 @@ If a typed field later consumes the preserved text, that field may still fail be
 - Runtime `params` are available after Dagu builds the run input.
 
 - `dotenv[]` paths resolve before dotenv files are loaded.
+
+- Root and step `container.env_file[]` paths resolve before the files are
+  loaded. File contents are not value-resolved.
 
 - Root fields resolve before Dagu uses those fields.
 

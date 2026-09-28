@@ -487,7 +487,31 @@ func TestRetryDAGRun_RejectsIncludeDownstreamWithoutStep(t *testing.T) {
 	require.Contains(t, apiErr.Message, "includeDownstream requires stepName")
 }
 
-func TestRetryDAGRunSchema_IncludeDownstreamRequiresStepName(t *testing.T) {
+func TestRetryDAGRun_RejectsBypassPreconditionsWithoutStep(t *testing.T) {
+	ctx := context.Background()
+	bypassPreconditions := true
+	apiServer := &API{
+		config: &config.Config{Server: config.Server{Permissions: map[config.Permission]bool{
+			config.PermissionRunDAGs: true,
+		}}},
+	}
+
+	resp, err := apiServer.RetryDAGRun(ctx, openapiv1.RetryDAGRunRequestObject{
+		Name:     "any",
+		DagRunId: "run-1",
+		Body: &openapiv1.RetryDAGRunJSONRequestBody{
+			DagRunId:            "run-1",
+			BypassPreconditions: &bypassPreconditions,
+		},
+	})
+	require.Nil(t, resp)
+	var apiErr *Error
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, http.StatusBadRequest, apiErr.HTTPStatus)
+	require.Contains(t, apiErr.Message, "bypassPreconditions requires stepName")
+}
+
+func TestRetryDAGRunSchema_StepScopedOptionsRequireStepName(t *testing.T) {
 	t.Parallel()
 
 	swagger, err := openapiv1.GetSpec()
@@ -507,11 +531,20 @@ func TestRetryDAGRunSchema_IncludeDownstreamRequiresStepName(t *testing.T) {
 	require.NoError(t, validate(map[string]any{"dagRunId": "run-1"}))
 	require.NoError(t, validate(map[string]any{"dagRunId": "run-1", "stepName": "build"}))
 	require.NoError(t, validate(map[string]any{"dagRunId": "run-1", "includeDownstream": false}))
+	require.NoError(t, validate(map[string]any{"dagRunId": "run-1", "bypassPreconditions": false}))
 	require.NoError(t, validate(map[string]any{
 		"dagRunId": "run-1", "stepName": "build", "includeDownstream": true,
 	}))
+	require.NoError(t, validate(map[string]any{
+		"dagRunId": "run-1", "stepName": "build", "bypassPreconditions": true,
+	}))
+	require.NoError(t, validate(map[string]any{
+		"dagRunId": "run-1", "stepName": "build", "includeDownstream": true, "bypassPreconditions": true,
+	}))
 	require.Error(t, validate(map[string]any{"includeDownstream": true}))
 	require.Error(t, validate(map[string]any{"dagRunId": "run-1", "includeDownstream": true}))
+	require.Error(t, validate(map[string]any{"bypassPreconditions": true}))
+	require.Error(t, validate(map[string]any{"dagRunId": "run-1", "bypassPreconditions": true}))
 }
 
 func TestRetryDAGRun_DispatchesIncludeDownstream(t *testing.T) {
@@ -589,4 +622,80 @@ steps:
 	task := coordinatorCli.dispatched[0]
 	require.Equal(t, "first", task.Step)
 	require.True(t, task.IncludeDownstream)
+}
+
+func TestRetryDAGRun_DispatchesBypassPreconditions(t *testing.T) {
+	ctx := auth.WithUser(context.Background(), &auth.User{Username: "alice"})
+	tmpDir := t.TempDir()
+
+	dagFile := filepath.Join(tmpDir, "bypass-retry.yaml")
+	require.NoError(t, os.WriteFile(dagFile, []byte(`
+name: bypass_retry_dag
+worker_selector:
+  region: apac
+steps:
+  - name: gated
+    run: echo gated
+    preconditions:
+      - condition: "false"
+`), 0o600))
+
+	dag, err := spec.Load(ctx, dagFile)
+	require.NoError(t, err)
+
+	dagRunRepository := testutil.NewFileDAGRunRepository(filepath.Join(tmpDir, "dag-runs"), persis.DAGRunRepositoryOptions{LatestStatusToday: true})
+	attempt, err := dagRunRepository.CreateAttempt(
+		ctx,
+		dag,
+		time.Now().Add(-2*time.Minute),
+		"bypass-run",
+		persis.DAGRunCreateAttemptOptions{},
+	)
+	require.NoError(t, err)
+
+	status := ir.NewStatusBuilder(dag).Create(
+		"bypass-run",
+		ir.Failed,
+		0,
+		time.Now().Add(-2*time.Minute),
+		ir.WithAttemptID(attempt.ID()),
+		ir.WithFinishedAt(time.Now().Add(-time.Minute)),
+		ir.WithError("step failed"),
+	)
+	require.NoError(t, attempt.Open(ctx))
+	require.NoError(t, attempt.Write(ctx, status))
+	require.NoError(t, attempt.Close(ctx))
+
+	coordinatorCli := &retryCoordinatorRecorder{}
+	apiServer := &API{
+		dagRunRepository: dagRunRepository,
+		config: &config.Config{
+			Server: config.Server{
+				Permissions: map[config.Permission]bool{
+					config.PermissionRunDAGs: true,
+				},
+			},
+		},
+		coordinatorCli:  coordinatorCli,
+		defaultExecMode: config.ExecutionModeLocal,
+	}
+
+	stepName := "gated"
+	bypassPreconditions := true
+	resp, err := apiServer.RetryDAGRun(ctx, openapiv1.RetryDAGRunRequestObject{
+		Name:     dag.Name,
+		DagRunId: "bypass-run",
+		Body: &openapiv1.RetryDAGRunJSONRequestBody{
+			DagRunId:            "bypass-run",
+			StepName:            &stepName,
+			BypassPreconditions: &bypassPreconditions,
+		},
+	})
+	require.NoError(t, err)
+	_, ok := resp.(openapiv1.RetryDAGRun200Response)
+	require.True(t, ok)
+	require.Len(t, coordinatorCli.dispatched, 1)
+	task := coordinatorCli.dispatched[0]
+	require.Equal(t, "gated", task.Step)
+	require.True(t, task.BypassPreconditions)
 }

@@ -518,6 +518,54 @@ func TestTickPlanner_PlanLiveRun(t *testing.T) {
 	assert.Equal(t, ir.TriggerTypeScheduler, runs[0].TriggerType)
 }
 
+func TestTickPlanner_PlanEveryInterval(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
+	eventCh := make(chan DAGChangeEvent, 256)
+	tp := NewTickPlanner(TickPlannerConfig{
+		IsSuspended: func(_ context.Context, _ string) (bool, error) {
+			return false, nil
+		},
+		GetLatestStatus: func(_ context.Context, _ *ir.DAG) (ir.DAGRunStatus, error) {
+			return ir.DAGRunStatus{}, nil
+		},
+		Dispatch: func(_ context.Context, _ DAGEntry, _ string, _ ir.TriggerType, _ time.Time) error {
+			return nil
+		},
+		GenRunID: func(_ context.Context) (string, error) {
+			return "every-run-id", nil
+		},
+		IsRunning: func(_ context.Context, _ *ir.DAG) (bool, error) {
+			return false, nil
+		},
+		Clock: func() time.Time {
+			return start
+		},
+		Events: eventCh,
+	})
+
+	schedule, err := ir.NewCronSchedule("@every 2m")
+	require.NoError(t, err)
+	dag := &ir.DAG{
+		Name:     "every-dag",
+		Schedule: []ir.Schedule{schedule},
+	}
+	require.NoError(t, tp.Init(context.Background(), testDAGEntries(dag)))
+
+	// The epoch-aligned two-minute grid lands on every other minute tick.
+	for i, wantRun := range []bool{true, false, true} {
+		tick := start.Add(time.Duration(i) * time.Minute)
+		runs := tp.Plan(context.Background(), tick)
+		if !wantRun {
+			assert.Empty(t, runs, "tick %s", tick)
+			continue
+		}
+		require.Len(t, runs, 1, "tick %s", tick)
+		assert.True(t, tick.Equal(runs[0].ScheduledTime), "tick %s: got %s", tick, runs[0].ScheduledTime)
+	}
+}
+
 func TestTickPlanner_PlanSuspendedDAGSkipped(t *testing.T) {
 	t.Parallel()
 

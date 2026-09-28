@@ -18,6 +18,7 @@ import (
 // YAML examples:
 //
 //	schedule: "0 * * * *"
+//	schedule: "@daily"
 //	schedule: ["0 * * * *", "30 * * * *"]
 //	schedule:
 //	  start: "0 8 * * *"

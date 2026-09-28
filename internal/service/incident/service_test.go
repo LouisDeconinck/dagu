@@ -469,6 +469,63 @@ func TestServiceSolarWindsTriggerAndResolvePayloads(t *testing.T) {
 	assert.NotContains(t, requests[1], "description")
 }
 
+// A step failure leaves the run-level error empty; incident text and details
+// must fall back to the failed step's error instead of rendering blank.
+func TestIncidentRunErrorFromFailedStep(t *testing.T) {
+	t.Parallel()
+
+	event := failedEvent("daily", "run-1")
+	event.Status.Error = ""
+	event.Status.Nodes = []*ir.Node{{
+		Step:   ir.Step{Name: "fetch"},
+		Status: ir.NodeFailed,
+		Error:  "exit status 11",
+	}}
+
+	description := renderIncidentTemplate(incidentmodel.DefaultDescriptionTemplate, event, "")
+	assert.Equal(t, "Run run-1 finished with status failed.\n\nfetch: exit status 11", description)
+	assert.Equal(t, "fetch: exit status 11", incidentCustomDetails(event, "")["error"])
+}
+
+// A message template that renders step errors can exceed the Events API v2
+// summary limit, so the summary must be cut to fit.
+func TestPagerDutySummaryFitsLimit(t *testing.T) {
+	t.Parallel()
+
+	var summary string
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		defer func() { _ = req.Body.Close() }()
+		var body struct {
+			Payload struct {
+				Summary string `json:"summary"`
+			} `json:"payload"`
+		}
+		require.NoError(t, json.NewDecoder(req.Body).Decode(&body))
+		summary = body.Payload.Summary
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+		}, nil
+	})}
+	svc := New(newMemoryStore(t), WithHTTPClient(client))
+	provider := &incidentmodel.Provider{PagerDuty: &incidentmodel.PagerDutyProvider{RoutingKey: "routing-key"}}
+	policy := incidentmodel.Policy{MessageTemplate: "{{dag.name}} failed: {{run.error}}"}
+	event := failedEvent("daily", "run-1")
+	event.Status.Error = ""
+	event.Status.Nodes = []*ir.Node{{
+		Step:   ir.Step{Name: "fetch"},
+		Status: ir.NodeFailed,
+		Error:  strings.Repeat("é", pagerDutyMaxSummaryLength),
+	}}
+
+	_, err := svc.sendPagerDuty(context.Background(), provider, providerActionTrigger, "dedup-key", policy, event)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(summary), pagerDutyMaxSummaryLength)
+	assert.True(t, strings.HasPrefix(summary, "daily failed: fetch: é"))
+	assert.True(t, strings.HasSuffix(summary, "…"))
+}
+
 func failedEvent(dagName, runID string) chatbridge.NotificationEvent {
 	now := time.Now().UTC()
 	return chatbridge.NotificationEvent{

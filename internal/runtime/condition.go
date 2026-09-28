@@ -19,10 +19,20 @@ import (
 // Errors for condition evaluation
 var (
 	ErrConditionNotMet = fmt.Errorf("condition was not met")
+
+	// errConditionInterrupted marks an evaluation cut short by workflow abort
+	// or timeout. The owning DAG or step follows that outcome instead of
+	// treating the result as not met or failed.
+	errConditionInterrupted = errors.New("condition check interrupted")
 )
 
-// Error message for when not all conditions are met
-const ErrMsgOtherConditionNotMet = "other condition was not met"
+// Back-fill messages for conditions that passed while a sibling decided the
+// outcome. The wording mirrors how the owner is reported: a not-met condition
+// skips it, while an evaluation error fails it.
+const (
+	ErrMsgOtherConditionNotMet = "other condition was not met"
+	ErrMsgOtherConditionFailed = "other condition failed to evaluate"
+)
 
 // EvaluateConditions evaluates conditions and returns their runtime results.
 func EvaluateConditions(ctx context.Context, shell []string, conditions []*ir.Condition) ([]ir.ConditionResult, error) {
@@ -40,22 +50,33 @@ func EvaluateConditions(ctx context.Context, shell []string, conditions []*ir.Co
 	}
 
 	if lastErr != nil {
+		siblingErr := ErrMsgOtherConditionNotMet
+		if evalErr != nil {
+			siblingErr = ErrMsgOtherConditionFailed
+		}
 		for i := range results {
 			if results[i].Error != "" {
 				continue
 			}
-			results[i].Error = ErrMsgOtherConditionNotMet
+			results[i].Error = siblingErr
 		}
 	}
 
 	// An evaluation error outranks a not-met condition regardless of the order
 	// they appear in, so that a broken gate fails the owning DAG or step
 	// instead of being downgraded to a skip by a later mismatch.
+	err := lastErr
 	if evalErr != nil {
-		return results, evalErr
+		err = evalErr
 	}
 
-	return results, lastErr
+	// A context that ended during evaluation means abort or timeout cut the
+	// checks short, whatever each condition reported.
+	if err != nil && ctx.Err() != nil && !errors.Is(err, errConditionInterrupted) {
+		err = fmt.Errorf("%w: %w", errConditionInterrupted, ctx.Err())
+	}
+
+	return results, err
 }
 
 func conditionResults(conditions []*ir.Condition) []ir.ConditionResult {
@@ -242,13 +263,13 @@ func runShellCommand(ctx context.Context, shell []string, commandToRun string, w
 	args = appendShellCommandFlag(shell[0], args)
 	args = append(args, commandToRun)
 	cmd := exec.CommandContext(ctx, shell[0], args...) // nolint:gosec
+	prepareConditionCommand(cmd)
 	cmd.Env = append(cmd.Env, AllEnvs(ctx)...)
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
-	_, err := cmd.Output()
-	if err != nil {
-		return fmt.Errorf("%w: %s", ErrConditionNotMet, err)
+	if err := cmd.Run(); err != nil {
+		return commandCheckError(ctx, err)
 	}
 	return nil
 }
@@ -286,13 +307,36 @@ func hasShellCommandFlag(shell string, args []string) bool {
 
 func runDirectCommand(ctx context.Context, commandToRun string, workingDir string) error {
 	cmd := exec.CommandContext(ctx, commandToRun)
+	prepareConditionCommand(cmd)
 	cmd.Env = append(cmd.Env, AllEnvs(ctx)...)
 	if workingDir != "" {
 		cmd.Dir = workingDir
 	}
-	_, err := cmd.Output()
-	if err != nil {
-		return fmt.Errorf("%w: %s", ErrConditionNotMet, err)
+	if err := cmd.Run(); err != nil {
+		return commandCheckError(ctx, err)
 	}
 	return nil
+}
+
+// prepareConditionCommand groups the check's process and points the context
+// kill at that group, so abort or timeout also reaps children the check
+// spawned. Stdout and stderr stay unset: the result is the exit status alone,
+// and without output pipes a lingering descendant cannot delay it.
+func prepareConditionCommand(cmd *exec.Cmd) {
+	cmdutil.SetupCommand(cmd)
+	cmd.Cancel = func() error {
+		return cmdutil.TerminateProcessGroup(cmd, cmdutil.ForceTermination())
+	}
+}
+
+// commandCheckError classifies a failed command-check run. A context that is
+// canceled or past its deadline means the check was interrupted by abort or
+// timeout rather than answered no, so the error propagates as an evaluation
+// error for the owning DAG or step. Any other failure, including a non-zero
+// exit and a process that never started, is a not-met result.
+func commandCheckError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%w: %w", errConditionInterrupted, ctxErr)
+	}
+	return fmt.Errorf("%w: %s", ErrConditionNotMet, err)
 }

@@ -338,6 +338,10 @@ func (w *referenceFieldWalker) walkContainer(path string, container *ir.Containe
 		w.add(base.withPathValue(fieldPath, value).withField(cmnvalue.ContainerField(fieldPath)))
 	}
 	w.walkEnvWith(path+".env", container.Env, base, cmnvalue.ContainerEnvField)
+	for i, value := range container.EnvFile {
+		fieldPath := fmt.Sprintf("%s.env_file[%d]", path, i)
+		w.add(base.withPathValue(fieldPath, value).withField(cmnvalue.ContainerField(fieldPath)))
+	}
 	for i, value := range container.Command {
 		fieldPath := fmt.Sprintf("%s.command[%d]", path, i)
 		w.add(base.withPathValue(fieldPath, value).withField(cmnvalue.DirectCommandField(fieldPath, cmnvalue.CommandContext{Target: cmnvalue.CommandTargetDocker})))

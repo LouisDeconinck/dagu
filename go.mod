@@ -28,6 +28,7 @@ require (
 	github.com/containerd/platforms v1.0.0-rc.5
 	github.com/coreos/go-oidc v2.3.0+incompatible
 	github.com/creack/pty v1.1.24
+	github.com/ebitengine/purego v0.10.2
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-message v0.18.2
 	github.com/fsnotify/fsnotify v1.10.1
@@ -228,7 +229,6 @@ require (
 	github.com/dprotaso/go-yit v0.0.0-20220510233725-9ba8df137936 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/ebitengine/purego v0.10.2 // indirect
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
