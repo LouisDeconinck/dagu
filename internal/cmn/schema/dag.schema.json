@@ -709,7 +709,7 @@
     },
     "ssh": {
       "$ref": "#/definitions/sshConfig",
-      "description": "Default SSH configuration for all steps in the DAG. Steps can override this configuration with their own SSH settings. Note: SSH and container configurations are mutually exclusive at the DAG level."
+      "description": "Default SSH configuration for all steps in the DAG. Steps can override this configuration with their own SSH settings. String fields other than timeout support value references such as ${params.host}, resolved with the same rules as step with values. Note: SSH and container configurations are mutually exclusive at the DAG level."
     },
     "s3": {
       "allOf": [

@@ -947,7 +947,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 			}
 		}
 
-		sshConfig, err := evalHostConfigObject(ctx, ssh.Config{
+		sshConfig, err := evalSSHConfig(ctx, ssh.Config{
 			User:          a.dag.SSH.User,
 			Host:          a.dag.SSH.Host,
 			Port:          a.dag.SSH.Port,
@@ -959,7 +959,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 			ShellArgs:     a.dag.SSH.ShellArgs,
 			Timeout:       sshTimeout,
 			Bastion:       bastionCfg,
-		}, runtime.GetEnv(ctx).UserEnvsMap(), "ssh")
+		}, runtime.GetEnv(ctx).UserEnvsMap())
 		if err != nil {
 			initErr = fmt.Errorf("failed to evaluate ssh config: %w", err)
 			return initErr
@@ -2084,6 +2084,18 @@ func (a *Agent) evaluateMailConfigs(ctx context.Context) error {
 }
 
 func evalHostConfigObject[T any](ctx context.Context, obj T, vars map[string]string, path string) (T, error) {
+	resolver := cmnvalue.NewResolver(cmnvalue.StaticScope{}, cmnvalue.RuntimeScope{Env: hostConfigScope(ctx, vars)})
+	return resolveConfigObject(ctx, resolver, obj, cmnvalue.HostConfigObjectField(path))
+}
+
+// evalSSHConfig resolves the DAG-level SSH config with the steps[].with rules,
+// because it supplies the connection defaults for SSH steps.
+func evalSSHConfig(ctx context.Context, cfg ssh.Config, vars map[string]string) (ssh.Config, error) {
+	resolver := runtime.ValueResolverWithScope(ctx, hostConfigScope(ctx, vars))
+	return resolveConfigObject(ctx, resolver, cfg, cmnvalue.ExecutorConfigField("ssh"))
+}
+
+func hostConfigScope(ctx context.Context, vars map[string]string) *cmnvalue.EnvScope {
 	scope := cmnvalue.GetEnvScope(ctx)
 	if scope == nil {
 		env := runtime.GetEnv(ctx)
@@ -2095,8 +2107,11 @@ func evalHostConfigObject[T any](ctx context.Context, obj T, vars map[string]str
 		}
 		scope = scope.WithEntries(vars, cmnvalue.EnvSourceStepEnv)
 	}
-	resolver := cmnvalue.NewResolver(cmnvalue.StaticScope{}, cmnvalue.RuntimeScope{Env: scope})
-	got, err := resolver.Object(ctx, obj, cmnvalue.HostConfigObjectField(path))
+	return scope
+}
+
+func resolveConfigObject[T any](ctx context.Context, resolver cmnvalue.Resolver, obj T, field cmnvalue.Field) (T, error) {
+	got, err := resolver.Object(ctx, obj, field)
 	if err != nil {
 		return obj, err
 	}

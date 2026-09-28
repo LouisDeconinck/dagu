@@ -1807,6 +1807,10 @@ func (r *Runner) handleNodeExecutionError(ctx context.Context, plan *Plan, node 
 
 // shouldRepeatNode determines if a node should be repeated based on its repeat policy
 func (r *Runner) shouldRepeatNode(ctx context.Context, node *Node, execErr error) bool {
+	if r.isCanceled() || node.State().Status == ir.NodeAborted || errors.Is(execErr, context.DeadlineExceeded) {
+		return false
+	}
+
 	rp := node.Step().RepeatPolicy
 
 	// Check the hard limit first - this overrides everything
@@ -1818,14 +1822,42 @@ func (r *Runner) shouldRepeatNode(ctx context.Context, node *Node, execErr error
 	ctx = r.reloadNodeOutputs(ctx, node)
 	shell := GetEnv(ctx).Shell(ctx)
 
+	var repeat bool
+	var err error
 	switch rp.RepeatMode {
 	case ir.RepeatModeWhile:
-		return r.evalWhileCondition(ctx, shell, node, rp, execErr)
+		repeat, err = r.evalWhileCondition(ctx, shell, node, rp, execErr)
 	case ir.RepeatModeUntil:
-		return r.evalUntilCondition(ctx, shell, node, rp, execErr)
+		repeat, err = r.evalUntilCondition(ctx, shell, node, rp, execErr)
 	default:
 		return false
 	}
+	// Abort and timeout take precedence over a repeat condition result.
+	if r.isCanceled() || node.State().Status == ir.NodeAborted {
+		return false
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = fmt.Errorf("%w: %w", errConditionInterrupted, ctxErr)
+	}
+	if err == nil {
+		return repeat
+	}
+
+	if errors.Is(err, errConditionInterrupted) {
+		node.SetStatus(ir.NodeAborted)
+		node.SetError(err)
+		if !r.isCanceled() {
+			r.setLastError(err)
+		}
+		return false
+	}
+	node.MarkError(err)
+	if node.ShouldMarkSuccess(ctx) {
+		node.SetStatus(ir.NodeSucceeded)
+		return false
+	}
+	r.setLastError(err)
+	return false
 }
 
 // reloadNodeOutputs updates the context with the node's current output variables.
@@ -1844,29 +1876,39 @@ func (r *Runner) reloadNodeOutputs(ctx context.Context, node *Node) context.Cont
 }
 
 // evalWhileCondition evaluates the repeat condition for a "while" loop.
-func (r *Runner) evalWhileCondition(ctx context.Context, shell []string, node *Node, rp ir.RepeatPolicy, execErr error) bool {
+// A not-met condition is a normal loop answer; any other error is an
+// evaluation error for the caller to report.
+func (r *Runner) evalWhileCondition(ctx context.Context, shell []string, node *Node, rp ir.RepeatPolicy, execErr error) (bool, error) {
 	if rp.Condition != nil {
 		err := EvalCondition(ctx, shell, rp.Condition)
-		return err == nil // Repeat while condition is met
+		if err != nil && !errors.Is(err, ErrConditionNotMet) {
+			return false, err
+		}
+		return err == nil, nil // Repeat while condition is met
 	}
 	if len(rp.ExitCode) > 0 {
-		return slices.Contains(rp.ExitCode, node.State().ExitCode)
+		return slices.Contains(rp.ExitCode, node.State().ExitCode), nil
 	}
 	// Unconditional while: repeat as long as the step succeeds
-	return execErr == nil
+	return execErr == nil, nil
 }
 
 // evalUntilCondition evaluates the repeat condition for an "until" loop.
-func (r *Runner) evalUntilCondition(ctx context.Context, shell []string, node *Node, rp ir.RepeatPolicy, execErr error) bool {
+// A not-met condition is a normal loop answer; any other error is an
+// evaluation error for the caller to report.
+func (r *Runner) evalUntilCondition(ctx context.Context, shell []string, node *Node, rp ir.RepeatPolicy, execErr error) (bool, error) {
 	if rp.Condition != nil {
 		err := EvalCondition(ctx, shell, rp.Condition)
-		return err != nil // Repeat until condition is met
+		if err != nil && !errors.Is(err, ErrConditionNotMet) {
+			return false, err
+		}
+		return err != nil, nil // Repeat until condition is met
 	}
 	if len(rp.ExitCode) > 0 {
-		return !slices.Contains(rp.ExitCode, node.State().ExitCode)
+		return !slices.Contains(rp.ExitCode, node.State().ExitCode), nil
 	}
 	// Unconditional until: repeat until the step succeeds
-	return execErr != nil
+	return execErr != nil, nil
 }
 
 // prepareNodeForRepeat sets up a node for repetition
