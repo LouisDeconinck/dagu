@@ -547,7 +547,7 @@ func TestRenderDAGStatus_SubRunExpansionDepthCap(t *testing.T) {
 
 	output := newTestRendererWithConfig(func(c *Config) {
 		c.MaxSubRunDepth = 0
-		c.SubRunResolver = func(sub ir.SubDAGRun) (*ir.DAGRunStatus, error) {
+		c.SubRunResolver = func(ir.SubDAGRun) (*ir.DAGRunStatus, error) {
 			return childStatus, nil
 		}
 	}).RenderDAGStatus(dag, status)
@@ -573,7 +573,7 @@ func TestRenderDAGStatus_SubRunExpansionResolverError(t *testing.T) {
 	}
 
 	output := newTestRendererWithConfig(func(c *Config) {
-		c.SubRunResolver = func(sub ir.SubDAGRun) (*ir.DAGRunStatus, error) {
+		c.SubRunResolver = func(ir.SubDAGRun) (*ir.DAGRunStatus, error) {
 			return nil, fmt.Errorf("no stored status")
 		}
 	}).RenderDAGStatus(dag, status)
