@@ -19,6 +19,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/computerhost"
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
+	"github.com/dagucloud/dagu/v2/internal/humantask"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/opencodehost"
 	"google.golang.org/grpc/codes"
@@ -379,10 +380,10 @@ func (a *API) respondAgentInteraction(ctx context.Context, root ir.DAGRunRef, su
 	if err != nil {
 		return api.AgentInteractionResponse{}, err
 	}
-	resumed := !hasWaitingSteps(updated.Nodes)
+	resumed := !hasWaitingSteps(updated.Nodes) || humantask.UnblockedNodeReady(updated)
 	if resumed {
 		if subDAGRunID == "" {
-			err = a.resumeDAGRun(ctx, root, root.ID)
+			err = a.resumeWaitingDAGRun(ctx, root, root.ID, updated)
 		} else {
 			err = a.resumeSubDAGRun(ctx, root, subDAGRunID)
 		}
@@ -441,7 +442,7 @@ func (a *API) restartAgentSession(ctx context.Context, root ir.DAGRunRef, subDAG
 		return api.AgentSessionRestartResponse{}, err
 	}
 	if subDAGRunID == "" {
-		err = a.resumeDAGRun(ctx, root, root.ID)
+		err = a.resumeWaitingDAGRun(ctx, root, root.ID, updated)
 	} else {
 		err = a.resumeSubDAGRun(ctx, root, subDAGRunID)
 	}
