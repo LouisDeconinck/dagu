@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"maps"
@@ -24,6 +25,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/mailer"
 	"github.com/dagucloud/dagu/v2/internal/cmn/stringutil"
@@ -1289,7 +1292,7 @@ func (s *Service) sendEmail(ctx context.Context, target notificationmodel.Target
 		target.Email.Cc,
 		target.Email.Bcc,
 		subject,
-		messageForEvents(target.Email.BodyTemplate, events, s.publicURL()),
+		emailBodyForEvents(target.Email.BodyTemplate, events, s.publicURL()),
 		attachments,
 	)
 	return err
@@ -1342,7 +1345,7 @@ func (s *Service) sendWebhook(ctx context.Context, target notificationmodel.Targ
 		return s.sendWebhookBodyTemplate(ctx, target, events, publicURL)
 	}
 	payload := webhookPayloadForEvents(events, publicURL)
-	payload["message"] = messageForEvents(target.Webhook.MessageTemplate, events, publicURL)
+	payload["message"] = messageForEvents(target.Webhook.MessageTemplate, events, publicURL, nil)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -1366,7 +1369,7 @@ func (s *Service) sendWebhookBodyTemplate(
 			continue
 		}
 		single := []chatbridge.NotificationEvent{event}
-		message := messageForEvents(target.Webhook.MessageTemplate, single, publicURL)
+		message := messageForEvents(target.Webhook.MessageTemplate, single, publicURL, nil)
 		body := []byte(renderWebhookBodyTemplate(target.Webhook.BodyTemplate, event, message, publicURL))
 		if !json.Valid(body) {
 			return errors.New("webhook body template did not render valid JSON")
@@ -1407,7 +1410,7 @@ func (s *Service) sendSlack(ctx context.Context, target notificationmodel.Target
 		return err
 	}
 	body, err := json.Marshal(map[string]string{
-		"text": messageForEvents(target.Slack.MessageTemplate, events, s.publicURL()),
+		"text": slackTextForEvents(target.Slack.MessageTemplate, events, s.publicURL()),
 	})
 	if err != nil {
 		return err
@@ -1427,7 +1430,7 @@ func (s *Service) sendTeams(ctx context.Context, target notificationmodel.Target
 	if err := validateOutboundURL(ctx, target.Teams.WebhookURL, false, false); err != nil {
 		return err
 	}
-	body, err := json.Marshal(teamsPayloadForEvents(target.Teams.MessageTemplate, events, s.publicURL()))
+	body, err := marshalTeamsPayload(teamsPayloadForEvents(target.Teams.MessageTemplate, events, s.publicURL()))
 	if err != nil {
 		return err
 	}
@@ -1455,7 +1458,7 @@ func (s *Service) sendTelegram(ctx context.Context, target notificationmodel.Tar
 	}
 	payload := map[string]any{
 		"chat_id": target.Telegram.ChatID,
-		"text":    messageForEvents(target.Telegram.MessageTemplate, events, s.publicURL()),
+		"text":    truncateTelegramText(messageForEvents(target.Telegram.MessageTemplate, events, s.publicURL(), nil)),
 	}
 	if target.Telegram.TopicID != "" {
 		if topicID, err := strconv.Atoi(target.Telegram.TopicID); err == nil {
@@ -1473,6 +1476,26 @@ func (s *Service) sendTelegram(ctx context.Context, target notificationmodel.Tar
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return s.doWebhookRequest(req)
+}
+
+// telegramMaxMessageLength is the Bot API limit for message text, counted in
+// UTF-16 code units. Longer messages are rejected, not truncated.
+const telegramMaxMessageLength = 4096
+
+// truncateTelegramText shortens text to telegramMaxMessageLength, marking the
+// cut with an ellipsis.
+func truncateTelegramText(text string) string {
+	units, cut := 0, -1
+	for i, r := range text {
+		units += utf16.RuneLen(r)
+		if cut < 0 && units > telegramMaxMessageLength-1 {
+			cut = i
+		}
+		if units > telegramMaxMessageLength {
+			return text[:cut] + "…"
+		}
+	}
+	return text
 }
 
 func (s *Service) doWebhookRequest(req *http.Request) error {
@@ -1687,8 +1710,8 @@ func bodyForEvents(events []chatbridge.NotificationEvent, publicURL string) stri
 		if finishedAt, err := stringutil.ParseTime(status.FinishedAt); err == nil && !finishedAt.IsZero() {
 			fmt.Fprintf(&b, "Finished: %s\n", finishedAt.Format(time.RFC3339))
 		}
-		if status.Error != "" {
-			fmt.Fprintf(&b, "Error: %s\n", status.Error)
+		if runError := status.ErrorText(); runError != "" {
+			fmt.Fprintf(&b, "Error: %s\n", runError)
 		}
 		if runLink := notificationRunLink(status, publicURL); runLink != "" {
 			fmt.Fprintf(&b, "%s\n", runLink)
@@ -1697,16 +1720,30 @@ func bodyForEvents(events []chatbridge.NotificationEvent, publicURL string) stri
 	return b.String()
 }
 
-func messageForEvents(template string, events []chatbridge.NotificationEvent, publicURL string) string {
+// messageForEvents renders template once per event, or the default body when
+// template is blank. A non-nil escape is applied to every token value and to
+// the default body, never to text written in the template.
+func messageForEvents(
+	template string,
+	events []chatbridge.NotificationEvent,
+	publicURL string,
+	escape func(string) string,
+) string {
 	if strings.TrimSpace(template) == "" {
-		return bodyForEvents(events, publicURL)
+		body := bodyForEvents(events, publicURL)
+		if escape != nil {
+			// The default body has only fixed plain-text labels around the
+			// values, so escaping it whole equals escaping each value.
+			return escape(body)
+		}
+		return body
 	}
 	parts := make([]string, 0, len(events))
 	for _, event := range events {
 		if event.Status == nil {
 			continue
 		}
-		rendered := strings.TrimSpace(renderNotificationTemplate(template, event, publicURL))
+		rendered := strings.TrimSpace(renderTemplateTokens(template, notificationTemplateValues(event, publicURL), escape))
 		if rendered != "" {
 			parts = append(parts, rendered)
 		}
@@ -1774,8 +1811,9 @@ func notificationTemplateValues(event chatbridge.NotificationEvent, publicURL st
 	values["dagRunId"] = status.DAGRunID
 	values["run.status"] = status.Status.String()
 	values["status"] = status.Status.String()
-	values["run.error"] = status.Error
-	values["error"] = status.Error
+	runError := status.ErrorText()
+	values["run.error"] = runError
+	values["error"] = runError
 	maps.Copy(values, notificationStepStatusValues(status))
 	values["run.startedAt"] = notificationTemplateTime(status.StartedAt)
 	values["run.finishedAt"] = notificationTemplateTime(status.FinishedAt)
@@ -1927,8 +1965,48 @@ func teamsPayloadForEvents(template string, events []chatbridge.NotificationEven
 		"@context": "http://schema.org/extensions",
 		"summary":  title,
 		"title":    title,
-		"text":     messageForEvents(template, events, publicURL),
+		"text":     messageForEvents(template, events, publicURL, nil),
 	}
+}
+
+// teamsMaxPayloadBytes is the request body limit of Teams incoming webhooks,
+// which reject larger messages instead of truncating them. Kept below the
+// documented 28 KB.
+const teamsMaxPayloadBytes = 28_000
+
+// marshalTeamsPayload encodes payload, cutting its text with an ellipsis so the
+// body fits teamsMaxPayloadBytes.
+func marshalTeamsPayload(payload map[string]any) ([]byte, error) {
+	body, err := json.Marshal(payload)
+	if err != nil || len(body) <= teamsMaxPayloadBytes {
+		return body, err
+	}
+	const ellipsis = "…"
+	text, _ := payload["text"].(string)
+	// Every text byte encodes to at least one JSON byte, so dropping the
+	// overflow plus the ellipsis length from the raw text always fits.
+	keep := max(len(text)-(len(body)-teamsMaxPayloadBytes)-len(ellipsis), 0)
+	for keep > 0 && !utf8.RuneStart(text[keep]) {
+		keep--
+	}
+	payload["text"] = text[:keep] + ellipsis
+	return json.Marshal(payload)
+}
+
+// emailBodyForEvents renders an email body. The body is sent as HTML, so token
+// values are HTML-escaped to show as written.
+func emailBodyForEvents(template string, events []chatbridge.NotificationEvent, publicURL string) string {
+	return messageForEvents(template, events, publicURL, html.EscapeString)
+}
+
+// slackTextEscaper escapes the characters Slack reads as the start or end of
+// a mention or link.
+var slackTextEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
+// slackTextForEvents renders Slack message text. Token values are escaped so
+// that they cannot form Slack mentions or links.
+func slackTextForEvents(template string, events []chatbridge.NotificationEvent, publicURL string) string {
+	return messageForEvents(template, events, publicURL, slackTextEscaper.Replace)
 }
 
 func webhookPayloadForEvents(events []chatbridge.NotificationEvent, publicURL string) map[string]any {
@@ -1944,7 +2022,7 @@ func webhookPayloadForEvents(events []chatbridge.NotificationEvent, publicURL st
 			"dagRunId":   event.Status.DAGRunID,
 			"runPath":    runPath,
 			"status":     event.Status.Status.String(),
-			"error":      event.Status.Error,
+			"error":      event.Status.ErrorText(),
 			"observedAt": event.ObservedAt.Format(time.RFC3339Nano),
 		}
 		if runURL := notificationRunURL(publicURL, runPath); runURL != "" {
