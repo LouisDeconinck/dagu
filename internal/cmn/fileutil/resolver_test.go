@@ -151,11 +151,8 @@ func TestFileResolverUserTildeError(t *testing.T) {
 	// surface instead of collapsing into FileNotFoundError.
 	resolver := NewFileResolver(nil)
 
-	for _, resolve := range []func(string) (string, error){
-		resolver.ResolveFilePath,
-		resolver.ResolveFilePathLiteral,
-	} {
-		_, err := resolve("~alice/missing.txt")
+	assertTildeUserError := func(t *testing.T, err error) {
+		t.Helper()
 		if err == nil {
 			t.Fatal("expected error for ~name path, got none")
 		}
@@ -166,6 +163,23 @@ func TestFileResolverUserTildeError(t *testing.T) {
 			t.Errorf("error should mention the offending path, got: %v", err)
 		}
 	}
+
+	for _, resolve := range []func(string) (string, error){
+		resolver.ResolveFilePath,
+		resolver.ResolveFilePathLiteral,
+	} {
+		// Leading whitespace must not push a ~name path into search mode.
+		for _, path := range []string{"~alice/missing.txt", " ~alice/missing.txt"} {
+			_, err := resolve(path)
+			assertTildeUserError(t, err)
+		}
+	}
+
+	// An environment variable that expands to a ~name path hits the same
+	// rejection; the literal resolver never expands it.
+	t.Setenv("TILDE_USER", "~alice")
+	_, err := resolver.ResolveFilePath("$TILDE_USER/missing.txt")
+	assertTildeUserError(t, err)
 }
 
 func TestFileNotFoundError(t *testing.T) {

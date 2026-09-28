@@ -223,7 +223,9 @@ func expandHomeDir(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get user home directory: %w", err)
 	}
-	return filepath.Join(homeDir, path[1:]), nil
+	// Both separators are accepted after "~"; strip them so a path like
+	// ~\dotenv does not join the backslash into the filename on Unix.
+	return filepath.Join(homeDir, strings.TrimLeft(path[1:], `/\`)), nil
 }
 
 // ResolvePathOrBlank works like ResolvePath but returns original path on error.

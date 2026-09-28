@@ -5,6 +5,7 @@ package fileutil
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -26,15 +27,22 @@ func NewFileResolver(relativeTos []string) *FileResolver {
 // underlying error when a path cannot be resolved at all (for example an
 // unsupported ~name path or an undetermined home directory).
 func (r *FileResolver) ResolveFilePath(file string) (string, error) {
-	return r.resolveFilePath(file, ResolvePath)
+	return r.resolveFilePath(file, true, ResolvePath)
 }
 
 // ResolveFilePathLiteral resolves a path without expanding environment variables.
 func (r *FileResolver) ResolveFilePathLiteral(file string) (string, error) {
-	return r.resolveFilePath(file, resolvePathLiteral)
+	return r.resolveFilePath(file, false, resolvePathLiteral)
 }
 
-func (r *FileResolver) resolveFilePath(file string, resolvePath func(string) (string, error)) (string, error) {
+func (r *FileResolver) resolveFilePath(file string, expandEnv bool, resolvePath func(string) (string, error)) (string, error) {
+	// Normalize before classifying: whitespace can hide a leading "~" and an
+	// environment variable can expand to a "~name" path, both of which belong
+	// in the absolute/tilde branch rather than search mode.
+	file = strings.TrimSpace(file)
+	if expandEnv {
+		file = os.ExpandEnv(file)
+	}
 	if filepath.IsAbs(file) || strings.HasPrefix(file, "~") {
 		resolved, err := resolvePath(file)
 		if err != nil {

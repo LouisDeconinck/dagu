@@ -156,6 +156,12 @@ func TestResolvePath(t *testing.T) {
 			expectError: false,
 		},
 		{
+			name:        "TildeBackslashSeparator",
+			path:        `~\documents`,
+			expected:    filepath.Clean(filepath.Join(testHome, "documents")),
+			expectError: false,
+		},
+		{
 			name:        "EnvironmentVariableExpansion",
 			path:        "$TEMP_DIR/logs",
 			expected:    filepath.Clean(filepath.Join(cwd, testTempDir, "logs")),
