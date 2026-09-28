@@ -182,6 +182,14 @@ steps:
 
 Sub-DAGs do not inherit parent env vars. Pass values explicitly via `with.params`.
 
+## Approval Gates
+
+An `approval:` gate pauses a step after its execution until an operator approves, rejects, or pushes it back. In a root run, approving a gate resumes ready dependent steps while independent manual steps remain waiting, provided no failed, aborted, rejected, or retrying step would be re-run. Steps with build inputs do not by themselves trigger a resume while other manual steps wait.
+
+Root approvals, push-backs, agent interaction responses, and agent-session restarts enqueue their resumes. Keep the scheduler running with `queues.enabled: true`; otherwise an accepted resume remains `Queued`. Use `dagu start-all` for local managed OpenCode sessions so the server and scheduler share the session host. The API's `resumed: true` indicates an accepted resume, not that execution has started.
+
+Child approvals and agent interaction responses resume only after every waiting step in the child is resolved. Independent branch resumption is supported only for root runs.
+
 ## human.task
 
 Pause a root DAG run until an operator completes a processless step. A human task does not execute a command and is distinct from an approval gate: completion always succeeds the step, and there is no reject operation. With `with.push_back`, the operator can instead send the work back to an upstream step with feedback.
