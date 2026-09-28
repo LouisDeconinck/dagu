@@ -81,7 +81,8 @@ func TestLookPathInEnvDir_RelativePATHEntry(t *testing.T) {
 	// A relative PATH entry resolves against dir, like the started process.
 	resolved, err := LookPathInEnvDir("mytool", []string{"PATH=bin;"}, base)
 	require.NoError(t, err)
-	assert.Equal(t, tool, resolved)
+	// The resolved name carries the PATHEXT extension's case, like exec.LookPath.
+	assert.Equal(t, strings.ToLower(tool), strings.ToLower(resolved))
 
 	// A txt payload shadows nothing and cannot launch.
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "doc.txt"), []byte("x"), 0o644))
