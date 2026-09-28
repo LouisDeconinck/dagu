@@ -947,7 +947,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 			}
 		}
 
-		sshConfig, err := evalHostConfigObject(ctx, ssh.Config{
+		sshConfig, err := evalSSHConfig(ctx, ssh.Config{
 			User:          a.dag.SSH.User,
 			Host:          a.dag.SSH.Host,
 			Port:          a.dag.SSH.Port,
@@ -959,7 +959,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 			ShellArgs:     a.dag.SSH.ShellArgs,
 			Timeout:       sshTimeout,
 			Bastion:       bastionCfg,
-		}, runtime.GetEnv(ctx).UserEnvsMap(), "ssh")
+		}, runtime.GetEnv(ctx).UserEnvsMap())
 		if err != nil {
 			initErr = fmt.Errorf("failed to evaluate ssh config: %w", err)
 			return initErr
@@ -2084,9 +2084,21 @@ func (a *Agent) evaluateMailConfigs(ctx context.Context) error {
 }
 
 func evalHostConfigObject[T any](ctx context.Context, obj T, vars map[string]string, path string) (T, error) {
-	env := runtime.GetEnv(ctx)
+	resolver := cmnvalue.NewResolver(cmnvalue.StaticScope{}, cmnvalue.RuntimeScope{Env: hostConfigScope(ctx, vars)})
+	return resolveConfigObject(ctx, resolver, obj, cmnvalue.HostConfigObjectField(path))
+}
+
+// evalSSHConfig resolves the DAG-level SSH config with the steps[].with rules,
+// because it supplies the connection defaults for SSH steps.
+func evalSSHConfig(ctx context.Context, cfg ssh.Config, vars map[string]string) (ssh.Config, error) {
+	resolver := runtime.ValueResolverWithScope(ctx, hostConfigScope(ctx, vars))
+	return resolveConfigObject(ctx, resolver, cfg, cmnvalue.ExecutorConfigField("ssh"))
+}
+
+func hostConfigScope(ctx context.Context, vars map[string]string) *cmnvalue.EnvScope {
 	scope := cmnvalue.GetEnvScope(ctx)
 	if scope == nil {
+		env := runtime.GetEnv(ctx)
 		scope = env.Scope
 	}
 	if len(vars) > 0 {
@@ -2095,20 +2107,11 @@ func evalHostConfigObject[T any](ctx context.Context, obj T, vars map[string]str
 		}
 		scope = scope.WithEntries(vars, cmnvalue.EnvSourceStepEnv)
 	}
+	return scope
+}
 
-	var consts, params, paramDeclarations cmnvalue.Values
-	var paramsJSON string
-	if env.DAG != nil {
-		consts = cmnvalue.Values(env.DAG.Consts)
-		params = env.DAG.ParamValues()
-		paramsJSON = env.DAG.ParamsJSON
-		paramDeclarations = env.DAG.ParamDeclarations()
-	}
-	resolver := cmnvalue.NewResolver(
-		cmnvalue.StaticScope{Consts: consts, Params: paramDeclarations},
-		cmnvalue.RuntimeScope{Consts: consts, Params: params, ParamsJSON: paramsJSON, Env: scope},
-	)
-	got, err := resolver.Object(ctx, obj, cmnvalue.HostConfigObjectField(path))
+func resolveConfigObject[T any](ctx context.Context, resolver cmnvalue.Resolver, obj T, field cmnvalue.Field) (T, error) {
+	got, err := resolver.Object(ctx, obj, field)
 	if err != nil {
 		return obj, err
 	}

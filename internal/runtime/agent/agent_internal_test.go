@@ -12,6 +12,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/mailer/oauthconfig"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/runtime"
+	"github.com/dagucloud/dagu/v2/internal/runtime/builtin/ssh"
 	"github.com/dagucloud/dagu/v2/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -110,75 +111,53 @@ func TestPanicToError(t *testing.T) {
 	}
 }
 
-func TestEvalHostConfigObjectResolvesDAGParams(t *testing.T) {
+// DAG-level ssh fields resolve Dagu-owned references with the steps[].with
+// rules, alongside unqualified environment syntax such as ${fqdn}. An
+// unresolved reference stays literal.
+func TestEvalSSHConfig(t *testing.T) {
 	t.Parallel()
 
-	// DAG-level ssh fields resolve Dagu-owned references like ${params.*} in
-	// addition to unqualified environment syntax such as ${fqdn}.
-	yaml := `
+	dag, err := spec.LoadYAML(context.Background(), []byte(`
+name: ssh-config
+consts:
+  - user: deploy
 params:
   - name: fqdn
     type: string
-  - name: bastion_host
-    type: string
-ssh:
-  user: root
-  host: ${params.fqdn}
-  key: /keys/${fqdn}/id_rsa
-  bastion:
-    host: ${params.bastion_host}
-    user: root
 steps:
   - name: ok
     run: "true"
-`
-	dag, err := spec.LoadYAML(context.Background(), []byte(yaml),
-		spec.WithParams("fqdn=node.internal bastion_host=bastion.internal"),
-	)
+`), spec.WithParams("fqdn=node.internal"))
 	require.NoError(t, err)
-	require.NotNil(t, dag.SSH)
-
-	ctx := runtime.NewContext(context.Background(), dag, "test-run",
-		filepath.Join(t.TempDir(), "run.log"),
-		runtime.WithParams([]string{"fqdn=node.internal", "bastion_host=bastion.internal"}),
-	)
-
-	evaluated, err := evalHostConfigObject(ctx, *dag.SSH, runtime.GetEnv(ctx).UserEnvsMap(), "ssh")
-	require.NoError(t, err)
-	assert.Equal(t, "node.internal", evaluated.Host)
-	assert.Equal(t, "/keys/node.internal/id_rsa", evaluated.Key)
-	require.NotNil(t, evaluated.Bastion)
-	assert.Equal(t, "bastion.internal", evaluated.Bastion.Host)
-}
-
-func TestEvalHostConfigObjectPreservesUnknownParams(t *testing.T) {
-	t.Parallel()
-
-	yaml := `
-params:
-  - name: fqdn
-    type: string
-ssh:
-  user: root
-  host: ${params.missing}
-steps:
-  - name: ok
-    run: "true"
-`
-	dag, err := spec.LoadYAML(context.Background(), []byte(yaml),
-		spec.WithParams("fqdn=node.internal"),
-	)
-	require.NoError(t, err)
-	require.NotNil(t, dag.SSH)
-
 	ctx := runtime.NewContext(context.Background(), dag, "test-run",
 		filepath.Join(t.TempDir(), "run.log"),
 		runtime.WithParams([]string{"fqdn=node.internal"}),
 	)
+	vars := runtime.GetEnv(ctx).UserEnvsMap()
 
-	// An unresolvable params reference stays literal, matching the
-	// warning-only semantics of other value-resolved fields.
-	evaluated, err := evalHostConfigObject(ctx, *dag.SSH, runtime.GetEnv(ctx).UserEnvsMap(), "ssh")
-	require.NoError(t, err)
-	assert.Equal(t, "${params.missing}", evaluated.Host)
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "Param", raw: "${params.fqdn}", want: "node.internal"},
+		{name: "EnvShorthand", raw: "/keys/${fqdn}/id_rsa", want: "/keys/node.internal/id_rsa"},
+		{name: "Const", raw: "${consts.user}", want: "deploy"},
+		{name: "BuiltinContext", raw: "${context.dag.name}", want: "ssh-config"},
+		{name: "UnknownParam", raw: "${params.missing}", want: "${params.missing}"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := evalSSHConfig(ctx, ssh.Config{
+				Host:    tt.raw,
+				Bastion: &ssh.BastionConfig{Host: tt.raw},
+			}, vars)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got.Host)
+			require.NotNil(t, got.Bastion)
+			assert.Equal(t, tt.want, got.Bastion.Host)
+		})
+	}
 }

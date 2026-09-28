@@ -51,15 +51,7 @@ func NewTracer(ctx context.Context, dag *ir.DAG, vars map[string]string) (*Trace
 		}
 		scope = scope.WithEntries(vars, cmnvalue.EnvSourceStepEnv)
 	}
-	resolver := cmnvalue.NewResolver(
-		cmnvalue.StaticScope{Consts: cmnvalue.Values(dag.Consts), Params: dag.ParamDeclarations()},
-		cmnvalue.RuntimeScope{
-			Consts:     cmnvalue.Values(dag.Consts),
-			Params:     dag.ParamValues(),
-			ParamsJSON: dag.ParamsJSON,
-			Env:        scope,
-		},
-	)
+	resolver := cmnvalue.NewResolver(cmnvalue.StaticScope{}, cmnvalue.RuntimeScope{Env: scope})
 	cfgAny, err := resolver.Object(ctx, *dag.OTel, cmnvalue.HostConfigObjectField("otel"))
 	if err != nil {
 		return nil, fmt.Errorf("failed to evaluate OTel config: %w", err)

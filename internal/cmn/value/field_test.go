@@ -40,6 +40,7 @@ func TestResolverFieldPolicyMatrix(t *testing.T) {
 	raw := "${consts.service}:$MATRIX_SCOPE:$VALUE_RESOLUTION_MATRIX_OS"
 	strictNoOS := "api:scoped:$VALUE_RESOLUTION_MATRIX_OS"
 	strictOS := "api:scoped:from-os"
+	nonStrictNoOS := "${consts.service}:scoped:$VALUE_RESOLUTION_MATRIX_OS"
 	nonStrictOS := "${consts.service}:scoped:from-os"
 
 	expected := map[string]string{
@@ -47,7 +48,7 @@ func TestResolverFieldPolicyMatrix(t *testing.T) {
 		"ConstLoad":                  strictNoOS,
 		"StaticValidation":           strictNoOS,
 		"WorkflowObject":             strictNoOS,
-		"HostConfigObject":           strictNoOS,
+		"HostConfigObject":           nonStrictNoOS,
 		"DAGEnv":                     strictOS,
 		"RuntimeDAGEnv":              strictNoOS,
 		"DynamicParamEval":           strictOS,
