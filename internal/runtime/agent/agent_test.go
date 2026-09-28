@@ -417,6 +417,63 @@ func TestAgent_Run(t *testing.T) {
 			t.Errorf("expected node %q to be in success state, got %q", node.Step.Name, node.Status.String())
 		}
 	})
+	t.Run("RejectsAlreadyExecutedAttempt", func(t *testing.T) {
+		th := test.Setup(t)
+		dag := th.DAG(t, `steps:
+  - run: exit 0
+`)
+		runID := "duplicate-attempt-run"
+		prepared, err := th.DAGRunRepository.CreateAttempt(
+			th.Context, dag.DAG, time.Now(), runID, persis.DAGRunCreateAttemptOptions{},
+		)
+		require.NoError(t, err)
+		require.NoError(t, prepared.Open(th.Context))
+		finished := ir.NewStatusBuilder(dag.DAG).Create(
+			runID, ir.Succeeded, 0, time.Now(), ir.WithAttemptID(prepared.ID()),
+		)
+		require.NoError(t, prepared.Write(th.Context, finished))
+		require.NoError(t, prepared.Close(th.Context))
+
+		// The same attempt must not be executed again: its status file
+		// already holds a recorded execution.
+		dagAgent := dag.Agent(
+			test.WithDAGRunID(runID),
+			test.WithAgentOptions(agent.Options{
+				RunStateStore: persis.NewRunStateStore(th.DAGRunRepository, prepared),
+			}),
+		)
+		err = dagAgent.Run(th.Context)
+		require.ErrorIs(t, err, dagrun.ErrDAGRunAlreadyExists)
+	})
+	t.Run("ResumesQueuedAttempt", func(t *testing.T) {
+		// Queue dispatch and seeded step selections persist a queued status
+		// before the agent resumes the attempt, so reopening the attempt file
+		// must not be rejected as a duplicate.
+		th := test.Setup(t)
+		dag := th.DAG(t, `steps:
+  - run: exit 0
+`)
+		runID := "queued-attempt-run"
+		prepared, err := th.DAGRunRepository.CreateAttempt(
+			th.Context, dag.DAG, time.Now(), runID, persis.DAGRunCreateAttemptOptions{},
+		)
+		require.NoError(t, err)
+		require.NoError(t, prepared.Open(th.Context))
+		queued := ir.NewStatusBuilder(dag.DAG).Create(
+			runID, ir.Queued, 0, time.Time{}, ir.WithAttemptID(prepared.ID()),
+		)
+		require.NoError(t, prepared.Write(th.Context, queued))
+		require.NoError(t, prepared.Close(th.Context))
+
+		dagAgent := dag.Agent(
+			test.WithDAGRunID(runID),
+			test.WithAgentOptions(agent.Options{
+				RunStateStore: persis.NewRunStateStore(th.DAGRunRepository, prepared),
+			}),
+		)
+		dagAgent.RunSuccess(t)
+		dag.AssertLatestStatus(t, ir.Succeeded)
+	})
 	t.Run("PreConditionNotMet", func(t *testing.T) {
 		th := test.Setup(t)
 		dag := th.DAG(t, fmt.Sprintf(`steps:
