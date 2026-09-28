@@ -1135,7 +1135,7 @@ func (srv *Server) setupAssetRoutesWithFS(r *chi.Mux, basePath string, assetFS f
 			return
 		}
 
-		if ctype := mime.TypeByExtension(path.Ext(r.URL.Path)); ctype != "" {
+		if ctype := mime.TypeByExtension(strings.ToLower(path.Ext(r.URL.Path))); ctype != "" {
 			w.Header().Set("Content-Type", ctype)
 		}
 		fileServer.ServeHTTP(w, r)
