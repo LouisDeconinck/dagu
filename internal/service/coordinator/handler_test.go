@@ -6331,7 +6331,7 @@ func TestHandler_RequestCancel(t *testing.T) {
 		require.NotNil(t, attempt.status)
 		require.Equal(t, ir.Aborted, attempt.status.Status)
 		require.NotEmpty(t, attempt.status.FinishedAt)
-		require.Equal(t, context.Canceled.Error(), attempt.status.Error)
+		require.Equal(t, notStartedCancellationReason, attempt.status.Error)
 	})
 
 	t.Run("LeavesActiveSubAttemptForWorkerShutdown", func(t *testing.T) {

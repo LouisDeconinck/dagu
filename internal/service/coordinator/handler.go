@@ -3547,6 +3547,10 @@ func (h *Handler) RequestCancel(ctx context.Context, req *coordinatorv1.RequestC
 	return &coordinatorv1.RequestCancelResponse{Accepted: true}, nil
 }
 
+// notStartedCancellationReason is the run error shown to users for a run
+// canceled before any worker started it.
+const notStartedCancellationReason = "canceled before the run started"
+
 func finalizeNotStartedCancellation(ctx context.Context, attempt dagrun.Attempt) error {
 	if attempt == nil {
 		return nil
@@ -3563,7 +3567,7 @@ func finalizeNotStartedCancellation(ctx context.Context, attempt dagrun.Attempt)
 	finishedAt := stringutil.FormatTime(time.Now().UTC())
 	status.Status = ir.Aborted
 	status.FinishedAt = finishedAt
-	status.Error = context.Canceled.Error()
+	status.Error = notStartedCancellationReason
 	status.WorkerID = ""
 	status.PID = 0
 	status.PIDStartedAt = 0
