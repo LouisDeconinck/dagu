@@ -1108,7 +1108,8 @@ func disableDeclaredStepOutputs(env *Env) {
 
 func (r *Runner) execNode(ctx context.Context, node *Node, progressCh chan ProgressUpdate) error {
 	if r.dry {
-		return checkDryRunStep(ctx, node.Step())
+		warnDryRunStep(ctx, node)
+		return nil
 	}
 	report := func() {
 		r.report(ctx, progressCh, node)
@@ -1373,25 +1374,17 @@ func isReady(ctx context.Context, plan *Plan, node *Node) bool {
 func (r *Runner) runEventHandler(ctx context.Context, plan *Plan, node *Node, extraEnvs map[string]string) error {
 	defer node.Finish()
 
-	if r.dry {
-		env := NewEnv(ctx, node.Step())
-		if err := addResolvedEnvVars(ctx, &env, node.Step().Env, "env.", cmnvalue.StepEnvField); err != nil {
-			node.SetStatus(ir.NodeFailed)
-			return err
-		}
-		if err := checkDryRunStep(WithEnv(ctx, env), node.Step()); err != nil {
-			node.SetStatus(ir.NodeFailed)
-			return err
-		}
-		node.SetStatus(ir.NodeSucceeded)
-		return nil
-	}
-
 	var err error
 	ctx, err = r.setupEnvironEventHandler(ctx, plan, node, extraEnvs)
 	if err != nil {
 		node.SetStatus(ir.NodeFailed)
 		return err
+	}
+
+	if r.dry {
+		warnDryRunStep(ctx, node)
+		node.SetStatus(ir.NodeSucceeded)
+		return nil
 	}
 
 	if err := node.Prepare(ctx, r.logDir, r.dagRunID); err != nil {

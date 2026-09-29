@@ -11,18 +11,33 @@ import (
 	"strings"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/cmdutil"
+	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
+	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
 	"github.com/dagucloud/dagu/v2/internal/executor/registry"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	dagutools "github.com/dagucloud/dagu/v2/internal/tools"
 )
 
+// warnDryRunStep logs the checkDryRunStep result as a warning. A missing
+// executable never fails a dry run: the real run may execute on another host
+// (a distributed worker, a server rather than a CI checkout), and an upstream
+// step may create or install the executable first.
+func warnDryRunStep(ctx context.Context, node *Node) {
+	if err := checkDryRunStep(ctx, node.Step()); err != nil {
+		logger.Warn(ctx, "Dry run: step may fail on this host",
+			tag.Step(node.Name()),
+			tag.Error(err),
+		)
+	}
+}
+
 // checkDryRunStep reports the executable-access failures a local command step
-// would hit at run time — a shell that is not on PATH, a command name that
-// does not resolve, or a command path that is not executable — without
-// running the step. Steps whose executor runs off the host (containers, SSH,
-// remote jobs) are skipped because their commands resolve in an environment
-// the dry run cannot observe.
+// would hit if it ran on this host now — a shell that is not on PATH, a
+// command name that does not resolve, or a command path that is not
+// executable — without running the step. Steps whose executor runs off the
+// host (containers, SSH, remote jobs) are skipped because their commands
+// resolve in an environment the dry run cannot observe.
 func checkDryRunStep(ctx context.Context, step ir.Step) error {
 	caps := registry.ExecutorCapabilitiesFor(step.ExecutorConfig.Type)
 	if caps.CommandContext == nil {

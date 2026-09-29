@@ -11,7 +11,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -2000,141 +1999,31 @@ func TestRunner_DryRunWithHandlers(t *testing.T) {
 	result.assertNodeStatus(t, "onSuccess", ir.NodeSucceeded)
 }
 
+// A missing shell or command never fails a dry run: the real run may execute
+// on another host, or an upstream step may create the executable first.
 func TestRunner_DryRunStepChecks(t *testing.T) {
 	missing := "dagu-test-missing-9f3c2b1a"
 
-	t.Run("MissingShellFails", func(t *testing.T) {
-		r := setupRunner(t, func(cfg *runtime.Config) {
-			cfg.Dry = true
-		})
+	t.Run("MissingExecutablesSucceed", func(t *testing.T) {
+		handler := newStep("onSuccess", withCommand(missing+"-handler"))
+		r := setupRunner(t,
+			func(cfg *runtime.Config) {
+				cfg.Dry = true
+			},
+			withOnSuccess(handler),
+		)
 
 		plan := r.newPlan(t,
 			newStep("1", withCommand("true"), withShell(missing+"-shell")),
-		)
-
-		result := plan.assertRun(t, ir.Failed)
-		result.assertNodeStatus(t, "1", ir.NodeFailed)
-		require.ErrorContains(t, result.Error, missing+"-shell")
-	})
-
-	t.Run("MissingCommandFails", func(t *testing.T) {
-		if windowsShellTest() {
-			t.Skip("Windows default shells resolve names the host PATH cannot see")
-		}
-		r := setupRunner(t, func(cfg *runtime.Config) {
-			cfg.Dry = true
-		})
-
-		plan := r.newPlan(t,
-			newStep("1", withCommand(missing+"-command --flag")),
-		)
-
-		result := plan.assertRun(t, ir.Failed)
-		result.assertNodeStatus(t, "1", ir.NodeFailed)
-		require.ErrorContains(t, result.Error, missing+"-command")
-	})
-
-	t.Run("MissingDirectCommandFails", func(t *testing.T) {
-		r := setupRunner(t, func(cfg *runtime.Config) {
-			cfg.Dry = true
-		})
-
-		plan := r.newPlan(t,
-			newStep("1", withCommand(missing+"-command"), withShell("direct")),
-		)
-
-		result := plan.assertRun(t, ir.Failed)
-		result.assertNodeStatus(t, "1", ir.NodeFailed)
-		require.ErrorContains(t, result.Error, missing+"-command")
-	})
-
-	t.Run("NonExecutableCommandPathFails", func(t *testing.T) {
-		if goruntime.GOOS == "windows" {
-			t.Skip("executable permission bits are not meaningful on Windows")
-		}
-		r := setupRunner(t, func(cfg *runtime.Config) {
-			cfg.Dry = true
-		})
-
-		plan := r.newPlan(t,
-			newStep("1", withCommand("./no-exec.sh")),
-		)
-		script := filepath.Join(plan.workDir, "no-exec.sh")
-		require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0644))
-
-		result := plan.assertRun(t, ir.Failed)
-		result.assertNodeStatus(t, "1", ir.NodeFailed)
-		require.ErrorContains(t, result.Error, "no-exec.sh")
-	})
-
-	t.Run("BuiltinCommandPasses", func(t *testing.T) {
-		r := setupRunner(t, func(cfg *runtime.Config) {
-			cfg.Dry = true
-		})
-
-		plan := r.newPlan(t,
-			newStep("1", withCommand("exit 0")),
-			newStep("2", withDepends("1"), withCommand("echo done")),
+			newStep("2", withCommand(missing+"-command --flag")),
+			newStep("3", withCommand("./no-exec.sh")),
 		)
 
 		result := plan.assertRun(t, ir.Succeeded)
 		result.assertNodeStatus(t, "1", ir.NodeSucceeded)
 		result.assertNodeStatus(t, "2", ir.NodeSucceeded)
-	})
-
-	t.Run("NonLocalExecutorSkipsCheck", func(t *testing.T) {
-		r := setupRunner(t, func(cfg *runtime.Config) {
-			cfg.Dry = true
-		})
-
-		step := newStep("1", withCommand(missing+"-command"), withShell(missing+"-shell"))
-		step.ExecutorConfig.Type = "docker"
-		plan := r.newPlan(t, step)
-
-		// Docker executors resolve the shell inside the image, not on the host.
-		result := plan.assertRun(t, ir.Succeeded)
-		result.assertNodeStatus(t, "1", ir.NodeSucceeded)
-	})
-
-	t.Run("MultiCommandErrorNamesFieldPath", func(t *testing.T) {
-		if goruntime.GOOS == "windows" {
-			t.Skip("lookup fixtures rely on POSIX executables")
-		}
-		r := setupRunner(t, func(cfg *runtime.Config) {
-			cfg.Dry = true
-		})
-
-		step := newStep("1", withShell("direct"))
-		step.Commands = []ir.CommandEntry{parseCommand("true"), parseCommand(missing + "-second")}
-		plan := r.newPlan(t, step)
-
-		result := plan.assertRun(t, ir.Failed)
-		result.assertNodeStatus(t, "1", ir.NodeFailed)
-		require.ErrorContains(t, result.Error, "run[1]")
-	})
-
-	t.Run("RelativePathEntryResolvesFromStepWorkDir", func(t *testing.T) {
-		if goruntime.GOOS == "windows" {
-			t.Skip("relative PATH fixture relies on POSIX executables")
-		}
-		r := setupRunner(t, func(cfg *runtime.Config) {
-			cfg.Dry = true
-		})
-
-		plan := r.newPlan(t,
-			newStep("1",
-				withCommand("relpath-tool"),
-				withShell("direct"),
-				withEnvVars("PATH=./bin"),
-			),
-		)
-		binDir := filepath.Join(plan.workDir, "bin")
-		require.NoError(t, os.MkdirAll(binDir, 0o755))
-		tool := filepath.Join(binDir, "relpath-tool")
-		require.NoError(t, os.WriteFile(tool, []byte("#!/bin/sh\nexit 0\n"), 0o755))
-
-		result := plan.assertRun(t, ir.Succeeded)
-		result.assertNodeStatus(t, "1", ir.NodeSucceeded)
+		result.assertNodeStatus(t, "3", ir.NodeSucceeded)
+		result.assertNodeStatus(t, "onSuccess", ir.NodeSucceeded)
 	})
 
 	t.Run("HandlerEnvErrorFailsHandler", func(t *testing.T) {
