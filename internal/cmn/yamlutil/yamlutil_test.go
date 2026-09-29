@@ -20,26 +20,15 @@ func TestClearEmptyDocumentSeparators(t *testing.T) {
 	})
 
 	t.Run("EmptyDocumentBetweenDocs", func(t *testing.T) {
-		data := []byte("a: 1\n---\n---\nb: 2\n")
-		got := yamlutil.ClearEmptyDocumentSeparators(data)
-		// The empty document's marker is blanked; both real documents parse.
-		file, err := parser.ParseBytes(got, 0)
-		require.NoError(t, err)
-		require.Len(t, file.Docs, 2)
+		requireDocBodies(t, "a: 1\n---\n---\nb: 2\n", "a: 1", "b: 2")
 	})
 
 	t.Run("EmptyDocumentWithComment", func(t *testing.T) {
-		data := []byte("a: 1\n--- # nothing here\n---\nb: 2\n")
-		file, err := parser.ParseBytes(yamlutil.ClearEmptyDocumentSeparators(data), 0)
-		require.NoError(t, err)
-		require.Len(t, file.Docs, 2)
+		requireDocBodies(t, "a: 1\n--- # nothing here\n---\nb: 2\n", "a: 1", "b: 2")
 	})
 
 	t.Run("LeadingEmptyDocuments", func(t *testing.T) {
-		data := []byte("---\n---\na: 1\n")
-		file, err := parser.ParseBytes(yamlutil.ClearEmptyDocumentSeparators(data), 0)
-		require.NoError(t, err)
-		require.Len(t, file.Docs, 1)
+		requireDocBodies(t, "---\n---\na: 1\n", "a: 1")
 	})
 
 	t.Run("MarkerInsideLiteralBlockUntouched", func(t *testing.T) {
@@ -58,20 +47,18 @@ func TestClearEmptyDocumentSeparators(t *testing.T) {
 			strings.Count(string(data), "\n"),
 			strings.Count(string(got), "\n"))
 	})
+}
 
-	t.Run("ParserDropsDocWithoutGuard", func(t *testing.T) {
-		// Pins the parser quirk this package works around: without the guard
-		// the document after an empty document never reaches the caller.
-		data := []byte("a: 1\n---\n---\nb: 2\n")
-
-		raw, err := parser.ParseBytes(data, 0)
-		require.NoError(t, err)
-		require.Len(t, raw.Docs, 2)
-		require.Nil(t, raw.Docs[1].Body)
-
-		guarded, err := parser.ParseBytes(yamlutil.ClearEmptyDocumentSeparators(data), 0)
-		require.NoError(t, err)
-		require.Len(t, guarded.Docs, 2)
-		assert.Equal(t, "b: 2", guarded.Docs[1].Body.String())
-	})
+// requireDocBodies asserts that the cleared stream parses into exactly the
+// given document bodies, so no real document is lost behind an empty one.
+func requireDocBodies(t *testing.T, data string, want ...string) {
+	t.Helper()
+	file, err := parser.ParseBytes(yamlutil.ClearEmptyDocumentSeparators([]byte(data)), 0)
+	require.NoError(t, err)
+	got := make([]string, 0, len(file.Docs))
+	for _, doc := range file.Docs {
+		require.NotNil(t, doc.Body)
+		got = append(got, doc.Body.String())
+	}
+	assert.Equal(t, want, got)
 }

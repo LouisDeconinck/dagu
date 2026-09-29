@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dagucloud/dagu/v2/internal/cmn/yamlutil"
 	"github.com/goccy/go-yaml"
 	"github.com/goccy/go-yaml/ast"
 	"github.com/goccy/go-yaml/parser"
@@ -54,7 +53,7 @@ func (e *EnvValue) UnmarshalYAML(data []byte) error {
 	}
 	e.raw = raw
 
-	file, err := parser.ParseBytes(yamlutil.ClearEmptyDocumentSeparators(data), 0)
+	file, err := parser.ParseBytes(data, 0)
 	if err != nil {
 		return fmt.Errorf("env parse error: %w", err)
 	}
