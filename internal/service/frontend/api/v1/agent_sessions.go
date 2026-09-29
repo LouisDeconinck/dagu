@@ -172,6 +172,15 @@ func (a *API) loadAgentStatus(ctx context.Context, root ir.DAGRunRef, subDAGRunI
 	return mutationRef, status, attempt, nil
 }
 
+// requireAgentRunStopped rejects agent actions on a run that is still
+// executing; resuming it would start a second execution.
+func requireAgentRunStopped(status *ir.DAGRunStatus) error {
+	if status.Status == ir.Running {
+		return &agentSessionActionError{conflict: true, message: "DAG-run is still running; try again after its running steps finish"}
+	}
+	return nil
+}
+
 func (a *API) requireAgentOwnerAvailable(ctx context.Context, ref ir.DAGRunRef, status *ir.DAGRunStatus, stepName string) error {
 	node, err := agentSessionNode(status, stepName)
 	if err != nil {
@@ -356,6 +365,9 @@ func (a *API) respondAgentInteraction(ctx context.Context, root ir.DAGRunRef, su
 	if err != nil {
 		return api.AgentInteractionResponse{}, err
 	}
+	if err := requireAgentRunStopped(status); err != nil {
+		return api.AgentInteractionResponse{}, err
+	}
 	if err := a.requireAgentOwnerAvailable(ctx, mutationRef, status, stepName); err != nil {
 		return api.AgentInteractionResponse{}, err
 	}
@@ -414,6 +426,9 @@ func (a *API) restartAgentSession(ctx context.Context, root ir.DAGRunRef, subDAG
 	}
 	status, err = a.waitForManualStepMutationReady(ctx, attempt, status)
 	if err != nil {
+		return api.AgentSessionRestartResponse{}, err
+	}
+	if err := requireAgentRunStopped(status); err != nil {
 		return api.AgentSessionRestartResponse{}, err
 	}
 	original, err := cloneManualStatus(status)

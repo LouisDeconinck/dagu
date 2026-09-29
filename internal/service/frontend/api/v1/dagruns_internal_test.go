@@ -1548,6 +1548,60 @@ func TestStepLogLimitWithoutOffsetReadsFromBeginning(t *testing.T) {
 	require.True(t, result.HasMore)
 }
 
+// agentResumeFixture is a saved run whose agent step waits on a question while
+// an independent approval gate is unresolved.
+type agentResumeFixture struct {
+	api        *API
+	root       ir.DAGRunRef
+	subRunID   string
+	status     *ir.DAGRunStatus
+	queueStore *store.QueueStore
+	recorder   *retryCoordinatorRecorder
+}
+
+func newAgentResumeFixture(t *testing.T, child, queued bool) *agentResumeFixture {
+	t.Helper()
+	root := ir.NewDAGRunRef("manual-dag", "run-1")
+	status := &ir.DAGRunStatus{
+		Name: root.Name, DAGRunID: root.ID, AttemptID: "attempt-1", Status: ir.Waiting,
+		FinishedAt: time.Now().Format(time.RFC3339),
+		Nodes: []*ir.Node{
+			{Step: ir.Step{Name: "agent"}, Status: ir.NodeWaiting, AgentSession: &ir.AgentSession{
+				Provider: computerhost.AgentProvider, Generation: 1, State: ir.AgentSessionWaiting,
+				Interactions: []ir.AgentInteraction{{ID: "ask-1", Kind: ir.AgentInteractionQuestion, Status: ir.AgentInteractionPending,
+					Questions: []ir.AgentQuestion{{Question: "Continue?", Custom: true}},
+				}},
+			}},
+			{Step: ir.Step{Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeWaiting},
+		},
+	}
+	subRunID := ""
+	if child {
+		subRunID = "child-1"
+		status.Name, status.DAGRunID = "child", subRunID
+		status.Root, status.Parent = root, root
+	}
+	backend := &manualCASStore{status: status, attempt: &manualStepAttempt{
+		dag:      &ir.DAG{Name: status.Name, BaseConfigWorkspace: new(""), WorkerSelector: map[string]string{"region": "apac"}},
+		statuses: []*ir.DAGRunStatus{status},
+	}}
+	repository := persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{})
+	cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
+	if queued {
+		cfg.Queues = config.Queues{Enabled: true, Config: []config.QueueConfig{{Name: status.Name, MaxActiveRuns: 1}}}
+	}
+	queueStore := store.NewQueueStore(file.NewCollection(t.TempDir()))
+	recorder := &retryCoordinatorRecorder{}
+	a := &API{
+		config: cfg, dagRunRepository: repository, procRepository: &manualStepProcRepository{}, queueStore: queueStore,
+		dagRunMgr: runtimepkg.NewManager(repository, nil, cfg), coordinatorCli: recorder,
+	}
+	require.NoError(t, computerhost.NewStore(filepath.Join(cfg.Paths.DataDir, computerhost.DataDirName)).Save(computerhost.Record{
+		DAGRunID: root.ID, StepName: "agent", Deadline: time.Now().Add(time.Hour),
+	}))
+	return &agentResumeFixture{api: a, root: root, subRunID: subRunID, status: status, queueStore: queueStore, recorder: recorder}
+}
+
 // Root interaction responses and restarts resume their saved session state;
 // child responses keep waiting while an independent approval is unresolved.
 func TestAgentResumeQueue(t *testing.T) {
@@ -1564,79 +1618,77 @@ func TestAgentResumeQueue(t *testing.T) {
 		{name: "DirectRestart", direct: true, restart: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			root := ir.NewDAGRunRef("manual-dag", "run-1")
-			status := &ir.DAGRunStatus{
-				Name: root.Name, DAGRunID: root.ID, AttemptID: "attempt-1", Status: ir.Waiting,
-				FinishedAt: time.Now().Format(time.RFC3339),
-				Nodes: []*ir.Node{
-					{Step: ir.Step{Name: "agent"}, Status: ir.NodeWaiting, AgentSession: &ir.AgentSession{
-						Provider: computerhost.AgentProvider, Generation: 1, State: ir.AgentSessionWaiting,
-						Interactions: []ir.AgentInteraction{{ID: "ask-1", Kind: ir.AgentInteractionQuestion, Status: ir.AgentInteractionPending,
-							Questions: []ir.AgentQuestion{{Question: "Continue?", Custom: true}},
-						}},
-					}},
-					{Step: ir.Step{Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeWaiting},
-				},
-			}
-			subRunID := ""
-			if tt.child {
-				subRunID = "child-1"
-				status.Name, status.DAGRunID = "child", subRunID
-				status.Root, status.Parent = root, root
-			}
-			backend := &manualCASStore{status: status, attempt: &manualStepAttempt{
-				dag:      &ir.DAG{Name: status.Name, BaseConfigWorkspace: new(""), WorkerSelector: map[string]string{"region": "apac"}},
-				statuses: []*ir.DAGRunStatus{status},
-			}}
-			repository := persis.NewDAGRunRepository(backend, nil, persis.DAGRunRepositoryOptions{})
-			cfg := &config.Config{Paths: config.PathsConfig{DataDir: t.TempDir()}}
-			if !tt.direct {
-				cfg.Queues = config.Queues{Enabled: true, Config: []config.QueueConfig{{Name: status.Name, MaxActiveRuns: 1}}}
-			}
-			processes := &manualStepProcRepository{}
-			queueStore := store.NewQueueStore(file.NewCollection(t.TempDir()))
-			recorder := &retryCoordinatorRecorder{}
-			a := &API{
-				config: cfg, dagRunRepository: repository, procRepository: processes, queueStore: queueStore,
-				dagRunMgr: runtimepkg.NewManager(repository, nil, cfg), coordinatorCli: recorder,
-			}
-			require.NoError(t, computerhost.NewStore(filepath.Join(cfg.Paths.DataDir, computerhost.DataDirName)).Save(computerhost.Record{
-				DAGRunID: root.ID, StepName: "agent", Deadline: time.Now().Add(time.Hour),
-			}))
+			f := newAgentResumeFixture(t, tt.child, !tt.direct)
+			status := f.status
 
 			if tt.restart {
-				response, err := a.restartAgentSession(t.Context(), root, "", "agent")
+				response, err := f.api.restartAgentSession(t.Context(), f.root, "", "agent")
 				require.NoError(t, err)
 				require.True(t, response.Resumed)
 				assert.Equal(t, 2, response.Generation)
 			} else {
 				answers := [][]string{{"yes"}}
-				response, err := a.respondAgentInteraction(t.Context(), root, subRunID, "agent", "ask-1", &openapiv1.AgentInteractionResponseRequest{Answers: &answers})
+				response, err := f.api.respondAgentInteraction(t.Context(), f.root, f.subRunID, "agent", "ask-1", &openapiv1.AgentInteractionResponseRequest{Answers: &answers})
 				require.NoError(t, err)
 				assert.Equal(t, !tt.child, response.Resumed)
 				assert.Equal(t, answers, status.Nodes[0].AgentSession.Interactions[0].Answers)
 			}
 			assert.Equal(t, ir.NodeNotStarted, status.Nodes[0].Status)
 			assert.Equal(t, ir.NodeWaiting, status.Nodes[1].Status)
-			items, err := queueStore.List(t.Context(), status.Name)
+			items, err := f.queueStore.List(t.Context(), status.Name)
 			require.NoError(t, err)
 			if tt.child {
 				assert.Equal(t, ir.Waiting, status.Status)
 				assert.Empty(t, items)
-				assert.Empty(t, recorder.dispatched)
+				assert.Empty(t, f.recorder.dispatched)
 			} else if tt.direct {
 				assert.Equal(t, ir.Queued, status.Status)
 				assert.Empty(t, items)
-				require.Len(t, recorder.dispatched, 1)
-				assert.Equal(t, ir.Queued, recorder.dispatched[0].PreviousStatus.Status)
+				require.Len(t, f.recorder.dispatched, 1)
+				assert.Equal(t, ir.Queued, f.recorder.dispatched[0].PreviousStatus.Status)
 			} else {
-				assert.Empty(t, recorder.dispatched)
+				assert.Empty(t, f.recorder.dispatched)
 				assert.Equal(t, ir.Queued, status.Status)
 				require.Len(t, items, 1)
 				ref, err := items[0].Data()
 				require.NoError(t, err)
-				assert.Equal(t, root, *ref)
+				assert.Equal(t, f.root, *ref)
 			}
+		})
+	}
+}
+
+// Agent actions on a run that is still executing must leave it untouched: a
+// resume would start a second execution beside the running sibling step.
+func TestAgentActionWhileRunning(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		child   bool
+		restart bool
+	}{
+		{name: "Response"},
+		{name: "Restart", restart: true},
+		{name: "ChildResponse", child: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newAgentResumeFixture(t, tt.child, false)
+			f.status.Status, f.status.FinishedAt = ir.Running, ""
+			f.status.Nodes = append(f.status.Nodes, &ir.Node{Step: ir.Step{Name: "sibling"}, Status: ir.NodeRunning})
+
+			var err error
+			if tt.restart {
+				_, err = f.api.restartAgentSession(t.Context(), f.root, "", "agent")
+			} else {
+				answers := [][]string{{"yes"}}
+				_, err = f.api.respondAgentInteraction(t.Context(), f.root, f.subRunID, "agent", "ask-1", &openapiv1.AgentInteractionResponseRequest{Answers: &answers})
+			}
+
+			require.Error(t, err)
+			assert.Equal(t, agentSessionActionConflict, classifyAgentSessionAction(err))
+			assert.Equal(t, ir.Running, f.status.Status)
+			assert.Equal(t, ir.NodeWaiting, f.status.Nodes[0].Status)
+			assert.Equal(t, ir.AgentInteractionPending, f.status.Nodes[0].AgentSession.Interactions[0].Status)
+			assert.Empty(t, f.recorder.dispatched)
 		})
 	}
 }
