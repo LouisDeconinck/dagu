@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -358,6 +360,59 @@ func TestClientDispatch(t *testing.T) {
 		var staleErr *queue.StaleQueueDispatchError
 		require.ErrorAs(t, err, &staleErr)
 		require.Equal(t, "queued attempt was superseded", staleErr.Reason)
+	})
+
+	t.Run("InvalidDefinitionReturnsDefinitionError", func(t *testing.T) {
+		t.Parallel()
+
+		client := coordinator.New(&mockServiceMonitor{}, coordinator.DefaultConfig())
+		err := client.Dispatch(context.Background(), dispatch.DispatchRequest{
+			Task: &dispatch.DispatchTask{
+				DAGRunID:   "run-123",
+				Target:     "test-dag",
+				Operation:  dispatch.DispatchOperationRetry,
+				Definition: "name: test-dag\nsteps:\n  - name: s1\n    command: echo hello\n",
+				BaseConfig: `
+actions:
+  broken_action:
+    input_schema:
+      type: object
+      properties: []
+    template:
+      action: artifact.write
+      with: {path: out.txt}
+`,
+			},
+		})
+
+		var defErr *dispatch.DefinitionError
+		require.ErrorAs(t, err, &defErr)
+		assert.Contains(t, defErr.Error(), "actions.broken_action.input_schema")
+	})
+
+	// A schema host outage says nothing about the definition, so it must not
+	// be reported as a definition error that would fail a queued run.
+	t.Run("UnavailableSchemaIsNotDefinitionError", func(t *testing.T) {
+		t.Parallel()
+
+		schemaServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer schemaServer.Close()
+
+		client := coordinator.New(&mockServiceMonitor{}, coordinator.DefaultConfig())
+		err := client.Dispatch(context.Background(), dispatch.DispatchRequest{
+			Task: &dispatch.DispatchTask{
+				DAGRunID:   "run-123",
+				Target:     "test-dag",
+				Operation:  dispatch.DispatchOperationRetry,
+				Definition: fmt.Sprintf("name: test-dag\nparams:\n  schema: %s/params.json\nsteps:\n  - name: s1\n    command: echo hello\n", schemaServer.URL),
+			},
+		})
+
+		require.Error(t, err)
+		var defErr *dispatch.DefinitionError
+		assert.NotErrorAs(t, err, &defErr)
 	})
 }
 
