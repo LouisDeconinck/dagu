@@ -940,7 +940,6 @@ func (d *queueDispatcher) dispatchAndWaitForStartupWithConditions(
 			)
 			if finalizeErr := d.failQueuedRunBeforeStartup(ctx, queueName, runRef, defErr, conditionStage); finalizeErr != nil {
 				logger.Error(ctx, "Failed to finalize queued DAG run after definition failure", tag.Error(finalizeErr))
-				conditionStage.flush(ctx)
 			}
 			return false
 		}
