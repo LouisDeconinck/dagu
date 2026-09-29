@@ -36,6 +36,10 @@ vi.mock('@/hooks/api', () => ({
   useClient: vi.fn(),
 }));
 
+vi.mock('@/contexts/AuthContext', () => ({
+  useCanExecuteForWorkspace: () => true,
+}));
+
 vi.mock('@/contexts/ConfigContext', () => ({
   useConfig: () => ({
     permissions: {
@@ -304,6 +308,43 @@ afterEach(() => {
 });
 
 describe('DAGStatus', () => {
+  it('keeps approval recovery visible after the last gate is approved', () => {
+    const pendingRun = {
+      ...dagRun,
+      status: Status.Waiting,
+      statusLabel: StatusLabel.waiting,
+      approvalResumePending: true,
+      nodes: [
+        {
+          step: { name: 'gate', approval: { prompt: 'Approve deployment' } },
+          status: NodeStatus.Success,
+          statusLabel: NodeStatusLabel.succeeded,
+          approvedAt: '2026-09-28T12:00:00Z',
+        },
+      ],
+    } as components['schemas']['DAGRunDetails'];
+    const { rerender } = render(dagStatusView(pendingRun, 'local', true));
+    expect(screen.getByRole('button', { name: 'Retry resume' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Outputs' }));
+    expect(screen.getByRole('button', { name: 'Retry resume' })).toBeVisible();
+    rerender(dagStatusView({ ...pendingRun }, 'local', true));
+    expect(screen.getByText('Approval saved; resume failed.')).toBeVisible();
+    rerender(
+      dagStatusView(
+        {
+          ...pendingRun,
+          status: Status.Queued,
+          approvalResumePending: undefined,
+        },
+        'local',
+        true
+      )
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Retry resume' })
+    ).not.toBeInTheDocument();
+  });
+
   it('preserves a controlled tab across runs', () => {
     const { rerender } = render(dagStatusView(dagRun, 'local', true));
     fireEvent.click(screen.getByRole('button', { name: 'Outputs' }));

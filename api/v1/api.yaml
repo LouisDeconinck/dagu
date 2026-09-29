@@ -3431,10 +3431,60 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /dag-runs/{name}/{dagRunId}/resume:
+    post:
+      summary: "Resume work after a saved approval"
+      description: "Retries resume admission for a root run without changing its approvals or inputs. Already queued or running resumes are not dispatched again."
+      operationId: "resumeDAGRun"
+      tags:
+        - "dag-runs"
+      parameters:
+        - $ref: "#/components/parameters/RemoteNode"
+        - $ref: "#/components/parameters/DAGName"
+        - $ref: "#/components/parameters/DAGRunId"
+      responses:
+        "200":
+          description: "Resume accepted or already in progress"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dagRunId:
+                    $ref: "#/components/schemas/DAGRunId"
+                  resumed:
+                    type: boolean
+                    description: "Whether execution has been accepted"
+                required: [dagRunId, resumed]
+        "404":
+          description: "DAG-run not found"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: "Run has no approved work ready to resume or its state changed"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: "Approval remains saved but resume admission failed; retry this endpoint"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: "Generic error response"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /dag-runs/{name}/{dagRunId}/steps/{stepName}/approve:
     post:
       summary: "Approve a waiting step"
-      description: "Approves a step that is in Waiting status, optionally providing input parameters that will be available as environment variables in subsequent steps"
+      description: "Approves a waiting step and requests resume when work is ready. Approval and inputs remain saved if resume admission fails; use the run resume endpoint to retry without approving again."
       operationId: "approveDAGRunStep"
       tags:
         - "dag-runs"
@@ -3456,6 +3506,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApproveStepResponse"
+        "409":
+          description: "Run state changed before resume admission"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: "Approval was saved but resume admission failed; use the run resume endpoint"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "400":
           description: "Step is not in Waiting status or required inputs missing"
           content:
@@ -10863,7 +10925,7 @@ components:
           description: "The approved step name"
         resumed:
           type: boolean
-          description: "Whether the DAG run was re-enqueued for execution"
+          description: "Whether resume execution was accepted, directly or through a queue"
       required:
         - dagRunId
         - stepName
@@ -13652,6 +13714,9 @@ components:
             humanTaskResumePending:
               type: boolean
               description: "Whether completed human-task input is durable but the same DAG-run still needs its retry queued"
+            approvalResumePending:
+              type: boolean
+              description: "Whether a root run has a saved approval and ready work whose resume still needs to be accepted"
           required:
             - rootDAGRunName
             - rootDAGRunId
@@ -15000,13 +15065,18 @@ components:
       properties:
         condition:
           type: string
-          description: "Value or command text to evaluate. When `expected` is omitted, this runs as a command check. When `expected` is set, this is value-resolved and compared as data."
+          description: "Value or command text to evaluate. When `expected` and `expectedAny` are omitted, this runs as a command check. When either is set, this is value-resolved and compared as data."
         eval:
           type: string
           description: "Dynamic value expression to evaluate and compare with `expected`. Valid only when `expected` is set and `condition` is omitted."
         expected:
           type: string
           description: "Expected result for a value-match precondition. When set, Dagu compares the actual value from `condition` or `eval` instead of using command exit status."
+        expectedAny:
+          type: array
+          items:
+            type: string
+          description: "Alternative expected results for a value-match precondition, set instead of `expected`. The condition is met when any of them matches. Set on a step that a router lists under several routes."
         negate:
           type: boolean
           description: "If true, inverts the condition result (run when condition does NOT match)"

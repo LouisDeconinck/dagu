@@ -1360,20 +1360,17 @@ func (a *API) ApproveDAGRunStep(ctx context.Context, request api.ApproveDAGRunSt
 	}
 
 	// Resume DAG if no more waiting steps, or if the approval unblocked a step
-	// that also waits on a completed human task.
-	shouldResume := !hasWaitingSteps(updated.Nodes) || humantask.ResumePending(updated)
+	// while other manual steps keep waiting.
+	shouldResume := !hasWaitingSteps(updated.Nodes) || humantask.ResumePending(updated) ||
+		humantask.UnblockedNodeReady(updated)
 	if shouldResume {
-		var resumeErr error
-		// Human-task checkpoints resume through the queue: dagu retry rejects a
-		// run while a human task waits.
-		if humantask.HasCompletedTask(updated) || humantask.PushBackPending(updated) {
-			_, resumeErr = a.humanTaskService().Resume(a.withEventContext(ctx), request.Name, request.DagRunId)
-		} else {
-			resumeErr = a.resumeDAGRun(ctx, ref, request.DagRunId)
-		}
-		if resumeErr != nil {
+		if resumeErr := a.resumeWaitingDAGRun(ctx, ref, updated); resumeErr != nil {
 			logger.Error(ctx, "Failed to resume DAG", tag.Error(resumeErr))
-			shouldResume = false
+			a.logStepApproval(ctx, request.Name, request.DagRunId, "", request.StepName, false)
+			if errors.Is(resumeErr, queue.ErrRetryStaleLatest) {
+				return nil, staleManualResumeError()
+			}
+			return ptrOf(api.ApproveDAGRunStep503JSONResponse(approvalResumeFailure())), nil
 		} else {
 			logger.Info(ctx, "DAG resumed after approval",
 				tag.RunID(request.DagRunId),
@@ -1498,7 +1495,7 @@ func (a *API) ApproveSubDAGRunStep(ctx context.Context, request api.ApproveSubDA
 		}, nil
 	}
 
-	// Resume sub-DAG if no more waiting steps
+	// Child runs resume directly only after every manual step is resolved.
 	shouldResume := !hasWaitingSteps(updated.Nodes)
 	if shouldResume {
 		if err := a.resumeSubDAGRun(ctx, rootRef, request.SubDAGRunId); err != nil {
@@ -1937,7 +1934,7 @@ func (a *API) PushBackDAGRunStep(ctx context.Context, request api.PushBackDAGRun
 	}
 	approvalIteration := updatedNode.ApprovalIteration
 
-	if err := a.resumeDAGRun(ctx, ref, request.DagRunId); err != nil {
+	if err := a.resumeWaitingDAGRun(ctx, ref, updated); err != nil {
 		logger.Error(ctx, "Failed to resume DAG after push-back, rolling back", tag.Error(err))
 		if rollbackErr := a.rollbackPushBack(ctx, ref, applied, original); rollbackErr != nil {
 			logger.Error(ctx, "Failed to rollback push-back state", tag.Error(rollbackErr))
@@ -3084,7 +3081,7 @@ func (a *API) retryDAGRun(ctx context.Context, dagName, dagRunID, retryDagRunID,
 	// For DAGs using a global queue, enqueue the retry so it respects queue capacity.
 	// Step retry is not supported via queue (queue processor does not pass step name).
 	if stepName == "" && a.config.FindQueueConfig(dag.ProcGroup()) != nil {
-		if err := a.enqueueRetry(ctx, attempt, dag); err != nil {
+		if err := a.enqueueRetry(ctx, prevStatus, dag); err != nil {
 			return retryDAGRunResult{}, err
 		}
 		a.logRetryAudit(ctx, dagName, sourceDagRunID, auditStepName, includeDownstream, false, false)
@@ -3190,14 +3187,10 @@ func retryPathRequestError(err error) error {
 	}
 }
 
-// enqueueRetry enqueues the retry and persists Queued status via queue.EnqueueRetry.
+// enqueueRetry queues the validated attempt only if its status still matches.
 // Retries respect global queue capacity because the queue processor picks them up
 // when capacity is available.
-func (a *API) enqueueRetry(ctx context.Context, attempt dagrun.Attempt, dag *ir.DAG) error {
-	status, err := attempt.ReadStatus(ctx)
-	if err != nil {
-		return fmt.Errorf("error reading status: %w", err)
-	}
+func (a *API) enqueueRetry(ctx context.Context, status *ir.DAGRunStatus, dag *ir.DAG) error {
 	eventCtx := a.withEventContext(ctx)
 	opts := queue.EnqueueRetryOptions{Processes: a.procRepository}
 	if actor := triggerActorFromContext(ctx); actor != "" {
@@ -3968,23 +3961,42 @@ func applyRejection(ctx context.Context, node *ir.Node, status *ir.DAGRunStatus,
 	status.FinishedAt = time.Now().Format(time.RFC3339)
 }
 
-func (a *API) resumeDAGRun(ctx context.Context, ref ir.DAGRunRef, dagRunID string) error {
+// resumeWaitingDAGRun accepts a manual resume only while its attempt and status
+// still match the accepted action.
+func (a *API) resumeWaitingDAGRun(ctx context.Context, ref ir.DAGRunRef, status *ir.DAGRunStatus) error {
+	ctx, cancel := context.WithTimeout(a.withEventContext(context.WithoutCancel(ctx)), manualResumeTimeout)
+	defer cancel()
 	attempt, err := a.dagRunRepository.FindAttempt(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("find attempt: %w", err)
 	}
-
 	dag, err := attempt.ReadDAG(ctx)
 	if err != nil {
 		return fmt.Errorf("read DAG: %w", err)
 	}
-
-	status, err := attempt.ReadStatus(ctx)
-	if err != nil {
-		return fmt.Errorf("read status: %w", err)
+	group := status.ProcGroup
+	if group == "" {
+		group = dag.ProcGroup()
 	}
-
-	return a.resumeManagedAttempt(ctx, dag, status, dagRunID)
+	opts := queue.EnqueueRetryOptions{Processes: a.procRepository}
+	if actor := triggerActorFromContext(ctx); actor != "" {
+		opts.TriggerActor = &actor
+	}
+	if a.config.FindQueueConfig(group) != nil {
+		_, err := queue.EnqueueRetry(ctx, a.dagRunRepository, a.queueStore, dag, status, opts)
+		return err
+	}
+	admission, err := queue.PrepareRetry(ctx, a.dagRunRepository, dag, status, opts)
+	if err != nil || admission == nil {
+		return err
+	}
+	if err := a.resumeManagedAttempt(ctx, dag, admission.Status, ref.ID, admission); err != nil {
+		if rollbackErr := admission.Rollback(ctx); rollbackErr != nil && !errors.Is(rollbackErr, queue.ErrRetryStaleLatest) {
+			return errors.Join(err, rollbackErr)
+		}
+		return err
+	}
+	return nil
 }
 
 func (a *API) resumeSubDAGRun(ctx context.Context, rootRef ir.DAGRunRef, subDAGRunID string) error {
@@ -4003,10 +4015,10 @@ func (a *API) resumeSubDAGRun(ctx context.Context, rootRef ir.DAGRunRef, subDAGR
 		return fmt.Errorf("read sub-DAG status: %w", err)
 	}
 
-	return a.resumeManagedAttempt(ctx, dag, status, subDAGRunID)
+	return a.resumeManagedAttempt(ctx, dag, status, subDAGRunID, nil)
 }
 
-func (a *API) resumeManagedAttempt(ctx context.Context, dag *ir.DAG, status *ir.DAGRunStatus, runID string) error {
+func (a *API) resumeManagedAttempt(ctx context.Context, dag *ir.DAG, status *ir.DAGRunStatus, runID string, admission *queue.RetryAdmission) error {
 	if dispatch.ShouldDispatchToCoordinator(dag, a.coordinatorCli != nil, a.defaultExecMode) {
 		var err error
 		dag, err = a.refreshBaseSMTP(ctx, dag, status)
@@ -4053,13 +4065,31 @@ func (a *API) resumeManagedAttempt(ctx context.Context, dag *ir.DAG, status *ir.
 	if err != nil {
 		return fmt.Errorf("prepare DAG retry env: %w", err)
 	}
-	opts := launcher.RetryOptions{DAGRunID: runID, TriggerActor: status.TriggerActor}
+	opts := launcher.RetryOptions{DAGRunID: runID, TriggerActor: status.TriggerActor, QueueDispatch: admission != nil}
 	if !status.Root.Zero() && status.Root.ID != runID {
 		opts.Root = status.Root
 	}
 	retrySpec := a.subCmdBuilder.Retry(prepared, opts)
 	retrySpec.Env = append(retrySpec.Env, a.managedOpenCodeEnv(ctx, prepared)...)
-	return launcher.Start(ctx, retrySpec)
+	started, err := launcher.StartProcess(ctx, retrySpec)
+	if err != nil {
+		return err
+	}
+	if admission != nil {
+		// A subprocess can fail before claiming the admitted checkpoint.
+		// Once it claims the run, rollback cannot change its newer state.
+		go func() {
+			exitErr := <-started.Done
+			if err := admission.Rollback(ctx); err != nil {
+				if !errors.Is(err, queue.ErrRetryStaleLatest) {
+					logger.Error(ctx, "Failed to restore manual resume checkpoint", tag.Error(err))
+				}
+				return
+			}
+			logger.Error(ctx, "Manual resume process exited before claiming the run", tag.RunID(runID), tag.Error(exitErr))
+		}()
+	}
+	return nil
 }
 
 func (a *API) managedOpenCodeEnv(ctx context.Context, dag *ir.DAG) []string {

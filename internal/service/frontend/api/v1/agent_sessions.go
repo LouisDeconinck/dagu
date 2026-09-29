@@ -19,6 +19,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/computerhost"
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
+	"github.com/dagucloud/dagu/v2/internal/humantask"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/opencodehost"
 	"google.golang.org/grpc/codes"
@@ -169,6 +170,15 @@ func (a *API) loadAgentStatus(ctx context.Context, root ir.DAGRunRef, subDAGRunI
 		return ir.DAGRunRef{}, nil, nil, err
 	}
 	return mutationRef, status, attempt, nil
+}
+
+// requireAgentRunStopped rejects agent actions on a run that is still
+// executing; resuming it would start a second execution.
+func requireAgentRunStopped(status *ir.DAGRunStatus) error {
+	if status.Status == ir.Running {
+		return &agentSessionActionError{conflict: true, message: "DAG-run is still running; try again after its running steps finish"}
+	}
+	return nil
 }
 
 func (a *API) requireAgentOwnerAvailable(ctx context.Context, ref ir.DAGRunRef, status *ir.DAGRunStatus, stepName string) error {
@@ -355,6 +365,9 @@ func (a *API) respondAgentInteraction(ctx context.Context, root ir.DAGRunRef, su
 	if err != nil {
 		return api.AgentInteractionResponse{}, err
 	}
+	if err := requireAgentRunStopped(status); err != nil {
+		return api.AgentInteractionResponse{}, err
+	}
 	if err := a.requireAgentOwnerAvailable(ctx, mutationRef, status, stepName); err != nil {
 		return api.AgentInteractionResponse{}, err
 	}
@@ -379,10 +392,10 @@ func (a *API) respondAgentInteraction(ctx context.Context, root ir.DAGRunRef, su
 	if err != nil {
 		return api.AgentInteractionResponse{}, err
 	}
-	resumed := !hasWaitingSteps(updated.Nodes)
+	resumed := !hasWaitingSteps(updated.Nodes) || (subDAGRunID == "" && humantask.UnblockedNodeReady(updated))
 	if resumed {
 		if subDAGRunID == "" {
-			err = a.resumeDAGRun(ctx, root, root.ID)
+			err = a.resumeWaitingDAGRun(ctx, root, updated)
 		} else {
 			err = a.resumeSubDAGRun(ctx, root, subDAGRunID)
 		}
@@ -415,6 +428,9 @@ func (a *API) restartAgentSession(ctx context.Context, root ir.DAGRunRef, subDAG
 	if err != nil {
 		return api.AgentSessionRestartResponse{}, err
 	}
+	if err := requireAgentRunStopped(status); err != nil {
+		return api.AgentSessionRestartResponse{}, err
+	}
 	original, err := cloneManualStatus(status)
 	if err != nil {
 		return api.AgentSessionRestartResponse{}, err
@@ -441,7 +457,7 @@ func (a *API) restartAgentSession(ctx context.Context, root ir.DAGRunRef, subDAG
 		return api.AgentSessionRestartResponse{}, err
 	}
 	if subDAGRunID == "" {
-		err = a.resumeDAGRun(ctx, root, root.ID)
+		err = a.resumeWaitingDAGRun(ctx, root, updated)
 	} else {
 		err = a.resumeSubDAGRun(ctx, root, subDAGRunID)
 	}
