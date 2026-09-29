@@ -13595,9 +13595,6 @@ components:
         finishedAt:
           type: string
           description: "RFC 3339 timestamp when the DAG-run finished"
-        error:
-          type: string
-          description: "Top-level error recorded for the DAG-run, such as a definition build failure that prevented the run from starting"
         artifactsAvailable:
           type: boolean
           description: "Whether artifact files are available for this DAG-run"
@@ -13694,6 +13691,9 @@ components:
               description: "List of preconditions that must be met before the DAG-run can start"
               items:
                 $ref: "#/components/schemas/Condition"
+            error:
+              type: string
+              description: "Top-level error recorded for the DAG-run, such as a definition build failure that prevented the run from starting"
             agentTasks:
               type: array
               description: "Goal progress of an agent DAG-run. Absent for other DAG types."

@@ -347,17 +347,12 @@ func toDAGRunSummary(s ir.DAGRunStatus) api.DAGRunSummary {
 	if s.AutoRetryLimit > 0 {
 		autoRetryLimit = ptrOf(s.AutoRetryLimit)
 	}
-	var runError *string
-	if s.Error != "" {
-		runError = ptrOf(s.Error)
-	}
 	artifactsAvailable := hasArtifactEntries(s.ArchiveDir)
 
 	return api.DAGRunSummary{
 		Name:               s.Name,
 		DagRunId:           s.DAGRunID,
 		Workspace:          workspaceResponseNameFromLabelStrings(s.Labels),
-		Error:              runError,
 		Params:             ptrOf(s.Params),
 		ProfileName:        toRuntimeProfileName(s.ProfileName),
 		QueuedAt:           ptrOf(s.QueuedAt),

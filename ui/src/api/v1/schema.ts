@@ -5276,8 +5276,6 @@ export interface components {
             startedAt: string;
             /** @description RFC 3339 timestamp when the DAG-run finished */
             finishedAt: string;
-            /** @description Top-level error recorded for the DAG-run, such as a definition build failure that prevented the run from starting */
-            error?: string;
             /** @description Whether artifact files are available for this DAG-run */
             artifactsAvailable: boolean;
             /** @description Whether reuse of prior build materializations was disabled for this DAG-run */
@@ -5322,6 +5320,8 @@ export interface components {
             onWait?: components["schemas"]["Node"];
             /** @description List of preconditions that must be met before the DAG-run can start */
             preconditions?: components["schemas"]["Condition"][];
+            /** @description Top-level error recorded for the DAG-run, such as a definition build failure that prevented the run from starting */
+            error?: string;
             /** @description Goal progress of an agent DAG-run. Absent for other DAG types. */
             agentTasks?: components["schemas"]["AgentTask"][];
             /** @description Ordered decision timeline of an agent DAG-run: what the agent ran, in what order, and when each task was satisfied. Absent for other DAG types. */
