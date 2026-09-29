@@ -33,9 +33,9 @@ func LookupEnv(envs []string, key string) (string, bool) {
 	return "", false
 }
 
-// IsExecutableFile reports whether path names an existing regular file with
+// isExecutableFile reports whether path names an existing regular file with
 // executable permission. On Windows any existing regular file counts.
-func IsExecutableFile(path string) bool {
+func isExecutableFile(path string) bool {
 	info, err := os.Stat(path)
 	if err != nil || info.IsDir() {
 		return false
@@ -47,18 +47,19 @@ func IsExecutableFile(path string) bool {
 }
 
 // IsExecutableFileInEnv reports whether path resolves to a file the process
-// starter can launch under envs. Off Windows it is IsExecutableFile. On
-// Windows it follows the os/exec lookup rules: the exact name is tried first,
-// then each PATHEXT suffix, and the first existing candidate must carry a
-// PATHEXT extension — a match like tool.txt or an extensionless file resolves
-// at lookup but cannot launch.
+// starter can launch under envs. Off Windows the file must exist and carry an
+// executable bit. On Windows it follows the os/exec lookup rules: a name with
+// an extension is tried as is, then each PATHEXT suffix is appended, and the
+// first existing candidate must carry a PATHEXT extension — a match like
+// tool.txt resolves at lookup but cannot launch. An extensionless name never
+// matches as is, so tool resolves tool.cmd even when a file named tool exists.
 func IsExecutableFileInEnv(path string, envs []string) bool {
 	if runtime.GOOS != "windows" {
-		return IsExecutableFile(path)
+		return isExecutableFile(path)
 	}
 	pathextEnv, _ := LookupEnv(envs, "PATHEXT")
 	for _, candidate := range pathCandidates(path, pathextEnv) {
-		if IsExecutableFile(candidate) {
+		if isExecutableFile(candidate) {
 			return pathextContains(pathextEnv, filepath.Ext(candidate))
 		}
 	}
@@ -108,7 +109,7 @@ func lookPathInPATH(command, pathEnv, pathextEnv, baseDir string) (string, error
 			dir = filepath.Join(baseDir, dir)
 		}
 		for _, candidate := range pathCandidates(filepath.Join(dir, command), pathextEnv) {
-			if IsExecutableFile(candidate) {
+			if isExecutableFile(candidate) {
 				if runtime.GOOS == "windows" && !pathextContains(pathextEnv, filepath.Ext(candidate)) {
 					// The starter resolves this candidate but cannot launch
 					// it; later entries never get a chance.
@@ -134,9 +135,13 @@ func pathCandidates(candidate, pathextEnv string) []string {
 
 	exts := pathextList(pathextEnv)
 	candidates := make([]string, 0, len(exts)+1)
-	// The exact name resolves first, then each PATHEXT suffix, even when the
-	// name already carries an extension (e.g. tool.v2 resolves tool.v2.exe).
-	candidates = append(candidates, candidate)
+	// A name with an extension resolves as is first; every name then tries
+	// each PATHEXT suffix (e.g. tool.v2 resolves tool.v2.exe). Like os/exec,
+	// an extensionless name is skipped as is: npm installs a POSIX shim named
+	// tool next to tool.cmd.
+	if filepath.Ext(candidate) != "" {
+		candidates = append(candidates, candidate)
+	}
 	for _, ext := range exts {
 		candidates = append(candidates, candidate+ext)
 	}

@@ -59,6 +59,15 @@ func TestIsExecutableFileInEnv_PATHEXT(t *testing.T) {
 		"extensionless files are never resolved by the starter")
 	assert.False(t, IsExecutableFileInEnv(filepath.Join(dir, "missing.exe"), envs))
 
+	// An extensionless name skips the bare file, like os/exec: npm installs a
+	// POSIX shim named tool next to tool.cmd.
+	write("shim")
+	shimCmd := write("shim.cmd")
+	assert.True(t, IsExecutableFileInEnv(filepath.Join(dir, "shim"), envs))
+	resolved, err := LookPathInEnvDir("shim", append([]string{"PATH=" + dir}, envs...), "")
+	require.NoError(t, err)
+	assert.Equal(t, strings.ToLower(shimCmd), strings.ToLower(resolved))
+
 	// A dotted name still gains PATHEXT suffixes: tool.v2 -> tool.v2.exe.
 	write("dotted.v2.exe")
 	assert.True(t, IsExecutableFileInEnv(filepath.Join(dir, "dotted.v2"), envs))
