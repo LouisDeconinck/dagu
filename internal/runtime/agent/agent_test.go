@@ -428,14 +428,14 @@ func TestAgent_Run(t *testing.T) {
 		)
 		require.NoError(t, err)
 		require.NoError(t, prepared.Open(th.Context))
-		finished := ir.NewStatusBuilder(dag.DAG).Create(
-			runID, ir.Succeeded, 0, time.Now(), ir.WithAttemptID(prepared.ID()),
+		recorded := ir.NewStatusBuilder(dag.DAG).Create(
+			runID, ir.Failed, 0, time.Now(), ir.WithAttemptID(prepared.ID()),
 		)
-		require.NoError(t, prepared.Write(th.Context, finished))
+		require.NoError(t, prepared.Write(th.Context, recorded))
 		require.NoError(t, prepared.Close(th.Context))
 
-		// The same attempt must not be executed again: its status file
-		// already holds a recorded execution.
+		// The same attempt must not be executed again, and its recorded
+		// status must survive; a re-run of `exit 0` would record success.
 		dagAgent := dag.Agent(
 			test.WithDAGRunID(runID),
 			test.WithAgentOptions(agent.Options{
@@ -444,6 +444,7 @@ func TestAgent_Run(t *testing.T) {
 		)
 		err = dagAgent.Run(th.Context)
 		require.ErrorIs(t, err, dagrun.ErrDAGRunAlreadyExists)
+		dag.AssertLatestStatus(t, ir.Failed)
 	})
 	t.Run("ResumesQueuedAttempt", func(t *testing.T) {
 		// Queue dispatch and seeded step selections persist a queued status

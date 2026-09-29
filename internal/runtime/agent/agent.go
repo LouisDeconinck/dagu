@@ -620,6 +620,13 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 		if err != nil {
 			return fmt.Errorf("failed to setup execution history: %w", err)
 		}
+		// Queued and not-started records are pre-execution markers written
+		// before dispatch; any later status means the attempt already ran.
+		if prev, err := att.ReadStatus(ctx); err == nil && prev != nil &&
+			prev.Status != ir.Queued && prev.Status != ir.NotStarted {
+			return fmt.Errorf("%w: dag-run %s attempt %s already recorded status %s",
+				dagrun.ErrDAGRunAlreadyExists, a.dagRunID, att.ID(), prev.Status)
+		}
 		attempt = att
 		a.dagRunAttemptID = attempt.ID()
 		if span != nil {
@@ -761,17 +768,6 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	var initErr error
 
 	// Open the run file to write the status.
-	// Reject duplicate execution of the same dag-run attempt: a status file
-	// that already holds a recorded execution must not be run again.
-	// Queued and not-started records are pre-execution markers persisted
-	// before dispatch (queued runs, seeded step selections, and
-	// coordinator-prepared worker attempts); the agent resumes those
-	// attempts, so only a later-stage status counts as a duplicate.
-	if prev, err := attempt.ReadStatus(ctx); err == nil && prev != nil &&
-		prev.Status != ir.Queued && prev.Status != ir.NotStarted {
-		return fmt.Errorf("%w: dag-run %s attempt %s already recorded status %s",
-			dagrun.ErrDAGRunAlreadyExists, a.dagRunID, attempt.ID(), prev.Status)
-	}
 	if err := attempt.Open(ctx); err != nil {
 		return fmt.Errorf("failed to open execution history: %w", err)
 	}
