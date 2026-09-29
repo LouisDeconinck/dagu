@@ -2116,6 +2116,51 @@ func TestRunner_DryRunWithHandlers(t *testing.T) {
 	result.assertNodeStatus(t, "onSuccess", ir.NodeSucceeded)
 }
 
+// A missing shell or command never fails a dry run: the real run may execute
+// on another host, or an upstream step may create the executable first.
+func TestRunner_DryRunStepChecks(t *testing.T) {
+	missing := "dagu-test-missing-9f3c2b1a"
+
+	t.Run("MissingExecutablesSucceed", func(t *testing.T) {
+		handler := newStep("onSuccess", withCommand(missing+"-handler"))
+		r := setupRunner(t,
+			func(cfg *runtime.Config) {
+				cfg.Dry = true
+			},
+			withOnSuccess(handler),
+		)
+
+		plan := r.newPlan(t,
+			newStep("1", withCommand("true"), withShell(missing+"-shell")),
+			newStep("2", withCommand(missing+"-command --flag")),
+			newStep("3", withCommand("./no-exec.sh")),
+		)
+
+		result := plan.assertRun(t, ir.Succeeded)
+		result.assertNodeStatus(t, "1", ir.NodeSucceeded)
+		result.assertNodeStatus(t, "2", ir.NodeSucceeded)
+		result.assertNodeStatus(t, "3", ir.NodeSucceeded)
+		result.assertNodeStatus(t, "onSuccess", ir.NodeSucceeded)
+	})
+
+	t.Run("HandlerEnvErrorFailsHandler", func(t *testing.T) {
+		handler := successStep("onSuccess")
+		handler.Env = []string{"DAGU_TEST_NO_EQUALS"}
+		r := setupRunner(t,
+			func(cfg *runtime.Config) {
+				cfg.Dry = true
+			},
+			withOnSuccess(handler),
+		)
+
+		plan := r.newPlan(t, successStep("1"))
+
+		result := plan.assertRun(t, ir.Failed)
+		result.assertNodeStatus(t, "onSuccess", ir.NodeFailed)
+		require.ErrorContains(t, result.Error, "DAGU_TEST_NO_EQUALS")
+	})
+}
+
 func TestRunner_ConcurrentExecution(t *testing.T) {
 	steps := func(script func(string) string) []ir.Step {
 		return []ir.Step{
