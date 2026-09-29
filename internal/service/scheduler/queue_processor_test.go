@@ -408,25 +408,16 @@ func TestQueueProcessor_DefersUnchangedDistributedDispatchFailure(t *testing.T) 
 	require.Len(t, items, 1)
 }
 
-func TestQueueProcessor_DistributedDispatchFailsRunOnDefinitionBuildError(t *testing.T) {
-	// A queued run whose persisted definition can no longer be built (here: an
-	// invalid action input_schema in the captured base config) can never be
-	// dispatched. The dispatch failure must mark the run failed with the real
-	// build error instead of leaving it queued behind a generic dispatch error.
-	f := newQueueFixture(t).withDAG("broken-base-actions", 1)
-	f.dag.BaseConfigData = []byte(`
-actions:
-  broken_action:
-    input_schema:
-      type: object
-      properties: []
-    template:
-      action: artifact.write
-      with: {path: out.txt}
-`)
-	f.withProcessor(config.Queues{}).simulateQueue(1, false)
+func TestQueueProcessor_DistributedDispatchFailsRunOnDefinitionError(t *testing.T) {
+	// A dispatch rejected because the definition cannot be built can never
+	// succeed, so the run is failed with the build error instead of staying
+	// queued behind a generic dispatch condition.
+	f := newQueueFixture(t).withDAG("broken-definition", 1).
+		withProcessor(config.Queues{}).
+		simulateQueue(1, false)
+	buildErr := errors.New("field 'actions.broken_action.input_schema': failed to parse schema JSON")
 	dispatcher := &mockDispatcher{errFunc: func(int32) error {
-		return errors.New("dispatch unavailable")
+		return &dispatch.DefinitionError{Err: buildErr}
 	}}
 	f.processor.dagExecutor = NewDAGExecutor(dispatcher, nil, config.ExecutionModeDistributed, "")
 	f.enqueueToQueue(f.dag.Name, "run-1", queuedomain.QueuePriorityHigh)
@@ -438,39 +429,11 @@ actions:
 	runStatus, err := attempt.ReadStatus(f.ctx)
 	require.NoError(t, err)
 	assert.Equal(t, ir.Failed, runStatus.Status)
-	assert.Contains(t, runStatus.Error, "actions.broken_action.input_schema")
-	assert.Contains(t, runStatus.Error, "failed to parse schema JSON")
+	assert.Contains(t, runStatus.Error, buildErr.Error())
 
 	items, err := f.queueStore.List(f.ctx, f.dag.Name)
 	require.NoError(t, err)
-	assert.Empty(t, items, "a run that can never be dispatched should leave the queue")
-}
-
-func TestQueueProcessor_DistributedDispatchKeepsRunQueuedOnSourceReadError(t *testing.T) {
-	// A queued run whose source cannot be read (here: the DAG file is missing)
-	// has not proven its definition invalid, so the dispatch failure leaves it
-	// queued for a later scan instead of marking it failed.
-	f := newQueueFixture(t).withDAG("missing-source", 1)
-	f.dag.YamlData = nil
-	f.dag.Location = filepath.Join(t.TempDir(), "deleted.yaml")
-	f.withProcessor(config.Queues{}).simulateQueue(1, false)
-	dispatcher := &mockDispatcher{errFunc: func(int32) error {
-		return errors.New("dispatch unavailable")
-	}}
-	f.processor.dagExecutor = NewDAGExecutor(dispatcher, nil, config.ExecutionModeDistributed, "")
-	f.enqueueToQueue(f.dag.Name, "run-1", queuedomain.QueuePriorityHigh)
-
-	f.processor.ProcessQueueItems(f.ctx, f.dag.Name)
-
-	attempt, err := f.dagRunRepository.FindAttempt(f.ctx, ir.NewDAGRunRef(f.dag.Name, "run-1"))
-	require.NoError(t, err)
-	runStatus, err := attempt.ReadStatus(f.ctx)
-	require.NoError(t, err)
-	assert.Equal(t, ir.Queued, runStatus.Status)
-
-	items, err := f.queueStore.List(f.ctx, f.dag.Name)
-	require.NoError(t, err)
-	assert.Len(t, items, 1, "a run with an unreadable source should stay queued")
+	assert.Empty(t, items)
 }
 
 func TestQueueProcessor_ProcessQueueItems_FailsClosedOnLeaseCountError(t *testing.T) {

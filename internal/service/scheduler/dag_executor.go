@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"time"
 
@@ -384,40 +383,6 @@ func (e *DAGExecutor) shouldUseDistributedExecution(dag *ir.DAG) bool {
 // IsDistributed returns whether the given DAG would use distributed execution.
 func (e *DAGExecutor) IsDistributed(dag *ir.DAG) bool {
 	return e.shouldUseDistributedExecution(dag)
-}
-
-// definitionBuildError rebuilds a queued DAG snapshot the same way dispatch
-// does. A non-nil result means the persisted definition is permanently broken,
-// so the run can never be dispatched and the failure must be surfaced on the
-// run record instead of requeueing behind a generic dispatch error.
-// Source-read errors (an unreadable or missing file, an interrupted context)
-// say nothing about the definition, so they stay transient: the run remains
-// queued for a later scan.
-func (e *DAGExecutor) definitionBuildError(ctx context.Context, dag *ir.DAG, status *ir.DAGRunStatus) error {
-	var params any
-	if status != nil {
-		params = status.ParamsList
-	}
-	_, err := spec.ReloadRuntimeSnapshot(ctx, dag, params, spec.ResolveRuntimeParamsOptions{
-		BaseConfig:             e.baseConfigPath,
-		WorkspaceBaseConfigDir: e.workspaceBaseConfigDir,
-	})
-	if err == nil || isTransientBuildSourceError(ctx, err) {
-		return nil
-	}
-	return err
-}
-
-// isTransientBuildSourceError reports whether err came from reading a DAG
-// source rather than from the definition itself.
-func isTransientBuildSourceError(ctx context.Context, err error) bool {
-	if ctx.Err() != nil {
-		return true
-	}
-	var pathErr *fs.PathError
-	return errors.As(err, &pathErr) ||
-		errors.Is(err, fs.ErrNotExist) ||
-		errors.Is(err, fs.ErrPermission)
 }
 
 // dispatchToCoordinator dispatches a task to the coordinator for distributed execution.
