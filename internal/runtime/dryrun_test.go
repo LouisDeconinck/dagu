@@ -6,6 +6,7 @@ package runtime_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"testing"
@@ -63,6 +64,44 @@ func TestCheckDryRunStep(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("ZshBuiltin", func(t *testing.T) {
+		if _, err := exec.LookPath("zsh"); err != nil {
+			t.Skip("zsh is not installed")
+		}
+		step := newStep("1", withCommand("setopt extendedglob"), withShell("zsh"))
+
+		err := checkDryRun(t, t.TempDir(), step, nil)
+		require.NoError(t, err)
+	})
+
+	// A command exec'd without a shell resolves through the dagu process PATH,
+	// so a directory that only the step PATH lists does not satisfy it.
+	t.Run("DirectCommandIgnoresStepPATH", func(t *testing.T) {
+		if goruntime.GOOS == "windows" {
+			t.Skip("lookup fixtures rely on POSIX executables")
+		}
+		binDir := t.TempDir()
+		writeExecutable(t, filepath.Join(binDir, "dagu-test-step-path-tool"))
+		step := newStep("1", withCommand("dagu-test-step-path-tool"), withShell("direct"))
+
+		err := checkDryRun(t, t.TempDir(), step, map[string]string{"PATH": binDir})
+		require.ErrorContains(t, err, "dagu-test-step-path-tool")
+	})
+
+	// A shell resolves command names through the step PATH, with relative
+	// entries anchored to the step working directory.
+	t.Run("ShellCommandUsesStepPATH", func(t *testing.T) {
+		if windowsShellTest() {
+			t.Skip("Windows default shells are not checked for command names")
+		}
+		workDir := t.TempDir()
+		writeExecutable(t, filepath.Join(workDir, "bin", "dagu-test-relpath-tool"))
+		step := newStep("1", withCommand("dagu-test-relpath-tool"))
+
+		err := checkDryRun(t, workDir, step, map[string]string{"PATH": "./bin"})
+		require.NoError(t, err)
+	})
+
 	t.Run("NonLocalExecutor", func(t *testing.T) {
 		step := newStep("1", withCommand(missing+"-command"), withShell(missing+"-shell"))
 		step.ExecutorConfig.Type = "docker"
@@ -85,4 +124,11 @@ func checkDryRun(t *testing.T, workDir string, step ir.Step, envs map[string]str
 		env.Scope = env.Scope.WithEntries(envs, cmnvalue.EnvSourceStepEnv)
 	}
 	return runtime.CheckDryRunStep(runtime.WithEnv(ctx, env), step)
+}
+
+func writeExecutable(t *testing.T, path string) {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755))
 }

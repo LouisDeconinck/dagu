@@ -56,8 +56,10 @@ func checkDryRunStep(ctx context.Context, step ir.Step) error {
 	if len(command.Shell) > 0 && !isDirectShellName(command.Shell[0]) {
 		direct = false
 		shell := command.Shell[0]
-		if _, err := cmdutil.LookPathInEnvDir(shell, envs, env.WorkingDir); err != nil {
-			return fmt.Errorf("field 'shell': %w", err)
+		// The executor resolves the shell with cmdutil.ResolveExecutable, so
+		// the lookup uses the dagu process PATH, not the step environment.
+		if _, ok := cmdutil.FindExecutable(shell); !ok {
+			return fmt.Errorf("field 'shell': shell %q not found on this host", shell)
 		}
 		if cmdutil.IsNixShell(shell) {
 			// Commands may be supplied by shell_packages instead of PATH.
@@ -79,7 +81,7 @@ func checkDryRunStep(ctx context.Context, step ir.Step) error {
 	for i, entry := range commands {
 		fieldPath := commandEntryFieldPath(len(commands), i)
 		err := checkDryRunCommand(ctx, entry, command, env, envs, fieldPath,
-			direct || step.Script != "", unixShell)
+			direct || step.Script != "")
 		if err != nil {
 			return err
 		}
@@ -88,7 +90,9 @@ func checkDryRunStep(ctx context.Context, step ir.Step) error {
 }
 
 // checkDryRunCommand checks one command entry. noShell is true when the
-// command is exec'd without a shell so shell builtins cannot satisfy it.
+// command is exec'd without a shell: its name resolves through the dagu
+// process PATH, as exec.Command does, and shell builtins cannot satisfy it.
+// Otherwise a Unix-like shell resolves the name through the step PATH.
 func checkDryRunCommand(
 	ctx context.Context,
 	entry ir.CommandEntry,
@@ -97,7 +101,6 @@ func checkDryRunCommand(
 	envs []string,
 	fieldPath string,
 	noShell bool,
-	unixShell bool,
 ) error {
 	name := entry.Command
 	if name == "" {
@@ -142,16 +145,17 @@ func checkDryRunCommand(
 		return nil
 	}
 
-	if _, err := cmdutil.LookPathInEnvDir(name, envs, env.WorkingDir); err == nil {
+	var found bool
+	if noShell {
+		_, found = cmdutil.FindExecutable(name)
+	} else {
+		_, err := cmdutil.LookPathInEnvDir(name, envs, env.WorkingDir)
+		found = err == nil || shellBuiltins[name]
+	}
+	if found || dryRunToolCommand(env, name) {
 		return nil
 	}
-	if !noShell && unixShell && posixShellBuiltins[name] {
-		return nil
-	}
-	if dryRunToolCommand(env, name) {
-		return nil
-	}
-	return fmt.Errorf("field '%s': command %q: executable file not found in $PATH", fieldPath, entry.Command)
+	return fmt.Errorf("field '%s': command %q not found on this host", fieldPath, entry.Command)
 }
 
 // dryRunToolCommand reports whether name is provided by the resolved Dagu
@@ -180,9 +184,10 @@ func isDirectShellName(name string) bool {
 	return strings.EqualFold(strings.TrimSuffix(filepath.Base(name), ".exe"), "direct")
 }
 
-// posixShellBuiltins are commands a Unix-like shell resolves internally, so a
-// PATH lookup failure for one of them does not mean the step cannot run.
-var posixShellBuiltins = map[string]bool{
+// shellBuiltins are commands a Unix-like shell (sh, bash, zsh, ksh) resolves
+// internally, so a PATH lookup failure for one of them does not mean the step
+// cannot run.
+var shellBuiltins = map[string]bool{
 	"!": true, ".": true, ":": true, "[": true, "[[": true,
 	"alias": true, "bg": true, "break": true, "builtin": true,
 	"caller": true, "case": true, "cd": true, "command": true,
@@ -200,4 +205,14 @@ var posixShellBuiltins = map[string]bool{
 	"times": true, "trap": true, "true": true, "type": true,
 	"typeset": true, "ulimit": true, "umask": true, "unalias": true,
 	"unset": true, "until": true, "wait": true, "while": true,
+	// bash
+	"bind": true, "compgen": true, "complete": true, "compopt": true,
+	"coproc": true, "disable": true, "enable": true,
+	// zsh and ksh
+	"autoload": true, "bindkey": true, "emulate": true, "float": true,
+	"functions": true, "integer": true, "noglob": true, "print": true,
+	"rehash": true, "repeat": true, "setopt": true, "unfunction": true,
+	"unsetopt": true, "vared": true, "whence": true, "where": true,
+	"which": true, "zle": true, "zmodload": true, "zparseopts": true,
+	"zstyle": true,
 }
