@@ -368,6 +368,16 @@ steps:
 		assertLatestParams(t, th, dag.Location, "1=s1 2=s2")
 	})
 
+	t.Run("PipedQuotedValue", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		dag := th.DAG(t, "params: default\nsteps:\n  - name: print\n    run: echo ok\n")
+		pipeCommandStdin(t, `"\"hello world\""`)
+		th.RunCommand(t, cmd.Start(), test.CmdTest{
+			Args: []string{"start", "--params-stdin", dag.Location},
+		})
+		assertLatestParams(t, th, dag.Location, "1=hello world")
+	})
+
 	t.Run("PipedNamedParamsAcrossLines", func(t *testing.T) {
 		th := test.SetupCommand(t)
 		dag := th.DAG(t, namedDAG)

@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"github.com/dagucloud/dagu/v2/internal/cmn/stringutil"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/spec"
 )
@@ -26,5 +27,5 @@ func buildStartValidationInput(ctx *Context, args []string, rawParams string) sp
 		return spec.StartParamInput{DashArgs: quoteStartDashArgs(args[argsLenAtDash:])}
 	}
 
-	return spec.StartParamInput{RawParams: rawParams}
+	return spec.StartParamInput{RawParams: stringutil.RemoveQuotes(rawParams)}
 }

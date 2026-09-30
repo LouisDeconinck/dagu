@@ -212,7 +212,7 @@ func remoteResolveDAG(ctx *Context, arg string) (*api.DAGFile, error) {
 // first, then --params, then stdin when --params-stdin is enabled.
 func remoteRunParams(ctx *Context, args []string) (string, error) {
 	if argsLenAtDash := ctx.Command.ArgsLenAtDash(); argsLenAtDash >= 0 {
-		return joinNonEmpty(args[argsLenAtDash:]), nil
+		return strings.Join(quoteStartDashArgs(args[argsLenAtDash:]), " "), nil
 	}
 	if ctx.Command.Flags().Changed("params") {
 		return ctx.StringParam("params")
@@ -717,16 +717,6 @@ func derefStringSlice(v *[]string) []string {
 		return nil
 	}
 	return append([]string{}, (*v)...)
-}
-
-func joinNonEmpty(parts []string) string {
-	filtered := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part != "" {
-			filtered = append(filtered, part)
-		}
-	}
-	return strings.Join(filtered, " ")
 }
 
 func enrichRemoteHistoryStatus(status *ir.DAGRunStatus, detail *api.DAGRunDetails) error {

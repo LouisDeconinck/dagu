@@ -81,6 +81,11 @@ func TestValidateStartPositionalParamCount(t *testing.T) {
 			wantErr:     "too many positional params: expected at most 2, got 3",
 		},
 		{
+			name:        "QuotedPositionalFlag",
+			cliArgs:     []string{`--params="\"hello world\""`, "dag.yaml"},
+			defaultArgs: "default",
+		},
+		{
 			name:        "NamedOnlyDoesNotTriggerPositionalValidation",
 			cliArgs:     []string{"--params", "KEY1=value1 KEY2=value2", "dag.yaml"},
 			defaultArgs: `p1 p2`,

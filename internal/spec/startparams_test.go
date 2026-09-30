@@ -85,6 +85,17 @@ func TestValidateStartParams(t *testing.T) {
 			wantErr:       "too many positional params: expected at most 2, got 3",
 		},
 		{
+			name:          "QuotedPositionalCountsOnce",
+			defaultParams: "default",
+			input:         StartParamInput{RawParams: `"hello world"`},
+		},
+		{
+			name:          "QuotedPositionalsStillEnforceCount",
+			defaultParams: "default",
+			input:         StartParamInput{RawParams: `"hello world" "second value"`},
+			wantErr:       "too many positional params: expected at most 1, got 2",
+		},
+		{
 			name:          "NamedOnlyBypassesPositionalCount",
 			defaultParams: "p1 p2",
 			input:         StartParamInput{RawParams: "KEY1=value1 KEY2=value2"},

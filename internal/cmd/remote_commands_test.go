@@ -305,7 +305,7 @@ func TestRemoteRunParams(t *testing.T) {
 			name:       "DashSkipsClosedStdin",
 			args:       []string{"--params-stdin", "etl", "--", "P1=dash"},
 			closed:     true,
-			wantParams: new("P1=dash"),
+			wantParams: new(`P1="dash"`),
 		},
 		{
 			name:   "EmptyDashSkipsClosedStdin",
@@ -358,7 +358,7 @@ func TestRemoteRunParams(t *testing.T) {
 			name:       "DashBeatsFlagAndStdin",
 			args:       []string{"--params-stdin", "--params=P1=flag", "etl", "--", "P1=dash"},
 			stdin:      "P1=stdin",
-			wantParams: new("P1=dash"),
+			wantParams: new(`P1="dash"`),
 		},
 		{
 			name:  "EmptyDashBeatsFlagAndStdin",
@@ -380,7 +380,7 @@ func TestRemoteRunParams(t *testing.T) {
 			name:       "DashSkipsOversizedStdin",
 			args:       []string{"--params-stdin", "etl", "--", "P1=dash"},
 			stdin:      oversizedInput,
-			wantParams: new("P1=dash"),
+			wantParams: new(`P1="dash"`),
 		},
 		{
 			name:    "OversizedStdinRejected",
@@ -412,6 +412,18 @@ func TestRemoteRunParams(t *testing.T) {
 			stdin:      "P1=stdin",
 			wantParams: new("P1=foo P2=bar"),
 			wantValues: []string{"P1=foo", "P2=bar"},
+		},
+		{
+			name:       "DashSpacedValue",
+			args:       []string{"etl", "--", "hello world"},
+			wantParams: new(`"hello world"`),
+			wantValues: []string{"P1=default1", "P2=default2", "1=hello world"},
+		},
+		{
+			name:       "DashEmptyValue",
+			args:       []string{"etl", "--", ""},
+			wantParams: new(`""`),
+			wantValues: []string{"P1=default1", "P2=default2", "1="},
 		},
 		{
 			name:       "QuotedValueStdin",
