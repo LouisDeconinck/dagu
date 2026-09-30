@@ -68,6 +68,87 @@ steps:
     await errorPage.close();
   });
 
+  test('pages a large log and downloads its complete contents', async ({ page, request }) => {
+    const stack = await loadStack();
+    const token = await loginViaAPI(request, stack.auth.adminUsername, stack.auth.adminPassword);
+    const dagName = uniqueName('e2e-log-pages');
+    const fileName = await writeLocalDAG(dagName, `
+name: ${dagName}
+steps:
+  - name: output
+    run: |
+      awk 'BEGIN { for (i = 1; i <= 100000; i++) printf "line %06d\\n", i }'
+`);
+    await waitForDAGAvailable(request, token, fileName);
+    const runId = await startDAG(request, token, fileName);
+    await waitForRunStatus(request, token, dagName, runId, ['succeeded']);
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+
+    const waitForLog = (params: Record<string, number>) => page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return url.pathname.endsWith(`/steps/output/log`) &&
+        Object.entries(params).every(([name, value]) => url.searchParams.get(name) === String(value));
+    });
+    const initialLog = waitForLog({ tail: 1000 });
+    await page.goto(`/dags/${encodeURIComponent(fileName)}/log?dagRunId=${runId}&step=output`);
+    expect((await (await initialLog).json()).lineCount).toBe(1000);
+    const output = page.getByRole('region', { name: 'Step output', exact: true });
+    await expect(output).toContainText('line 100000');
+
+    const customLog = waitForLog({ tail: 1234 });
+    await page.getByLabel('Lines per page', { exact: true }).selectOption('custom');
+    const customSize = page.getByLabel('Custom lines per page', { exact: true });
+    await customSize.fill('1234');
+    await customSize.press('Enter');
+    expect((await (await customLog).json()).lineCount).toBe(1234);
+
+    await page.getByRole('button', { name: 'Page View', exact: true }).click();
+    const pageInput = page.getByLabel('Page', { exact: true });
+    await expect(pageInput).toBeEnabled();
+    const fourthPage = waitForLog({ offset: 3703, limit: 1234 });
+    await pageInput.fill('4');
+    await pageInput.press('Enter');
+    expect((await (await fourthPage).json()).lineCount).toBe(1234);
+    await expect(output).toContainText('line 003703');
+    await expect(output).toContainText('line 004936');
+
+    // Leaving an unchanged custom size must preserve the current page.
+    await customSize.focus();
+    await customSize.blur();
+    await expect(pageInput).toHaveValue('4');
+    const search = page.getByPlaceholder('Search in loaded lines...');
+    await search.fill('line 004936');
+    await search.press('Enter');
+    await expect(output.getByText('line 004936', { exact: true })).toBeInViewport();
+    await search.press('Escape');
+
+    const largestPage = waitForLog({ offset: 1, limit: 10000 });
+    await customSize.fill('100000');
+    await customSize.press('Enter');
+    expect((await (await largestPage).json()).lineCount).toBe(10000);
+    await expect(customSize).toHaveValue('10000');
+    await expect(pageInput).toHaveValue('1');
+    await expect(output).toContainText('line 010000');
+
+    const lastPage = waitForLog({ offset: 90001, limit: 10000 });
+    const jump = page.getByLabel('Jump to line:', { exact: true });
+    await jump.fill('100000');
+    await jump.press('Enter');
+    expect((await (await lastPage).json()).lineCount).toBe(10000);
+    await expect(pageInput).toHaveValue('10');
+    await expect(output.getByText('line 100000', { exact: true })).toBeInViewport();
+
+    const downloaded = page.waitForEvent('download');
+    await page.getByTitle('Download full log', { exact: true }).click();
+    const download = await downloaded;
+    const path = await download.path();
+    expect(path).not.toBeNull();
+    const contents = await readFile(path!, 'utf8');
+    expect(contents.trimEnd().split('\n')).toHaveLength(100000);
+    expect(contents).toMatch(/^line 000001\n/);
+    expect(contents).toMatch(/line 100000\n$/);
+  });
+
   test('reads parallel output without losing the selected step or scroll position', async ({ page, request }, testInfo) => {
     const stack = await loadStack();
     const token = await loginViaAPI(request, stack.auth.adminUsername, stack.auth.adminPassword);

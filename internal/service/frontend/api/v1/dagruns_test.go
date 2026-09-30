@@ -310,6 +310,70 @@ func TestGetDAGRunSpec(t *testing.T) {
 	).ExpectStatus(http.StatusNotFound).Send(t)
 }
 
+func TestLogPageLimits(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		t.Run(fmt.Sprintf("strict=%t", strict), func(t *testing.T) {
+			server := test.SetupServer(t, test.WithConfigMutator(func(cfg *config.Config) {
+				cfg.Server.StrictValidation = strict
+			}))
+			logPath := filepath.Join(t.TempDir(), "output.log")
+			require.NoError(t, os.WriteFile(logPath, []byte(strings.Repeat("line\n", 20000)), 0o600))
+			dag := &ir.DAG{Name: "log-limits", Steps: []ir.Step{{Name: "main"}}}
+			root := ir.NewDAGRunRef(dag.Name, "root")
+			for _, runID := range []string{root.ID, "child"} {
+				opts := persis.DAGRunCreateAttemptOptions{}
+				if runID != root.ID {
+					opts.RootDAGRun = root
+				}
+				attempt, err := server.DAGRunRepository.CreateAttempt(server.Context, dag, time.Now(), runID, opts)
+				require.NoError(t, err)
+				status := ir.InitialStatus(dag)
+				status.DAGRunID = runID
+				status.AttemptID = attempt.ID()
+				status.Root = root
+				status.Log = logPath
+				status.Nodes[0].Stdout = logPath
+				if runID == root.ID {
+					status.Nodes[0].SubRuns = []ir.SubDAGRun{{DAGRunID: "child", DAGName: dag.Name}}
+				}
+				require.NoError(t, attempt.Open(server.Context))
+				require.NoError(t, attempt.Write(server.Context, status))
+				require.NoError(t, attempt.Close(server.Context))
+			}
+
+			for _, path := range []string{
+				"/log",
+				"/steps/main/log",
+				"/sub-dag-runs/child/log",
+				"/sub-dag-runs/child/steps/main/log",
+			} {
+				t.Run(path, func(t *testing.T) {
+					for _, param := range []string{"head", "tail", "limit"} {
+						for _, count := range []int{-1, 0, 1, 10000, 10001, 100000} {
+							t.Run(fmt.Sprintf("%s=%d", param, count), func(t *testing.T) {
+								want := http.StatusBadRequest
+								if count >= 1 && count <= 10000 {
+									want = http.StatusOK
+								}
+								resp := server.Client().Get(fmt.Sprintf(
+									"/api/v1/dag-runs/%s/%s%s?remoteNode=local&stream=stdout&%s=%d", dag.Name, root.ID, path, param, count,
+								)).ExpectStatus(want).Send(t)
+								if want == http.StatusOK {
+									var body api.GetDAGRunLog200JSONResponse
+									resp.Unmarshal(t, &body)
+									require.NotNil(t, body.LineCount)
+									require.Equal(t, count, *body.LineCount)
+									require.Len(t, strings.Split(body.Content, "\n"), count)
+								}
+							})
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
 func readLogArchive(t *testing.T, body string) map[string]string {
 	t.Helper()
 	archive, err := zip.NewReader(strings.NewReader(body), int64(len(body)))
