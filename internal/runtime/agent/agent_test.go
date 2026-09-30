@@ -347,6 +347,65 @@ func TestStopStartupDuplicate(t *testing.T) {
 	dag.AssertLatestStatus(t, ir.Succeeded)
 }
 
+type rejectedAttempt struct{}
+
+func (rejectedAttempt) Error() string                 { return "attempt rejected" }
+func (rejectedAttempt) AttemptRejectedReason() string { return "stale attempt" }
+
+type rejectingStatusPusher struct {
+	status   ir.NodeStatus
+	rejected chan struct{}
+	once     sync.Once
+}
+
+func (p *rejectingStatusPusher) Push(_ context.Context, status ir.DAGRunStatus) error {
+	if len(status.Nodes) == 0 || status.Nodes[0].Status != p.status {
+		return nil
+	}
+	var err error
+	p.once.Do(func() {
+		close(p.rejected)
+		err = rejectedAttempt{}
+	})
+	return err
+}
+
+// Rejection must not block the consumer that drains runner progress and handlers.
+func TestRejectedStatus(t *testing.T) {
+	for _, nodeStatus := range []ir.NodeStatus{ir.NodeNotStarted, ir.NodeRunning, ir.NodeSucceeded} {
+		t.Run(nodeStatus.String(), func(t *testing.T) {
+			th := test.Setup(t)
+			marker := filepath.Join(t.TempDir(), "exit")
+			script := "echo done"
+			if nodeStatus == ir.NodeRunning {
+				script = test.Sleep(30 * time.Second)
+			}
+			dag := th.DAG(t, fmt.Sprintf("max_clean_up_time_sec: 5\nsteps:\n  - script: %q\nhandler_on:\n  abort:\n    run: echo abort\n  exit:\n    script: %q\n", script, writeFileCommand(marker, "done")))
+			pusher := &rejectingStatusPusher{status: nodeStatus, rejected: make(chan struct{})}
+			dagAgent := dag.Agent(test.WithAgentOptions(agent.Options{StatusPusher: pusher}))
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = dagAgent.Run(th.Context)
+			}()
+			t.Cleanup(func() {
+				dagAgent.Signal(th.Context, os.Kill)
+				waitForCancel(t, done, agentRunCompletionTimeout())
+			})
+			waitForCancel(t, pusher.rejected, agentRunStartTimeout())
+			waitForCancel(t, done, 3*time.Second)
+			data, err := os.ReadFile(marker)
+			if nodeStatus == ir.NodeNotStarted {
+				require.ErrorIs(t, err, os.ErrNotExist, "handler ran before startup completed")
+				require.Equal(t, ir.Aborted, dagAgent.Status(th.Context).Status)
+				return
+			}
+			require.NoError(t, err, "exit handler was skipped after rejection")
+			require.Equal(t, "done", string(data))
+		})
+	}
+}
+
 func TestStopSharedDeadline(t *testing.T) {
 	th := test.Setup(t)
 	dir := t.TempDir()

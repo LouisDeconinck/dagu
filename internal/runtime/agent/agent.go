@@ -1794,7 +1794,8 @@ func (a *Agent) pushStatus(ctx context.Context, status ir.DAGRunStatus) error {
 			logger.Warn(ctx, "Coordinator rejected the worker attempt; stopping execution",
 				slog.String("reason", rejectedErr.AttemptRejectedReason()),
 			)
-			a.stopChildren(context.Background(), syscall.SIGTERM, true)
+			// The progress consumer must remain available while cleanup runs.
+			a.requestStop(context.Background(), syscall.SIGTERM, true)
 		}
 		return err
 	}
@@ -2350,6 +2351,12 @@ func (a *Agent) dryRun(ctx context.Context) error {
 // its configured signal on platforms that support signal delivery. If processes
 // do not terminate after MaxCleanUp time, it requests forceful termination.
 func (a *Agent) stopChildren(ctx context.Context, sig os.Signal, allowOverride bool) {
+	if done := a.requestStop(ctx, sig, allowOverride); done != nil {
+		<-done
+	}
+}
+
+func (a *Agent) requestStop(ctx context.Context, sig os.Signal, allowOverride bool) <-chan struct{} {
 	intent := cmdutil.TerminationFromSignal(sig)
 	logger.Info(ctx, "Stopping running child processes",
 		slog.String("stop-mode", string(intent.Mode)),
@@ -2379,18 +2386,18 @@ func (a *Agent) stopChildren(ctx context.Context, sig os.Signal, allowOverride b
 	if intent.IsTermination() && cancelStartup != nil {
 		cancelStartup()
 		if !intent.IsForce() {
-			<-runnerDone
+			return runnerDone
 		}
-		return
+		return nil
 	}
 	if runner == nil || plan == nil {
-		return
+		return nil
 	}
 
 	if !intent.IsTermination() || intent.IsForce() {
 		// Force and non-termination requests do not start another cleanup period.
 		runner.Stop(ctx, plan, intent, nil, allowOverride)
-		return
+		return nil
 	}
 
 	a.cleanupOnce.Do(func() {
@@ -2422,7 +2429,7 @@ func (a *Agent) stopChildren(ctx context.Context, sig os.Signal, allowOverride b
 			}
 		}()
 	})
-	<-a.cleanupDone
+	return a.cleanupDone
 }
 
 // setupPlan setups the DAG plan. If is retry execution, it loads nodes
