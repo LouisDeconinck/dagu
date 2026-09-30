@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 type: graph
-max_clean_up_time_sec: 10
+max_clean_up_time_sec: 4
 steps:
   - id: probe
     run: |
@@ -17,5 +17,16 @@ steps:
       trap 'cleanup INT' INT
       printf ready > /data/ready
       while :; do sleep 0.05; done
+    with:
+      shell: /bin/sh
+handler_on:
+  abort:
+    run: |
+      sleep 5
+      printf done > /data/aborted
+    with:
+      shell: /bin/sh
+  exit:
+    run: printf done > /data/exited
     with:
       shell: /bin/sh

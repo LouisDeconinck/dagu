@@ -45,6 +45,8 @@ timeout 20 docker stop --time 15 "$container"
 test "$(timeout 10 docker inspect --format '{{.State.ExitCode}}' "$container")" = 0
 test "$(cat "$data_dir/signal")" = TERM
 test "$(cat "$data_dir/cleaned")" = done
+test "$(cat "$data_dir/aborted")" = done
+test "$(cat "$data_dir/exited")" = done
 
 python3 - "$data_dir" <<'PY'
 import json
@@ -55,4 +57,6 @@ statuses = list(pathlib.Path(sys.argv[1]).glob("data/dag-runs/**/status.jsonl"))
 assert len(statuses) == 1, f"expected one run status file, found {statuses}"
 status = json.loads(statuses[0].read_text().splitlines()[-1])
 assert status["status"] == 3, f"expected persisted aborted status, got {status}"
+for handler in ("onAbort", "onExit"):
+    assert status[handler]["status"] == 4, f"expected successful {handler}, got {status}"
 PY
