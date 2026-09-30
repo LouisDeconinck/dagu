@@ -384,7 +384,9 @@ function ExecutionLog({ name, dagRunId, dagRun }: Props) {
     if (pageInput === '' || !Number.isFinite(pageInput)) {
       return;
     }
-    handlePageChange(Math.min(Math.max(Math.floor(pageInput), 1), totalPages));
+    const page = Math.min(Math.max(Math.floor(pageInput), 1), totalPages);
+    setPageInput(page);
+    handlePageChange(page);
   }
 
   function getLineNumber(index: number): number {

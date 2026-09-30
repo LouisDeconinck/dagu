@@ -138,6 +138,10 @@ steps:
     await expect(pageInput).toHaveValue('10');
     await expect(output.getByText('line 100000', { exact: true })).toBeInViewport();
 
+    await pageInput.fill('10.9');
+    await pageInput.press('Enter');
+    await expect(pageInput).toHaveValue('10');
+
     const downloaded = page.waitForEvent('download');
     await page.getByTitle('Download full log', { exact: true }).click();
     const download = await downloaded;

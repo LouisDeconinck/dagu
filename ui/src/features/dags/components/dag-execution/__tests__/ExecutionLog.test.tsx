@@ -434,6 +434,47 @@ describe('log pagination controls', () => {
     }
   });
 
+  describe.each(['run', 'step'])('%s log page input', (log) => {
+    it.each([
+      { entered: '-5', page: 1 },
+      { entered: '1.9', page: 1 },
+      { entered: '999', page: 50 },
+    ])('normalizes $entered to page $page', ({ entered, page }) => {
+      vi.useFakeTimers();
+      try {
+        logs.data = { ...pagedData };
+        render(
+          log === 'run' ? (
+            <ExecutionLog name="example" dagRunId="run" />
+          ) : (
+            <StepLog dagName="example" dagRunId="run" stepName="build" />
+          ),
+          { wrapper: UserPreferencesProvider }
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'Page View' }));
+        act(() => vi.advanceTimersByTime(3100));
+        const input = screen.getByLabelText('Page');
+        if (page !== 1) {
+          fireEvent.change(input, { target: { value: String(page) } });
+          fireEvent.keyDown(input, { key: 'Enter' });
+          act(() => vi.advanceTimersByTime(3100));
+        }
+
+        // Normalization must also apply when the selected page stays the same.
+        fireEvent.change(input, { target: { value: entered } });
+        fireEvent.keyDown(input, { key: 'Enter' });
+
+        expect(input).toHaveValue(page);
+        expect(logs.queries[logs.queries.length - 1]).toMatchObject({
+          offset: (page - 1) * 1000 + 1,
+          limit: 1000,
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it('restores the custom size when step log options reopen', () => {
     logs.data = { ...pagedData };
     render(
