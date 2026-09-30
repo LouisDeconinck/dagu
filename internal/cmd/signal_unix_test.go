@@ -78,13 +78,13 @@ func TestSignalCleanupTimeout(t *testing.T) {
 					releaseHoldFile(t, run.release)
 				}
 				require.NoError(t, run.command.Process.Signal(syscall.SIGTERM))
-				select {
-				case err := <-run.waitCh:
-					run.exited = true
-					require.NoError(t, err, "output: %s", run.output())
-				case <-time.After(5 * time.Second):
-					t.Fatalf("supervisor exceeded the cleanup deadline: %s", run.output())
-				}
+				// The run finish time includes handlers. Service shutdown has its
+				// own budget and can finish later.
+				require.Eventually(t, func() bool {
+					status, err := run.th.DAGRunMgr.GetLatestStatus(run.th.Context, run.dag.DAG)
+					return err == nil && status.Status == ir.Aborted && status.FinishedAt != ""
+				}, 5*time.Second, 20*time.Millisecond, "runner exceeded the cleanup deadline: %s", run.output())
+				require.NoError(t, run.wait(t))
 				if scenario == "Step" || scenario == "Repeat" {
 					_, err := os.Stat(run.cleaned)
 					require.ErrorIs(t, err, os.ErrNotExist)
