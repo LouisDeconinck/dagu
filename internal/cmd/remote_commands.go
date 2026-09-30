@@ -217,8 +217,9 @@ func remoteRunParams(ctx *Context, args []string) (string, error) {
 	if ctx.Command.Flags().Changed("params") {
 		return ctx.StringParam("params")
 	}
-	if !stdinHasParamsInput(ctx) {
-		return "", nil
+	hasInput, err := stdinHasParamsInput(ctx)
+	if err != nil || !hasInput {
+		return "", err
 	}
 	params, err := readStdinParams()
 	if err != nil {

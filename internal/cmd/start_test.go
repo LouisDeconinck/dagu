@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/cmd"
+	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/persis"
 	"github.com/dagucloud/dagu/v2/internal/spec"
@@ -284,6 +285,59 @@ steps:
 			remaining, err := io.ReadAll(os.Stdin)
 			require.NoError(t, err)
 			require.Equal(t, input, string(remaining))
+		})
+	}
+}
+
+// Closed stdin must only fail commands that select it as their parameter source.
+// These cases replace process stdin and must remain sequential.
+func TestRunClosedStdin(t *testing.T) {
+	stdin, err := os.Open(os.DevNull)
+	require.NoError(t, err)
+	require.NoError(t, stdin.Close())
+	original := os.Stdin
+	os.Stdin = stdin
+	t.Cleanup(func() { os.Stdin = original })
+
+	for _, commandName := range []string{"start", "enqueue"} {
+		t.Run(commandName, func(t *testing.T) {
+			for _, tt := range []struct {
+				name   string
+				flags  []string
+				dash   []string
+				params string
+				fails  bool
+			}{
+				{name: "Selected", flags: []string{"--params-stdin"}, fails: true},
+				{name: "Inherited", params: "VALUE=default"},
+				{name: "Flag", flags: []string{"--params-stdin", "--params=VALUE=flag"}, params: "VALUE=flag"},
+				{name: "EmptyFlag", flags: []string{"--params-stdin", "--params="}, params: "VALUE=default"},
+				{name: "Dash", flags: []string{"--params-stdin"}, dash: []string{"--", "VALUE=dash"}, params: "VALUE=dash"},
+				{name: "EmptyDash", flags: []string{"--params-stdin"}, dash: []string{"--"}, params: "VALUE=default"},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					th := test.SetupCommand(t)
+					dag := th.DAG(t, "params: VALUE=default\nsteps:\n  - name: print\n    run: echo $VALUE\n")
+					args := append([]string{commandName, "--run-id=closed-stdin"}, tt.flags...)
+					args = append(args, dag.Location)
+					args = append(args, tt.dash...)
+					command := cmd.Start()
+					if commandName == "enqueue" {
+						command = cmd.Enqueue()
+					}
+					err := th.RunCommandWithError(t, command, test.CmdTest{Args: args})
+					if tt.fails {
+						require.ErrorContains(t, err, "params from stdin")
+						_, err = th.DAGRunRepository.FindAttempt(th.Context, ir.NewDAGRunRef(dag.Name, "closed-stdin"))
+						require.ErrorIs(t, err, dagrun.ErrDAGRunIDNotFound)
+						return
+					}
+					require.NoError(t, err)
+					status, err := th.DAGRunMgr.GetLatestStatus(th.Context, dag.DAG)
+					require.NoError(t, err)
+					require.Equal(t, tt.params, status.Params)
+				})
+			}
 		})
 	}
 }

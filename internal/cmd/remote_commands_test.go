@@ -233,7 +233,36 @@ func TestRemoteRunParams(t *testing.T) {
 		wantErr    string
 		wantUnread bool
 		startOnly  bool
+		closed     bool
 	}{
+		{
+			name:    "ClosedStdinRejected",
+			args:    []string{"--params-stdin", "etl"},
+			closed:  true,
+			wantErr: "params from stdin",
+		},
+		{
+			name:       "FlagSkipsClosedStdin",
+			args:       []string{"--params-stdin", "--params=P1=flag", "etl"},
+			closed:     true,
+			wantParams: new("P1=flag"),
+		},
+		{
+			name:   "EmptyFlagSkipsClosedStdin",
+			args:   []string{"--params-stdin", "--params=", "etl"},
+			closed: true,
+		},
+		{
+			name:       "DashSkipsClosedStdin",
+			args:       []string{"--params-stdin", "etl", "--", "P1=dash"},
+			closed:     true,
+			wantParams: new("P1=dash"),
+		},
+		{
+			name:   "EmptyDashSkipsClosedStdin",
+			args:   []string{"--params-stdin", "etl", "--"},
+			closed: true,
+		},
 		{
 			name:       "InheritedStdinIgnored",
 			args:       []string{"etl"},
@@ -350,7 +379,14 @@ func TestRemoteRunParams(t *testing.T) {
 					if tt.startOnly && commandSpec.name != "start" {
 						t.Skip("enqueue does not support --from-run-id")
 					}
-					if len(tt.stdin) > maxStdinParamsSize {
+					if tt.closed {
+						stdin, err := os.Open(os.DevNull)
+						require.NoError(t, err)
+						require.NoError(t, stdin.Close())
+						original := os.Stdin
+						os.Stdin = stdin
+						t.Cleanup(func() { os.Stdin = original })
+					} else if len(tt.stdin) > maxStdinParamsSize {
 						// Files avoid blocking on pipe capacity before the command reads.
 						path := filepath.Join(t.TempDir(), "params.txt")
 						require.NoError(t, os.WriteFile(path, []byte(tt.stdin), 0o600))

@@ -16,12 +16,15 @@ import (
 
 // stdinHasParamsInput reports whether stdin parameters were requested and stdin
 // is a pipe or redirected file. Character devices are never parameter input.
-func stdinHasParamsInput(ctx *Context) bool {
+func stdinHasParamsInput(ctx *Context) (bool, error) {
 	if !stdinParamsRequested(ctx) {
-		return false
+		return false, nil
 	}
 	info, err := os.Stdin.Stat()
-	return err == nil && info.Mode()&os.ModeCharDevice == 0
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect params from stdin: %w", err)
+	}
+	return info.Mode()&os.ModeCharDevice == 0, nil
 }
 
 // stdinParamsRequested reports whether stdin was selected as a parameter source.

@@ -38,7 +38,9 @@ func TestStdinHasParamsInput(t *testing.T) {
 
 	t.Run("Pipe", func(t *testing.T) {
 		pipeStdin(t, "P1=foo")
-		require.True(t, stdinHasParamsInput(ctx))
+		hasInput, err := stdinHasParamsInput(ctx)
+		require.NoError(t, err)
+		require.True(t, hasInput)
 	})
 
 	t.Run("RedirectedFile", func(t *testing.T) {
@@ -52,7 +54,9 @@ func TestStdinHasParamsInput(t *testing.T) {
 			os.Stdin = original
 			require.NoError(t, file.Close())
 		})
-		require.True(t, stdinHasParamsInput(ctx))
+		hasInput, err := stdinHasParamsInput(ctx)
+		require.NoError(t, err)
+		require.True(t, hasInput)
 	})
 
 	t.Run("CharacterDevice", func(t *testing.T) {
@@ -66,7 +70,9 @@ func TestStdinHasParamsInput(t *testing.T) {
 			os.Stdin = original
 			require.NoError(t, devNull.Close())
 		})
-		require.False(t, stdinHasParamsInput(ctx))
+		hasInput, err := stdinHasParamsInput(ctx)
+		require.NoError(t, err)
+		require.False(t, hasInput)
 	})
 }
 

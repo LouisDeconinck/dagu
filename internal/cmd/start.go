@@ -437,8 +437,8 @@ func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, 
 	var params string
 
 	if ctx.Command.ArgsLenAtDash() != -1 && len(args) > 0 {
-		if stdinHasParamsInput(ctx) {
-			logger.Warn(ctx, "Ignoring piped stdin: params were provided after '--'")
+		if stdinParamsRequested(ctx) {
+			logger.Warn(ctx, "Ignoring --params-stdin: params were provided after '--'")
 		}
 		dashArgs := args[ctx.Command.ArgsLenAtDash():]
 		loadOpts = append(loadOpts, spec.WithParams(quoteStartDashArgs(dashArgs)))
@@ -450,13 +450,19 @@ func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, 
 		}
 		switch {
 		case ctx.Command.Flags().Changed("params"):
-			if stdinHasParamsInput(ctx) {
-				logger.Warn(ctx, "Ignoring piped stdin: params were provided via --params")
+			if stdinParamsRequested(ctx) {
+				logger.Warn(ctx, "Ignoring --params-stdin: params were provided via --params")
 			}
-		case stdinHasParamsInput(ctx):
-			params, err = readStdinParams()
+		default:
+			hasInput, err := stdinHasParamsInput(ctx)
 			if err != nil {
 				return nil, "", err
+			}
+			if hasInput {
+				params, err = readStdinParams()
+				if err != nil {
+					return nil, "", err
+				}
 			}
 		}
 		loadOpts = append(loadOpts, spec.WithParams(stringutil.RemoveQuotes(params)))
