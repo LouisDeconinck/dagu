@@ -22,99 +22,232 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Real command processes exercise shared registry ownership, signal-aware
-// service contexts, and persistence after the supervisor has exited.
+// Supervisors must remain alive until signaled runners persist terminal state.
 func TestSignalPropagation(t *testing.T) {
 	for _, commandName := range []string{"server", "scheduler", "start-all"} {
 		for _, shutdownSignal := range []os.Signal{syscall.SIGTERM, syscall.SIGINT} {
 			t.Run(commandName+"/"+shutdownSignal.String(), func(t *testing.T) {
-				th := test.SetupCommand(t, test.WithBuiltExecutable())
-				ready := filepath.Join(t.TempDir(), "ready")
-				stopped := filepath.Join(t.TempDir(), "signal")
-				cleaned := filepath.Join(t.TempDir(), "cleaned")
-				dag := th.DAG(t, fmt.Sprintf(`
-type: graph
-max_clean_up_time_sec: 5
-steps:
-  - id: probe
-    shell: /bin/sh
-    script: |
-      trap 'printf TERM > %s; sleep 0.1; printf done > %s; exit 0' TERM
-      trap 'printf INT > %s; sleep 0.1; printf done > %s; exit 0' INT
-      printf ready > %s
-      while :; do sleep 0.05; done
-`, test.PosixQuote(stopped), test.PosixQuote(cleaned), test.PosixQuote(stopped), test.PosixQuote(cleaned), test.PosixQuote(ready)))
-				args := []string{commandName}
-				port := ""
-				startupLog := "Scheduler started"
-				if commandName != "scheduler" {
-					port = findPort(t)
-					args = append(args, "--host=127.0.0.1", "--port="+port)
-					startupLog = "Server is starting"
-				}
-				command := exec.Command(th.Config.Paths.Executable, test.WithConfigFlag(args, th.Config)...) //nolint:gosec // Test executes the repository binary.
-				command.Env = append(th.ChildEnv, "DAGU_SIGNAL_PROPAGATION=true", "GOMAXPROCS=1")
-				command.Stdout = th.LoggingOutput
-				command.Stderr = th.LoggingOutput
-				require.NoError(t, command.Start())
-				waitCh := make(chan error, 1)
-				go func() { waitCh <- command.Wait() }()
-				exited := false
-				defer func() {
-					if !exited {
-						terminateTestCommand(command, waitCh)
-					}
-				}()
-				require.Eventually(t, func() bool {
-					return strings.Contains(th.LoggingOutput.String(), startupLog)
-				}, commandLogWaitTimeout(), 20*time.Millisecond, "output: %s", th.LoggingOutput.String())
-				if commandName == "server" {
-					client := &http.Client{Timeout: time.Second}
-					baseURL := "http://127.0.0.1:" + port + "/api/v1"
-					require.Eventually(t, func() bool {
-						resp, err := client.Get(baseURL + "/health")
-						if err != nil {
-							return false
-						}
-						_ = resp.Body.Close()
-						return resp.StatusCode == http.StatusOK
-					}, commandLogWaitTimeout(), 20*time.Millisecond)
-					fileName := strings.TrimSuffix(filepath.Base(dag.Location), ".yaml")
-					resp, err := client.Post(baseURL+"/dags/"+url.PathEscape(fileName)+"/start", "application/json", strings.NewReader("{}"))
-					require.NoError(t, err)
-					_ = resp.Body.Close()
-					require.Equal(t, http.StatusOK, resp.StatusCode)
-				} else {
-					enqueue := exec.Command(th.Config.Paths.Executable, test.WithConfigFlag([]string{"enqueue", dag.Location}, th.Config)...) //nolint:gosec // Test executes the repository binary.
-					enqueue.Env = command.Env
-					output, err := enqueue.CombinedOutput()
-					require.NoError(t, err, "output: %s", output)
-				}
-				require.Eventually(t, func() bool {
-					_, err := os.Stat(ready)
-					return err == nil
-				}, commandLogWaitTimeout(), 20*time.Millisecond, "output: %s", th.LoggingOutput.String())
-				require.NoError(t, command.Process.Signal(shutdownSignal))
-				select {
-				case err := <-waitCh:
-					exited = true
-					require.NoError(t, err, "output: %s", th.LoggingOutput.String())
-				case <-time.After(commandLogWaitTimeout()):
-					t.Fatal("supervisor did not shut down")
-				}
-				require.Eventually(t, func() bool {
-					_, err := os.Stat(cleaned)
-					return err == nil
-				}, commandLogWaitTimeout(), 20*time.Millisecond, "step cleanup did not finish")
-				data, err := os.ReadFile(stopped)
+				run := startSignalRun(t, commandName, 10)
+				require.NoError(t, run.command.Process.Signal(shutdownSignal))
+				run.waitForFile(t, run.stopped)
+				run.assertAlive(t, 200*time.Millisecond)
+				releaseHoldFile(t, run.release)
+				require.NoError(t, run.wait(t))
+				_, err := os.Stat(run.cleaned)
+				require.NoError(t, err, "supervisor exited before step cleanup")
+				data, err := os.ReadFile(run.stopped)
 				require.NoError(t, err)
 				want := "TERM"
 				if shutdownSignal == syscall.SIGINT {
 					want = "INT"
 				}
 				require.Equal(t, want, string(data))
-				dag.AssertLatestStatus(t, ir.Aborted)
+				run.assertStatus(t, ir.Aborted)
 			})
 		}
 	}
+}
+
+// Runner cleanup can outlast start-all's separate service shutdown budget.
+func TestSignalCleanupBeyondServiceTimeout(t *testing.T) {
+	run := startSignalRun(t, "start-all", 50)
+	require.NoError(t, run.command.Process.Signal(syscall.SIGTERM))
+	run.waitForFile(t, run.stopped)
+	run.assertAlive(t, 31*time.Second)
+	releaseHoldFile(t, run.release)
+	require.NoError(t, run.wait(t))
+	_, err := os.Stat(run.cleaned)
+	require.NoError(t, err)
+	run.assertStatus(t, ir.Aborted)
+}
+
+func TestSignalCleanupTimeout(t *testing.T) {
+	run := startSignalRun(t, "start-all", 1)
+	require.NoError(t, run.command.Process.Signal(syscall.SIGTERM))
+	run.waitForFile(t, run.stopped)
+	require.NoError(t, run.wait(t))
+	_, err := os.Stat(run.cleaned)
+	require.ErrorIs(t, err, os.ErrNotExist)
+	run.assertStatus(t, ir.Aborted)
+}
+
+func TestSecondSignalDuringRunCleanup(t *testing.T) {
+	for _, commandName := range []string{"server", "scheduler", "start-all"} {
+		t.Run(commandName, func(t *testing.T) {
+			run := startSignalRun(t, commandName, 10)
+			require.NoError(t, run.command.Process.Signal(syscall.SIGINT))
+			run.waitForFile(t, run.stopped)
+			run.assertAlive(t, 200*time.Millisecond)
+			require.NoError(t, run.command.Process.Signal(syscall.SIGINT))
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, run.wait(t), &exitErr)
+			status, ok := exitErr.Sys().(syscall.WaitStatus)
+			require.True(t, ok)
+			require.Equal(t, syscall.SIGINT, status.Signal())
+		})
+	}
+}
+
+func TestSchedulerUnsupportedSignal(t *testing.T) {
+	for _, shutdownSignal := range []os.Signal{syscall.SIGHUP, syscall.SIGQUIT} {
+		t.Run(shutdownSignal.String(), func(t *testing.T) {
+			run := startSignalRun(t, "scheduler", 10)
+			require.NoError(t, run.command.Process.Signal(shutdownSignal))
+			require.NoError(t, run.wait(t))
+			before, err := os.Stat(run.progress)
+			require.NoError(t, err)
+			require.Eventually(t, func() bool {
+				after, err := os.Stat(run.progress)
+				return err == nil && after.Size() > before.Size()
+			}, time.Second, 20*time.Millisecond, "run stopped after unsupported signal")
+			run.assertStatus(t, ir.Running)
+		})
+	}
+}
+
+type signalRun struct {
+	th       test.Command
+	dag      test.DAG
+	command  *exec.Cmd
+	waitCh   <-chan error
+	exited   bool
+	stopped  string
+	cleaned  string
+	release  string
+	progress string
+	logFile  *os.File
+}
+
+func startSignalRun(t *testing.T, commandName string, maxCleanup int) *signalRun {
+	t.Helper()
+	th := test.SetupCommand(t, test.WithBuiltExecutable())
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	run := &signalRun{
+		th:       th,
+		stopped:  filepath.Join(dir, "signal"),
+		cleaned:  filepath.Join(dir, "cleaned"),
+		release:  newHoldFile(t),
+		progress: filepath.Join(dir, "progress"),
+	}
+	run.dag = th.DAG(t, fmt.Sprintf(`
+type: graph
+max_clean_up_time_sec: %d
+steps:
+  - id: probe
+    shell: /bin/sh
+    script: |
+      cleanup() {
+        trap '' TERM INT
+        printf '%%s' "$1" > %s
+        while [ ! -f %s ]; do sleep 0.05; done
+        printf done > %s
+        exit 0
+      }
+      trap 'cleanup TERM' TERM
+      trap 'cleanup INT' INT
+      printf ready > %s
+      while :; do printf x >> %s; sleep 0.05; done
+`, maxCleanup, test.PosixQuote(run.stopped), test.PosixQuote(run.release), test.PosixQuote(run.cleaned), test.PosixQuote(ready), test.PosixQuote(run.progress)))
+	args := []string{commandName}
+	port := ""
+	startupLog := "Scheduler started"
+	if commandName != "scheduler" {
+		port = findPort(t)
+		args = append(args, "--host=127.0.0.1", "--port="+port)
+		startupLog = "Server is starting"
+	}
+	run.command = exec.Command(th.Config.Paths.Executable, test.WithConfigFlag(args, th.Config)...) //nolint:gosec // Test executes the repository binary.
+	run.command.Env = append(th.ChildEnv, "DAGU_SIGNAL_PROPAGATION=true", "GOMAXPROCS=1")
+	logFile, err := os.CreateTemp(dir, "supervisor-*.log")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = logFile.Close() })
+	run.logFile = logFile
+	// A pipe makes exec.Cmd.Wait wait for inherited runner output as well as
+	// the supervisor, hiding an early supervisor exit.
+	run.command.Stdout = logFile
+	run.command.Stderr = logFile
+	require.NoError(t, run.command.Start())
+	waitCh := make(chan error, 1)
+	run.waitCh = waitCh
+	go func() { waitCh <- run.command.Wait() }()
+	t.Cleanup(func() {
+		releaseHoldFile(t, run.release)
+		_ = th.DAGRunMgr.Stop(th.Context, run.dag.DAG, "")
+		if status, err := th.DAGRunMgr.GetLatestStatus(th.Context, run.dag.DAG); err == nil && status.Status.IsActive() {
+			run.dag.AssertLatestStatus(t, ir.Aborted)
+		}
+		if !run.exited {
+			terminateTestCommand(run.command, waitCh)
+		}
+	})
+	require.Eventually(t, func() bool {
+		return strings.Contains(run.output(), startupLog)
+	}, commandLogWaitTimeout(), 20*time.Millisecond, "output: %s", run.output())
+	if commandName == "server" {
+		client := &http.Client{Timeout: time.Second}
+		baseURL := "http://127.0.0.1:" + port + "/api/v1"
+		require.Eventually(t, func() bool {
+			resp, err := client.Get(baseURL + "/health")
+			if err != nil {
+				return false
+			}
+			_ = resp.Body.Close()
+			return resp.StatusCode == http.StatusOK
+		}, commandLogWaitTimeout(), 20*time.Millisecond)
+		fileName := strings.TrimSuffix(filepath.Base(run.dag.Location), ".yaml")
+		resp, err := client.Post(baseURL+"/dags/"+url.PathEscape(fileName)+"/start", "application/json", strings.NewReader("{}"))
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	} else {
+		enqueue := exec.Command(th.Config.Paths.Executable, test.WithConfigFlag([]string{"enqueue", run.dag.Location}, th.Config)...) //nolint:gosec // Test executes the repository binary.
+		enqueue.Env = run.command.Env
+		output, err := enqueue.CombinedOutput()
+		require.NoError(t, err, "output: %s", output)
+	}
+	run.waitForFile(t, ready)
+	return run
+}
+
+func (r *signalRun) waitForFile(t *testing.T, path string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}, commandLogWaitTimeout(), 20*time.Millisecond, "output: %s", r.output())
+}
+
+func (r *signalRun) assertAlive(t *testing.T, duration time.Duration) {
+	t.Helper()
+	select {
+	case err := <-r.waitCh:
+		r.exited = true
+		t.Fatalf("supervisor exited during runner cleanup: %v; output: %s", err, r.output())
+	case <-time.After(duration):
+	}
+}
+
+func (r *signalRun) wait(t *testing.T) error {
+	t.Helper()
+	select {
+	case err := <-r.waitCh:
+		r.exited = true
+		return err
+	case <-time.After(commandLogWaitTimeout()):
+		t.Fatalf("supervisor did not shut down; output: %s", r.output())
+		return nil
+	}
+}
+
+func (r *signalRun) output() string {
+	data, _ := os.ReadFile(r.logFile.Name())
+	return string(data)
+}
+
+func (r *signalRun) assertStatus(t *testing.T, want ir.Status) {
+	t.Helper()
+	status, err := r.th.DAGRunMgr.GetLatestStatus(r.th.Context, r.dag.DAG)
+	require.NoError(t, err)
+	require.Equal(t, want, status.Status)
 }

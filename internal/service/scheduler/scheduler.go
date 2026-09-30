@@ -840,17 +840,16 @@ func (s *Scheduler) cronLoop(ctx context.Context, sig chan os.Signal) {
 func (s *Scheduler) waitForTick(ctx context.Context, sig chan os.Signal, timer *time.Timer) bool {
 	select {
 	case <-ctx.Done():
+		signal.Stop(sig)
 		var received os.Signal
 		_ = errors.As(context.Cause(ctx), &received)
-		if received != nil {
-			launcher.PropagateSignal(ctx, received)
-		}
+		<-launcher.PropagateSignal(ctx, received)
 		return false
 	case received := <-sig:
-		// Forward the shutdown signal to DAG-run subprocesses before stopping
-		// when signal propagation is enabled; a no-op otherwise.
-		launcher.PropagateSignal(ctx, received)
+		signal.Stop(sig)
+		runsDone := launcher.PropagateSignal(ctx, received)
 		s.Stop(ctx)
+		<-runsDone
 		return false
 	case <-s.quit:
 		return false

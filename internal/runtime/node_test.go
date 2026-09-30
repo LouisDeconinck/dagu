@@ -41,9 +41,10 @@ var (
 )
 
 type blockingSignalExecutor struct {
-	ready   chan struct{}
-	killed  chan os.Signal
-	stopped chan cmdutil.TerminationIntent
+	ready       chan struct{}
+	killed      chan os.Signal
+	stopped     chan cmdutil.TerminationIntent
+	runContinue chan struct{}
 	// Optional test hooks for controlling Kill ordering.
 	killStarted  chan struct{}
 	killContinue chan struct{}
@@ -67,6 +68,9 @@ func (e *blockingSignalExecutor) Run(ctx context.Context) error {
 
 	select {
 	case sig := <-e.killed:
+		if e.runContinue != nil {
+			<-e.runContinue
+		}
 		return fmt.Errorf("signal: %s", sig.String())
 	case <-ctx.Done():
 		return ctx.Err()
@@ -217,6 +221,49 @@ func TestNode(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "signal: interrupt")
 		require.Equal(t, ir.NodeAborted.String(), node.State().Status.String())
+	})
+	t.Run("StopDuringCleanup", func(t *testing.T) {
+		execCh, restore := withNodeSignalExecutorFactory(t, func() *blockingSignalExecutor {
+			exec := newBlockingSignalExecutor()
+			exec.stopped = make(chan cmdutil.TerminationIntent, 2)
+			exec.runContinue = make(chan struct{})
+			return exec
+		})
+		defer restore()
+		node := setupNode(t, withNodeExecutorType(nodeSignalExecutorType))
+		node.SetStatus(ir.NodeRunning)
+		plan, err := runtime.NewPlanFromNodes(node.Node)
+		require.NoError(t, err)
+		errCh := make(chan error, 1)
+		go func() { errCh <- node.Node.Execute(node.execContext(uuid.Must(uuid.NewV7()).String())) }()
+		exec := <-execCh
+		<-exec.ready
+		defer func() {
+			select {
+			case <-exec.runContinue:
+			default:
+				close(exec.runContinue)
+			}
+		}()
+		node.Stop(node.Context, cmdutil.TerminationFromSignal(syscall.SIGTERM), false)
+		require.Equal(t, cmdutil.TerminationModeGraceful, (<-exec.stopped).Mode)
+		require.Equal(t, ir.NodeAborted, node.State().Status)
+		require.True(t, plan.HasActiveNodes(), "aborted execution still needs cleanup")
+		node.Stop(node.Context, cmdutil.ForceTermination(), false)
+		select {
+		case intent := <-exec.stopped:
+			require.Equal(t, cmdutil.TerminationModeForce, intent.Mode)
+		case <-time.After(time.Second):
+			t.Fatal("forced stop did not reach the cleaning executor")
+		}
+		close(exec.runContinue)
+		select {
+		case err := <-errCh:
+			require.Error(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("executor did not finish cleanup")
+		}
+		require.False(t, plan.HasActiveNodes())
 	})
 	t.Run("SignalBeforeExecutorRunPreventsStart", func(t *testing.T) {
 		execCh, restore := withNodeSignalExecutor(t)

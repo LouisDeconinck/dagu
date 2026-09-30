@@ -1669,7 +1669,6 @@ func (srv *Server) setupGracefulShutdown(ctx context.Context) {
 	} else {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-		defer signal.Stop(quit)
 
 		select {
 		case <-ctx.Done():
@@ -1678,14 +1677,13 @@ func (srv *Server) setupGracefulShutdown(ctx context.Context) {
 			received = sig
 			logger.Info(ctx, "Received shutdown signal", slog.String("signal", sig.String()))
 		}
+		signal.Stop(quit)
 	}
 
 	if received == nil {
 		_ = errors.As(context.Cause(ctx), &received)
 	}
-	if received != nil {
-		launcher.PropagateSignal(ctx, received)
-	}
+	runsDone := launcher.PropagateSignal(ctx, received)
 
 	shutdownCtx, cancel := newGracefulShutdownContext(ctx)
 	defer cancel()
@@ -1693,4 +1691,6 @@ func (srv *Server) setupGracefulShutdown(ctx context.Context) {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error(ctx, "Failed to shutdown server gracefully", tag.Error(err))
 	}
+	// Runner cleanup has its own DAG budget, independent of HTTP shutdown.
+	<-runsDone
 }

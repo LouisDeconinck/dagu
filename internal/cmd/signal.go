@@ -46,8 +46,10 @@ func notifyShutdownContext(parent context.Context, propagate bool, signals ...os
 	go func() {
 		select {
 		case sig := <-quit:
+			signal.Stop(quit)
 			cancel(shutdownSignalError{signal: sig})
 		case <-ctx.Done():
+			signal.Stop(quit)
 		}
 	}()
 	return ctx, func() {

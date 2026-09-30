@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"syscall"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	"github.com/dagucloud/dagu/v2/internal/eventstore"
+	"github.com/dagucloud/dagu/v2/internal/launcher"
 	"github.com/dagucloud/dagu/v2/internal/opencodehost"
 	"github.com/dagucloud/dagu/v2/internal/persis"
 	persisfile "github.com/dagucloud/dagu/v2/internal/persis/file"
@@ -266,6 +268,10 @@ func runStartAll(ctx *Context, _ []string) error {
 			logger.Error(ctx, "Service failed, shutting down", tag.Error(err))
 		}
 	}
+	var received os.Signal
+	_ = errors.As(context.Cause(signalCtx), &received)
+	// Capture the signal before scheduler.Stop cancels its service context.
+	runsDone := launcher.PropagateSignal(serviceCtx, received)
 	stop() // Restore default signal handling while graceful shutdown runs.
 
 	// Stop all services gracefully
@@ -287,6 +293,9 @@ func runStartAll(ctx *Context, _ []string) error {
 	if err := resourceService.Stop(ctx); err != nil {
 		logger.Error(ctx, "Failed to stop resource service", tag.Error(err))
 	}
+
+	// Runner cleanup follows each DAG's timeout, not the service budget.
+	<-runsDone
 
 	// Wait for all services to finish with timeout
 	done := make(chan struct{})

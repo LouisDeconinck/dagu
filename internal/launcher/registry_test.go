@@ -46,7 +46,11 @@ func TestProcessRegistryFromContext(t *testing.T) {
 func TestPropagateSignalWithoutRegistryIsNoop(t *testing.T) {
 	t.Parallel()
 
-	launcher.PropagateSignal(context.Background(), os.Interrupt)
+	select {
+	case <-launcher.PropagateSignal(context.Background(), os.Interrupt):
+	default:
+		t.Fatal("propagation without a registry must already be complete")
+	}
 }
 
 func TestProcessRegistryPropagatesSignal(t *testing.T) {
@@ -56,7 +60,12 @@ func TestProcessRegistryPropagatesSignal(t *testing.T) {
 	res, err := launcher.StartProcess(ctx, longRunningSpec())
 	require.NoError(t, err)
 
-	reg.Propagate(ctx, os.Interrupt)
+	done := reg.Propagate(ctx, os.Interrupt)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("propagation did not complete after process exit")
+	}
 
 	select {
 	case err := <-res.Done:
@@ -66,7 +75,7 @@ func TestProcessRegistryPropagatesSignal(t *testing.T) {
 	}
 
 	// Propagation is one-shot; a second call must be a no-op.
-	reg.Propagate(ctx, os.Interrupt)
+	require.Equal(t, done, reg.Propagate(ctx, os.Interrupt))
 }
 
 func TestProcessRegistrySkipsExitedProcesses(t *testing.T) {
@@ -78,7 +87,11 @@ func TestProcessRegistrySkipsExitedProcesses(t *testing.T) {
 	require.NoError(t, <-res.Done)
 
 	// The exited command is untracked, so propagation is a no-op.
-	reg.Propagate(ctx, os.Interrupt)
+	select {
+	case <-reg.Propagate(ctx, os.Interrupt):
+	case <-time.After(5 * time.Second):
+		t.Fatal("propagation waited for an exited process")
+	}
 }
 
 func TestProcessesWithoutRegistryAreNotPropagated(t *testing.T) {

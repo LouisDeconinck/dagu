@@ -6,9 +6,11 @@ package launcher
 import (
 	"context"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/cmdutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
@@ -21,20 +23,15 @@ type processRegistryKey struct{}
 // ProcessRegistry tracks subprocesses launched through this package so a
 // supervising process (server, scheduler, start-all) can forward shutdown
 // signals to them when signal_handling.enable_propagation is enabled.
-//
-// Every launched command runs in its own process group (see
-// cmdutil.SetupCommand), so signaling the command's PID reaches the whole
-// process tree on Unix. On Windows the equivalent process-tree/job-object
-// termination is used.
 type ProcessRegistry struct {
-	mu         sync.Mutex
-	procs      map[*exec.Cmd]struct{}
-	propagated bool
+	mu    sync.Mutex
+	procs map[*exec.Cmd]chan struct{}
+	done  chan struct{}
 }
 
 // NewProcessRegistry returns an empty ProcessRegistry.
 func NewProcessRegistry() *ProcessRegistry {
-	return &ProcessRegistry{procs: make(map[*exec.Cmd]struct{})}
+	return &ProcessRegistry{procs: make(map[*exec.Cmd]chan struct{})}
 }
 
 // ContextWithProcessRegistry attaches reg to ctx so launcher entry points can
@@ -56,12 +53,18 @@ func ProcessRegistryFrom(ctx context.Context) *ProcessRegistry {
 	return reg
 }
 
-// PropagateSignal forwards sig to tracked subprocesses when a ProcessRegistry
-// is attached to ctx (signal propagation enabled). It is a no-op otherwise.
-func PropagateSignal(ctx context.Context, sig os.Signal) {
-	if reg := ProcessRegistryFrom(ctx); reg != nil {
-		reg.Propagate(ctx, sig)
+// PropagateSignal forwards SIGINT or SIGTERM to tracked subprocesses. The
+// returned channel closes after those processes exit. Without a registry or
+// for any other signal, the returned channel is already closed.
+func PropagateSignal(ctx context.Context, sig os.Signal) <-chan struct{} {
+	if sig == syscall.SIGINT || sig == syscall.SIGTERM {
+		if reg := ProcessRegistryFrom(ctx); reg != nil {
+			return reg.Propagate(ctx, sig)
+		}
 	}
+	done := make(chan struct{})
+	close(done)
+	return done
 }
 
 // track registers cmd for the duration of the returned func. Callers invoke the
@@ -71,41 +74,45 @@ func track(ctx context.Context, cmd *exec.Cmd) func() {
 	if reg == nil || cmd == nil {
 		return func() {}
 	}
+	done := make(chan struct{})
 	reg.mu.Lock()
-	reg.procs[cmd] = struct{}{}
+	reg.procs[cmd] = done
 	reg.mu.Unlock()
 	return func() {
 		reg.mu.Lock()
 		delete(reg.procs, cmd)
+		close(done)
 		reg.mu.Unlock()
 	}
 }
 
-// Propagate forwards sig to the process group of every tracked subprocess. It
-// runs at most once per registry; later calls are no-ops. Per-process errors
-// are logged and do not stop propagation to the remaining processes.
-func (r *ProcessRegistry) Propagate(ctx context.Context, sig os.Signal) {
+// Propagate forwards sig to each currently tracked subprocess's process tree.
+// The returned channel closes after all of those processes exit, regardless of
+// context cancellation. Later calls return the same channel without signaling
+// again. Processes registered afterward are excluded. Per-process errors are
+// logged and do not stop propagation to the remaining processes.
+func (r *ProcessRegistry) Propagate(ctx context.Context, sig os.Signal) <-chan struct{} {
 	r.mu.Lock()
-	if r.propagated {
+	if r.done != nil {
+		done := r.done
 		r.mu.Unlock()
-		return
+		return done
 	}
-	r.propagated = true
-	procs := make([]*exec.Cmd, 0, len(r.procs))
-	for cmd := range r.procs {
-		procs = append(procs, cmd)
-	}
+	done := make(chan struct{})
+	r.done = done
+	procs := maps.Clone(r.procs)
 	r.mu.Unlock()
 
 	if len(procs) == 0 {
-		return
+		close(done)
+		return done
 	}
 	intent := cmdutil.TerminationFromSignal(sig)
 	logger.Info(ctx, "Propagating signal to running DAG processes",
 		tag.Signal(intent.SignalName()),
 		slog.Int("processes", len(procs)),
 	)
-	for _, cmd := range procs {
+	for cmd := range procs {
 		// cmd.Process is immutable after Start; ProcessState is written by
 		// Wait and must not be read here. Processes that exited but are not
 		// yet reaped simply fail with ESRCH, which is logged below.
@@ -120,4 +127,11 @@ func (r *ProcessRegistry) Propagate(ctx context.Context, sig os.Signal) {
 			)
 		}
 	}
+	go func() {
+		for _, exited := range procs {
+			<-exited
+		}
+		close(done)
+	}()
+	return done
 }

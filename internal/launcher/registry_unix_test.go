@@ -8,7 +8,9 @@ package launcher_test
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -17,6 +19,73 @@ import (
 
 	"github.com/dagucloud/dagu/v2/internal/launcher"
 )
+
+func TestPropagationWaitsForAllRuns(t *testing.T) {
+	reg := launcher.NewProcessRegistry()
+	ctx, cancel := context.WithCancel(launcher.ContextWithProcessRegistry(t.Context(), reg))
+	defer cancel()
+	type run struct {
+		result  *launcher.StartResult
+		release string
+	}
+	runs := make([]run, 2)
+	for i := range runs {
+		dir := t.TempDir()
+		ready := filepath.Join(dir, "ready")
+		release := filepath.Join(dir, "release")
+		result, err := launcher.StartProcess(ctx, launcher.CmdSpec{
+			Executable: "sh",
+			Args:       []string{"-c", `release=$2; cleanup() { trap '' TERM INT; while [ ! -f "$release" ]; do sleep 0.05; done; exit 42; }; trap cleanup TERM INT; printf ready > "$1"; while :; do sleep 0.05; done`, "probe", ready, release},
+		})
+		require.NoError(t, err)
+		runs[i] = run{result: result, release: release}
+		t.Cleanup(func() { _ = syscall.Kill(-result.PID, syscall.SIGKILL) })
+		require.Eventually(t, func() bool {
+			_, err := os.Stat(ready)
+			return err == nil
+		}, 5*time.Second, 10*time.Millisecond)
+	}
+	cancel()
+	for _, sig := range []os.Signal{syscall.SIGHUP, syscall.SIGQUIT} {
+		select {
+		case <-launcher.PropagateSignal(ctx, sig):
+		default:
+			t.Fatal("unsupported signal must not wait for runners")
+		}
+	}
+
+	var callers sync.WaitGroup
+	completions := make([]<-chan struct{}, 8)
+	for i := range completions {
+		callers.Go(func() { completions[i] = launcher.PropagateSignal(ctx, syscall.SIGTERM) })
+	}
+	callers.Wait()
+	done := completions[0]
+	for _, completion := range completions {
+		require.Equal(t, done, completion)
+	}
+	for i, run := range runs {
+		select {
+		case <-done:
+			t.Fatal("propagation completed before all runners exited")
+		case <-time.After(100 * time.Millisecond):
+		}
+		require.NoError(t, os.WriteFile(run.release, nil, 0o600))
+		select {
+		case err := <-run.result.Done:
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, err, &exitErr, "run %d lost its exit result", i)
+			require.Equal(t, 42, exitErr.ExitCode())
+		case <-time.After(5 * time.Second):
+			t.Fatal("released runner did not exit")
+		}
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("propagation did not complete after all runners exited")
+	}
+}
 
 // The registry signals the whole process group, so children spawned by the
 // launched command terminate too. A shell running a nested sleep proves the
