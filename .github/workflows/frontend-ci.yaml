@@ -53,6 +53,12 @@ jobs:
         working-directory: ui
         run: pnpm test
 
+      - name: Test date ranges across browser DST
+        working-directory: ui
+        env:
+          TZ: America/New_York
+        run: pnpm test src/pages/__tests__/index.test.tsx src/components/ui/__tests__/date-range-picker.test.tsx
+
       - name: Build
         working-directory: ui
         run: pnpm build
