@@ -402,12 +402,13 @@ func TestStopStartup(t *testing.T) {
 }
 
 func TestStartupPanic(t *testing.T) {
-	th := test.Setup(t)
+	th := test.Setup(t, test.WithCaptureLoggingOutput())
 	barrier := &startupBarrier{started: make(chan struct{}), release: make(chan struct{}), returned: make(chan struct{})}
 	barrier.unblock()
 	dag := th.DAG(t, "steps:\n  - run: echo done\n")
 	dagAgent := dag.Agent(test.WithAgentOptions(agent.Options{ProfileResolver: startupProfileResolver{barrier: barrier, panicValue: "startup panic"}}))
 	require.PanicsWithValue(t, "startup panic", func() { _ = dagAgent.Run(th.Context) })
+	require.Contains(t, th.LoggingOutput.String(), "startupProfileResolver.ResolveRuntime")
 }
 
 func TestStopStartupDuplicate(t *testing.T) {

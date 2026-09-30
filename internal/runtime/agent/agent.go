@@ -2576,17 +2576,17 @@ func (a *Agent) checkIsAlreadyRunning(ctx context.Context) error {
 func execWithRecovery(ctx context.Context, fn func()) {
 	defer func() {
 		if panicObj := recover(); panicObj != nil {
-			logRecoveredPanic(ctx, panicObj)
+			logRecoveredPanic(ctx, panicObj, debug.Stack())
 		}
 	}()
 	fn()
 }
 
-func logRecoveredPanic(ctx context.Context, panicObj any) {
+func logRecoveredPanic(ctx context.Context, panicObj any, stack []byte) {
 	logger.Error(ctx, "Recovered from panic",
 		slog.String("err", panicToError(panicObj).Error()),
 		slog.String("errType", fmt.Sprintf("%T", panicObj)),
-		slog.String("stackTrace", string(debug.Stack())),
+		slog.String("stackTrace", string(stack)),
 	)
 }
 

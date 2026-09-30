@@ -748,6 +748,31 @@ func TestRunner(t *testing.T) {
 		require.Equal(t, 1, node.State().DoneCount)  // 1 successful execution
 		require.Equal(t, 1, node.State().RetryCount) // 1 retry
 	})
+	t.Run("RetryCanceled", func(t *testing.T) {
+		r := setupRunner(t)
+		plan := r.newPlan(t, newStep("1", withScript("exit 23"), withRetryPolicy(1, 30*time.Second)))
+		ctx, cancel := context.WithCancel(runtime.NewContext(r.Context,
+			&ir.DAG{Name: "test_dag", WorkingDir: plan.workDir}, r.cfg.DAGRunID,
+			filepath.Join(r.cfg.LogDir, "retry.log")))
+		defer cancel()
+		done := make(chan error, 1)
+		go func() { done <- r.runner.Run(ctx, plan.Plan, nil) }()
+		node := plan.GetNodeByName("1")
+		require.Eventually(t, func() bool { return node.GetRetryCount() == 1 },
+			platformTestDuration(5*time.Second, 30*time.Second), 10*time.Millisecond)
+		lastError := node.Error()
+		require.Error(t, lastError)
+		r.runner.Signal(ctx, plan.Plan, os.Kill, nil, false)
+		select {
+		case err := <-done:
+			require.ErrorIs(t, err, lastError)
+		case <-time.After(5 * time.Second):
+			t.Fatal("canceled retry did not finish")
+		}
+		require.Equal(t, ir.NodeAborted, node.State().Status)
+		require.Equal(t, ir.Aborted, r.runner.Status(ctx, plan.Plan))
+		require.Equal(t, 1, node.GetRetryCount())
+	})
 	t.Run("RetryPolicySuccess", func(t *testing.T) {
 		file := filepath.Join(
 			os.TempDir(), fmt.Sprintf("flag_test_retry_success_%s", uuid.Must(uuid.NewV7()).String()),

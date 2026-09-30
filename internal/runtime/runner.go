@@ -1673,6 +1673,7 @@ func (r *Runner) shouldRetryNode(ctx context.Context, node *Node, execErr error)
 	)
 	if !waitForExecution(ctx, interval) || r.isCanceled() {
 		node.SetStatus(ir.NodeAborted)
+		r.setLastError(execErr)
 		return false
 	}
 	node.SetRetriedAt(time.Now())

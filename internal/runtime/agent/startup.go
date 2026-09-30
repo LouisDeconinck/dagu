@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/ir"
@@ -25,6 +26,7 @@ type startupResolution struct {
 	profileResolvedAt string
 	profileEntries    []ir.RuntimeProfileEntry
 	panicValue        any
+	panicStack        []byte
 }
 
 func (a *Agent) resolveStartup(ctx context.Context) (startupResolution, error) {
@@ -45,6 +47,9 @@ func (a *Agent) resolveStartup(ctx context.Context) (startupResolution, error) {
 		var result startupResolution
 		defer func() {
 			result.panicValue = recover()
+			if result.panicValue != nil {
+				result.panicStack = debug.Stack()
+			}
 			resolved <- result
 		}()
 		result.env, result.envErr = runtimeenv.Resolve(ctx, snapshot.dag)
@@ -68,6 +73,7 @@ func (a *Agent) resolveStartup(ctx context.Context) (startupResolution, error) {
 			return startupResolution{}, err
 		}
 		if result.panicValue != nil {
+			logRecoveredPanic(ctx, result.panicValue, result.panicStack)
 			panic(result.panicValue)
 		}
 		return result, nil
