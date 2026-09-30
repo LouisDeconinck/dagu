@@ -41,6 +41,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
 	"github.com/dagucloud/dagu/v2/internal/eventstore"
 	"github.com/dagucloud/dagu/v2/internal/gitsync"
+	"github.com/dagucloud/dagu/v2/internal/launcher"
 	"github.com/dagucloud/dagu/v2/internal/license"
 	_ "github.com/dagucloud/dagu/v2/internal/llm/allproviders" // Register LLM providers
 	"github.com/dagucloud/dagu/v2/internal/persis"
@@ -1661,6 +1662,7 @@ func runShutdownSequence(shutdownCtx context.Context, actions shutdownActions) e
 }
 
 func (srv *Server) setupGracefulShutdown(ctx context.Context) {
+	received := os.Interrupt
 	if signalctx.OSSignalsDisabled(ctx) {
 		<-ctx.Done()
 		logger.Info(ctx, "Context done, shutting down server")
@@ -1673,9 +1675,14 @@ func (srv *Server) setupGracefulShutdown(ctx context.Context) {
 		case <-ctx.Done():
 			logger.Info(ctx, "Context done, shutting down server")
 		case sig := <-quit:
+			received = sig
 			logger.Info(ctx, "Received shutdown signal", slog.String("signal", sig.String()))
 		}
 	}
+
+	// Forward the shutdown signal to DAG-run subprocesses launched through
+	// this server when signal propagation is enabled; a no-op otherwise.
+	launcher.PropagateSignal(ctx, received)
 
 	shutdownCtx, cancel := newGracefulShutdownContext(ctx)
 	defer cancel()

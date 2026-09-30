@@ -325,6 +325,7 @@ func (l *ConfigLoader) buildConfig(def Definition) (*Config, error) {
 	l.loadCacheConfig(&cfg, def)
 	l.loadWebhooksConfig(&cfg, def)
 	l.loadExecutionModeConfig(&cfg, def)
+	l.loadSignalHandlingConfig(&cfg, def)
 
 	if err := l.LoadLegacyFields(&cfg, def); err != nil {
 		return nil, err
@@ -1717,6 +1718,14 @@ func (l *ConfigLoader) loadExecutionModeConfig(cfg *Config, _ Definition) {
 	cfg.DefaultExecMode = mode
 }
 
+// loadSignalHandlingConfig loads signal handling options. The legacy camelCase
+// spelling "signalHandling.enablePropagation" is still accepted when it comes
+// from admin.yaml, which bypasses the legacy key check for compatibility.
+func (l *ConfigLoader) loadSignalHandlingConfig(cfg *Config, _ Definition) {
+	cfg.SignalHandling.EnablePropagation = l.v.GetBool("signal_handling.enable_propagation") ||
+		l.v.GetBool("signalhandling.enablepropagation")
+}
+
 func (l *ConfigLoader) loadCacheConfig(cfg *Config, def Definition) {
 	cfg.Cache = CacheModeNormal
 	if def.Cache == nil {
@@ -2240,6 +2249,9 @@ var envBindings = []envBinding{
 
 	// Execution
 	{key: "default_execution_mode", env: "DEFAULT_EXECUTION_MODE"},
+
+	// Signal handling
+	{key: "signal_handling.enable_propagation", env: "SIGNAL_PROPAGATION"},
 
 	// Queues
 	{key: "queues.enabled", env: "QUEUE_ENABLED"},

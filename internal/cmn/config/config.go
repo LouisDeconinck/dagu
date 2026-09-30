@@ -36,6 +36,7 @@ type Config struct {
 	Scheduler       Scheduler
 	Monitoring      MonitoringConfig
 	DefaultExecMode ExecutionMode
+	SignalHandling  SignalHandlingConfig
 	Cache           CacheMode
 	GitSync         GitSyncConfig
 	Tunnel          TunnelConfig
@@ -582,6 +583,14 @@ type Worker struct {
 type Proc struct {
 	HeartbeatInterval time.Duration // Default: 5s
 	StaleThreshold    time.Duration // Default: 90s
+}
+
+// SignalHandlingConfig controls how supervising Dagu processes handle OS signals.
+type SignalHandlingConfig struct {
+	// EnablePropagation forwards shutdown signals (SIGINT, SIGTERM) received by
+	// a supervising process (server, scheduler, start-all) to the process
+	// groups of running DAG-run subprocesses it launched. Default: false.
+	EnablePropagation bool
 }
 
 // Scheduler represents the scheduler configuration.

@@ -841,7 +841,10 @@ func (s *Scheduler) waitForTick(ctx context.Context, sig chan os.Signal, timer *
 	select {
 	case <-ctx.Done():
 		return false
-	case <-sig:
+	case received := <-sig:
+		// Forward the shutdown signal to DAG-run subprocesses before stopping
+		// when signal propagation is enabled; a no-op otherwise.
+		launcher.PropagateSignal(ctx, received)
 		s.Stop(ctx)
 		return false
 	case <-s.quit:
