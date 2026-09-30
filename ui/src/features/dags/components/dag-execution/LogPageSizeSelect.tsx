@@ -3,7 +3,7 @@
 
 /**
  * LogPageSizeSelect lets users pick how many log lines to load per view:
- * a preset size, "All lines" (bounded), or a custom count.
+ * a preset size or a custom count.
  *
  * @module features/dags/components/dag-execution
  */
@@ -14,15 +14,13 @@ import { useI18n } from '@/i18n/I18nProvider';
 
 /**
  * Largest number of log lines that can be requested in one view. Matches the
- * `limit` parameter maximum in api/v1/api.yaml, and doubles as the "All lines"
- * fetch size so the viewer never issues an unbounded request.
+ * log parameter maximum in api/v1/api.yaml.
  */
-export const MAX_LOG_PAGE_SIZE = 100000;
+const MAX_LOG_PAGE_SIZE = 10000;
 
-export const LOG_PAGE_SIZE_OPTIONS = [100, 500, 1000, 5000, 10000, 50000];
+const LOG_PAGE_SIZE_OPTIONS = [100, 500, 1000, 5000, MAX_LOG_PAGE_SIZE];
 
 const CUSTOM_OPTION = 'custom';
-const ALL_OPTION = 'all';
 
 /**
  * Props for the LogPageSizeSelect component
@@ -37,24 +35,24 @@ type Props = {
 
 function LogPageSizeSelect({ pageSize, onPageSizeChange, disabled }: Props) {
   const { ts } = useI18n();
-  const [customSelected, setCustomSelected] = useState(false);
-  const [customValue, setCustomValue] = useState('');
+  const [customSelected, setCustomSelected] = useState(
+    !LOG_PAGE_SIZE_OPTIONS.includes(pageSize)
+  );
+  const [customValue, setCustomValue] = useState(String(pageSize));
 
   function commitCustomValue(): void {
     const parsed = Number(customValue);
     if (customValue.trim() === '' || !Number.isFinite(parsed)) {
       return;
     }
-    onPageSizeChange(
-      Math.min(Math.max(Math.floor(parsed), 1), MAX_LOG_PAGE_SIZE)
-    );
+    const size = Math.min(Math.max(Math.floor(parsed), 1), MAX_LOG_PAGE_SIZE);
+    setCustomValue(String(size));
+    if (size !== pageSize) {
+      onPageSizeChange(size);
+    }
   }
 
-  const selectValue = customSelected
-    ? CUSTOM_OPTION
-    : pageSize === MAX_LOG_PAGE_SIZE
-      ? ALL_OPTION
-      : String(pageSize);
+  const selectValue = customSelected ? CUSTOM_OPTION : String(pageSize);
 
   return (
     <>
@@ -70,9 +68,10 @@ function LogPageSizeSelect({ pageSize, onPageSizeChange, disabled }: Props) {
             return;
           }
           setCustomSelected(false);
-          onPageSizeChange(
-            value === ALL_OPTION ? MAX_LOG_PAGE_SIZE : Number(value)
-          );
+          const size = Number(value);
+          if (size !== pageSize) {
+            onPageSizeChange(size);
+          }
         }}
         disabled={disabled}
       >
@@ -81,9 +80,6 @@ function LogPageSizeSelect({ pageSize, onPageSizeChange, disabled }: Props) {
             <I18nText text={`${size} lines`} />
           </option>
         ))}
-        <option value={ALL_OPTION}>
-          <I18nText text={'All lines'} />
-        </option>
         <option value={CUSTOM_OPTION}>
           <I18nText text={'Custom...'} />
         </option>

@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActivityLine } from '../ActivityLine';
 import StepLog from '../StepLog';
 import ExecutionLog from '../ExecutionLog';
+import LogPageSizeSelect from '../LogPageSizeSelect';
 import { downloadFromUrl, downloadFromForm } from '@/lib/download';
 import { NodeStatus, Stream } from '@/api/v1/schema';
 import type { StepLogSSEResponse } from '@/hooks/useStepLogSSE';
@@ -342,9 +343,9 @@ describe('log pagination controls', () => {
       target: { value: 'custom' },
     });
     const input = screen.getByLabelText('Custom lines per page');
-    fireEvent.change(input, { target: { value: '25000' } });
+    fireEvent.change(input, { target: { value: '2345' } });
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(logs.queries[logs.queries.length - 1]).toMatchObject({ tail: 25000 });
+    expect(logs.queries[logs.queries.length - 1]).toMatchObject({ tail: 2345 });
   });
 
   it('clamps a custom page size to the bounded maximum', () => {
@@ -358,18 +359,23 @@ describe('log pagination controls', () => {
     const input = screen.getByLabelText('Custom lines per page');
     fireEvent.change(input, { target: { value: '500000' } });
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(logs.queries[logs.queries.length - 1]).toMatchObject({ tail: 100000 });
+    expect(logs.queries[logs.queries.length - 1]).toMatchObject({
+      tail: 10000,
+    });
+    expect(input).toHaveValue(10000);
   });
 
-  it('requests the bounded maximum when All lines is selected', () => {
+  it('requests the maximum preset size', () => {
     logs.data = { ...pagedData };
     render(<ExecutionLog name="example" dagRunId="run" />, {
       wrapper: UserPreferencesProvider,
     });
     fireEvent.change(screen.getByLabelText('Lines per page'), {
-      target: { value: 'all' },
+      target: { value: '10000' },
     });
-    expect(logs.queries[logs.queries.length - 1]).toMatchObject({ tail: 100000 });
+    expect(logs.queries[logs.queries.length - 1]).toMatchObject({
+      tail: 10000,
+    });
   });
 
   it('jumps to a specific page of the run log', () => {
@@ -402,9 +408,9 @@ describe('log pagination controls', () => {
       target: { value: 'custom' },
     });
     const input = screen.getByLabelText('Custom lines per page');
-    fireEvent.change(input, { target: { value: '25000' } });
+    fireEvent.change(input, { target: { value: '2345' } });
     fireEvent.keyDown(input, { key: 'Enter' });
-    expect(logs.queries[logs.queries.length - 1]).toMatchObject({ tail: 25000 });
+    expect(logs.queries[logs.queries.length - 1]).toMatchObject({ tail: 2345 });
   });
 
   it('jumps to a specific page of the step log', () => {
@@ -426,6 +432,84 @@ describe('log pagination controls', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('restores the custom size when step log options reopen', () => {
+    logs.data = { ...pagedData };
+    render(
+      <StepLog
+        dagName="example"
+        dagRunId="run"
+        stepName="build"
+        followTail={true}
+      />,
+      { wrapper: UserPreferencesProvider }
+    );
+    const options = screen.getByRole('button', { name: 'Log options' });
+    fireEvent.click(options);
+    fireEvent.change(screen.getByLabelText('Lines per page'), {
+      target: { value: 'custom' },
+    });
+    const input = screen.getByLabelText('Custom lines per page');
+    fireEvent.change(input, { target: { value: '1234' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.click(options);
+    fireEvent.click(options);
+
+    expect(logs.queries[logs.queries.length - 1]).toMatchObject({ tail: 1234 });
+    expect(screen.getByLabelText('Lines per page')).toHaveValue('custom');
+    expect(screen.getByLabelText('Custom lines per page')).toHaveValue(1234);
+  });
+
+  it('keeps the page when an unchanged custom size loses focus', () => {
+    vi.useFakeTimers();
+    try {
+      logs.data = { ...pagedData };
+      render(<StepLog dagName="example" dagRunId="run" stepName="build" />, {
+        wrapper: UserPreferencesProvider,
+      });
+      fireEvent.change(screen.getByLabelText('Lines per page'), {
+        target: { value: 'custom' },
+      });
+      const sizeInput = screen.getByLabelText('Custom lines per page');
+      fireEvent.change(sizeInput, { target: { value: '1234' } });
+      fireEvent.keyDown(sizeInput, { key: 'Enter' });
+      act(() => vi.advanceTimersByTime(3100));
+      fireEvent.click(screen.getByRole('button', { name: 'Page View' }));
+      act(() => vi.advanceTimersByTime(3100));
+      const pageInput = screen.getByLabelText('Page');
+      fireEvent.change(pageInput, { target: { value: '4' } });
+      fireEvent.keyDown(pageInput, { key: 'Enter' });
+      act(() => vi.advanceTimersByTime(3100));
+      fireEvent.blur(sizeInput);
+
+      expect(pageInput).toHaveValue(4);
+      expect(logs.queries[logs.queries.length - 1]).toMatchObject({
+        offset: 3703,
+        limit: 1234,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    { entered: '-5', applied: 1 },
+    { entered: '1234.8', applied: 1234 },
+  ])('normalizes custom input $entered to $applied', ({ entered, applied }) => {
+    const onPageSizeChange = vi.fn();
+    render(
+      <LogPageSizeSelect pageSize={1000} onPageSizeChange={onPageSizeChange} />
+    );
+    fireEvent.change(screen.getByLabelText('Lines per page'), {
+      target: { value: 'custom' },
+    });
+    const input = screen.getByLabelText('Custom lines per page');
+    fireEvent.change(input, { target: { value: entered } });
+    fireEvent.blur(input);
+
+    expect(onPageSizeChange).toHaveBeenCalledWith(applied);
+    expect(input).toHaveValue(applied);
   });
 });
 
