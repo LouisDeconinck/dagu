@@ -400,11 +400,11 @@ func TestRemoteRunParams(t *testing.T) {
 			wantParams: new(`{"P1":"foo","P2":"bar"}`),
 		},
 		{
-			name:       "QuotedStdin",
+			name:       "NamedQuotedStdin",
 			args:       []string{"--params-stdin", "etl"},
-			stdin:      "  \"P1=foo P2=bar\"\n",
-			wantParams: new("P1=foo P2=bar"),
-			wantValues: []string{"P1=foo", "P2=bar"},
+			stdin:      "  P1=\"foo bar\" P2=\"\"\n",
+			wantParams: new(`P1="foo bar" P2=""`),
+			wantValues: []string{"P1=foo bar", "P2="},
 		},
 		{
 			name:       "QuotedFlag",
@@ -428,9 +428,23 @@ func TestRemoteRunParams(t *testing.T) {
 		{
 			name:       "QuotedValueStdin",
 			args:       []string{"--params-stdin", "etl"},
-			stdin:      `"\"hello world\""`,
+			stdin:      `"hello world"`,
 			wantParams: new(`"hello world"`),
 			wantValues: []string{"P1=default1", "P2=default2", "1=hello world"},
+		},
+		{
+			name:       "EmptyValueStdin",
+			args:       []string{"--params-stdin", "etl"},
+			stdin:      `""`,
+			wantParams: new(`""`),
+			wantValues: []string{"P1=default1", "P2=default2", "1="},
+		},
+		{
+			name:       "SpacedValueStdin",
+			args:       []string{"--params-stdin", "etl"},
+			stdin:      `" hello world "`,
+			wantParams: new(`" hello world "`),
+			wantValues: []string{"P1=default1", "P2=default2", "1= hello world "},
 		},
 	}
 	for _, commandSpec := range commands {

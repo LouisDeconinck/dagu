@@ -35,14 +35,19 @@ steps:
 	for _, command := range []string{"start", "enqueue"} {
 		t.Run(command, func(t *testing.T) {
 			for _, tt := range []struct {
-				name  string
-				flags []string
-				dash  []string
-				stdin string
+				name       string
+				flags      []string
+				dash       []string
+				stdin      string
+				wantParams string
+				wantErr    string
 			}{
-				{name: "Stdin", flags: []string{"--params-stdin"}, stdin: `"\"hello world\""`},
-				{name: "Flag", flags: []string{`--params="\"hello world\""`}},
-				{name: "Dash", dash: []string{"--", "hello world"}},
+				{name: "Stdin", flags: []string{"--params-stdin"}, stdin: `"hello world"`, wantParams: "1=hello world"},
+				{name: "EmptyValue", flags: []string{"--params-stdin"}, stdin: `""`, wantParams: "1="},
+				{name: "SpacedValue", flags: []string{"--params-stdin"}, stdin: `" hello world "`, wantParams: "1= hello world "},
+				{name: "ExcessValues", flags: []string{"--params-stdin"}, stdin: `"hello world" "second value"`, wantErr: "too many positional params: expected at most 1, got 2"},
+				{name: "Flag", flags: []string{`--params="\"hello world\""`}, wantParams: "1=hello world"},
+				{name: "Dash", dash: []string{"--", "hello world"}, wantParams: "1=hello world"},
 			} {
 				t.Run(tt.name, func(t *testing.T) {
 					runID := command + "-" + strings.ToLower(tt.name)
@@ -56,6 +61,11 @@ steps:
 					cli.Env = server.ChildEnv
 					cli.Stdin = strings.NewReader(tt.stdin)
 					output, err := cli.CombinedOutput()
+					if tt.wantErr != "" {
+						require.Error(t, err)
+						require.Contains(t, string(output), tt.wantErr)
+						return
+					}
 					require.NoError(t, err, "output: %s", output)
 					require.Contains(t, string(output), runID)
 
@@ -68,7 +78,7 @@ steps:
 						status, err = server.DAGRunMgr.GetSavedStatus(server.Context, ir.NewDAGRunRef(dagName, runID))
 						return err == nil && status.Status == wantStatus
 					}, 10*time.Second, 50*time.Millisecond)
-					require.Equal(t, "1=hello world", status.Params)
+					require.Equal(t, tt.wantParams, status.Params)
 				})
 			}
 		})

@@ -27,5 +27,8 @@ func buildStartValidationInput(ctx *Context, args []string, rawParams string) sp
 		return spec.StartParamInput{DashArgs: quoteStartDashArgs(args[argsLenAtDash:])}
 	}
 
-	return spec.StartParamInput{RawParams: stringutil.RemoveQuotes(rawParams)}
+	if ctx.Command.Flags().Changed("params") {
+		rawParams = stringutil.RemoveQuotes(rawParams)
+	}
+	return spec.StartParamInput{RawParams: rawParams}
 }

@@ -368,25 +368,35 @@ steps:
 		assertLatestParams(t, th, dag.Location, "1=s1 2=s2")
 	})
 
-	t.Run("PipedQuotedValue", func(t *testing.T) {
-		th := test.SetupCommand(t)
-		dag := th.DAG(t, "params: default\nsteps:\n  - name: print\n    run: echo ok\n")
-		pipeCommandStdin(t, `"\"hello world\""`)
-		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args: []string{"start", "--params-stdin", dag.Location},
+	for _, tt := range []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "Quoted", input: `"hello world"`, want: "1=hello world"},
+		{name: "EmptyValue", input: `""`, want: "1="},
+		{name: "QuotedSpaces", input: `" hello world "`, want: "1= hello world "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			th := test.SetupCommand(t)
+			dag := th.DAG(t, "params: default\nsteps:\n  - name: print\n    run: echo ok\n")
+			pipeCommandStdin(t, tt.input)
+			th.RunCommand(t, cmd.Start(), test.CmdTest{
+				Args: []string{"start", "--params-stdin", dag.Location},
+			})
+			assertLatestParams(t, th, dag.Location, tt.want)
 		})
-		assertLatestParams(t, th, dag.Location, "1=hello world")
-	})
+	}
 
 	t.Run("PipedNamedParamsAcrossLines", func(t *testing.T) {
 		th := test.SetupCommand(t)
 		dag := th.DAG(t, namedDAG)
-		pipeCommandStdin(t, "KEY1=v1\nKEY2=v2\n")
+		pipeCommandStdin(t, "KEY1=\"hello world\"\nKEY2=\"\"\n")
 
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
 			Args: []string{"start", "--params-stdin", dag.Location},
 		})
-		assertLatestParams(t, th, dag.Location, "KEY1=v1 KEY2=v2")
+		assertLatestParams(t, th, dag.Location, "KEY1=hello world KEY2=")
 	})
 
 	t.Run("PipedJSONParams", func(t *testing.T) {

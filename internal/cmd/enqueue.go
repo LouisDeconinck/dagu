@@ -25,9 +25,12 @@ func Enqueue() *cobra.Command {
 With --params-stdin, parameters can be provided on piped or redirected stdin
 (e.g. 'echo "P1=foo" | dagu enqueue --params-stdin my_dag'). Input is read until
 EOF, up to 1 MiB. Arguments after "--" and --params take precedence.
+Quote individual stdin values to preserve spaces; "" supplies an empty value.
+Empty or whitespace-only stdin uses DAG defaults.
 Without --params-stdin, stdin is left unread.
 
 Examples:
+	echo '"hello world"' | dagu enqueue --params-stdin my_dag
 	dagu enqueue --run-id=run_id my_dag -- P1=foo P2=bar
 	dagu enqueue --name my_custom_name my_dag.yaml -- P1=foo P2=bar
 `,

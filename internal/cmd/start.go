@@ -54,6 +54,8 @@ Parameters after the "--" separator are passed as execution parameters (either p
 With --params-stdin, piped or redirected stdin supplies the parameters
 (e.g. 'echo "P1=foo P2=bar" | dagu start --params-stdin my_dag'). Input is read
 until EOF, up to 1 MiB. Arguments after "--" and --params take precedence.
+Quote individual stdin values to preserve spaces; "" supplies an empty value.
+Empty or whitespace-only stdin uses DAG defaults.
 Without --params-stdin, stdin is left unread.
 --params-stdin cannot be combined with --from-run-id.
 Flags can override default settings such as DAG-run ID, DAG name, or suppress output.
@@ -65,6 +67,7 @@ steps, so the selected steps can reference them. Add --output to set an output
 of a skipped step directly; it takes precedence over --outputs-from.
 
 Examples:
+  echo '"hello world"' | dagu start --params-stdin my_dag
   dagu start my_dag -- P1=foo P2=bar
   dagu start --name my_custom_name my_dag.yaml -- P1=foo P2=bar
   dagu start --only build my_dag
@@ -465,7 +468,11 @@ func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, 
 				}
 			}
 		}
-		loadOpts = append(loadOpts, spec.WithParams(stringutil.RemoveQuotes(params)))
+		loadParams := params
+		if ctx.Command.Flags().Changed("params") {
+			loadParams = stringutil.RemoveQuotes(loadParams)
+		}
+		loadOpts = append(loadOpts, spec.WithParams(loadParams))
 	}
 
 	dag, err := spec.Load(ctx, dagPath, loadOpts...)

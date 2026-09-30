@@ -11,7 +11,6 @@ import (
 	"time"
 
 	api "github.com/dagucloud/dagu/v2/api/v1"
-	"github.com/dagucloud/dagu/v2/internal/cmn/stringutil"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 )
 
@@ -221,11 +220,7 @@ func remoteRunParams(ctx *Context, args []string) (string, error) {
 	if err != nil || !hasInput {
 		return "", err
 	}
-	params, err := readStdinParams()
-	if err != nil {
-		return "", err
-	}
-	return stringutil.RemoveQuotes(params), nil
+	return readStdinParams()
 }
 
 func remoteRunStart(ctx *Context, args []string) error {
