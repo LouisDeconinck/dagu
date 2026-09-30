@@ -228,7 +228,7 @@ func parseMapParams(ctx buildContext, input []any) ([]paramPair, error) {
 
 // paramRegex is a regex to match the parameters in the command.
 var paramRegex = regexp.MustCompile(
-	`(?:([^\s=]+)=)?("(?:\\"|[^"])*"|` + "`[^`]*`" + `|[^"\s]+)`,
+	`(?:([^\s="]+)=)?("(?:\\"|[^"])*"|` + "`[^`]*`" + `|[^"\s]+)`,
 )
 
 // tryParseJSONParams attempts to parse the input as JSON and convert it to paramPairs.
@@ -287,9 +287,7 @@ func parseStringParams(ctx buildContext, input string) ([]paramPair, error) {
 		value := match[2]
 
 		if strings.HasPrefix(value, `"`) {
-			// Literal newlines and escaped characters share the quoted-value contract.
-			quoted := strings.ReplaceAll(value, "\n", `\n`)
-			if unquoted, err := strconv.Unquote(quoted); err == nil {
+			if unquoted, err := unquoteParamValue(value); err == nil {
 				value = unquoted
 			} else {
 				// Fallback for malformed strings (e.g., unterminated quotes)
@@ -302,6 +300,23 @@ func parseStringParams(ctx buildContext, input string) ([]paramPair, error) {
 	}
 
 	return params, nil
+}
+
+func unquoteParamValue(value string) (string, error) {
+	backslashes := 0
+	for i := range len(value) {
+		c := value[i]
+		// Line continuations retain the literal fallback instead of losing LF.
+		if c == '\n' && backslashes%2 == 1 {
+			return "", strconv.ErrSyntax
+		}
+		if c == '\\' {
+			backslashes++
+		} else {
+			backslashes = 0
+		}
+	}
+	return strconv.Unquote(strings.ReplaceAll(value, "\n", `\n`))
 }
 
 type paramPair struct {

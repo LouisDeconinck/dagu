@@ -27,7 +27,7 @@ type StartParamInput struct {
 
 // paramTokenRegex matches positional and named params similarly to spec.parseStringParams.
 var paramTokenRegex = regexp.MustCompile(
-	`(?:([^\s=]+)=)?("(?:\\"|[^"])*"|` + "`[^`]*`" + `|[^"\s]+)`,
+	`(?:([^\s="]+)=)?("(?:\\"|[^"])*"|` + "`[^`]*`" + `|[^"\s]+)`,
 )
 
 func ValidateStartArgs(hasDash bool, args []string) error {

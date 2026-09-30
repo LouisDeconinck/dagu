@@ -69,6 +69,8 @@ The following forms must be accepted for declared string parameters:
 - A JSON object supplies named values; a JSON array supplies positional values.
 - Double quotes delimit a single string containing whitespace. Whitespace
   inside those quotes is preserved, including leading and trailing spaces.
+- An equals sign inside a double-quoted positional value is literal text,
+  including text that resembles named assignments or contains escaped quotes.
 - A quoted `""` is an explicit empty string and overrides a default.
 - Quoted strings decode `\"`, `\\`, `\n`, and `\t` as a quote, backslash, newline,
   and tab. `\\n` preserves a literal backslash followed by `n`.
@@ -80,6 +82,19 @@ The following forms must be accepted for declared string parameters:
 
 These rules specify accepted input forms, not the behavior of malformed
 parameter text or undeclared parameter names.
+
+### Quoted Value Compatibility
+
+Quoted parameter text in YAML defaults, explicit `--params`, and selected stdin
+shares value decoding. Existing shell line continuations must retain their
+backslashes and literal newlines without requiring `--params-stdin`.
+
+A quoted value containing an odd run of backslashes immediately before a
+literal newline follows legacy literal handling for the entire value. Those
+backslash-newline sequences are preserved; backslash pairs and `\n` or `\t`
+sequences elsewhere in the value remain literal. When no odd run is present,
+even runs decode backslash pairs and preserve the newline under the supported
+quoted-value rules above.
 
 ### Saved Runs
 
@@ -133,6 +148,7 @@ by a newline, and `default`, respectively. The last command leaves stdin unread.
 | Contract | Tests |
 | --- | --- |
 | Supported forms, quoting, escapes, Unicode, empty input and defaults | `TestParamsStdinValues` |
+| Shell line continuations in existing YAML defaults and explicit flags | `TestParamsLineContinuation` |
 | Source precedence and preservation of inherited bytes | `TestParamsStdinPrecedence` |
 | Open, oversized and unreadable unselected input | `TestParamsStdinUnusedInput` |
 | Inherited shell-loop input | `TestParamsStdinShellLoop` |

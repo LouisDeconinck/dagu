@@ -59,6 +59,9 @@ func TestParamsStdinValues(t *testing.T) {
 		{name: "Spaced", input: `" hello world "`, want: " hello world "},
 		{name: "NamedQuoted", input: `value=" hello world "`, want: " hello world "},
 		{name: "EscapedQuotes", input: `"say \"hello\""`, want: `say "hello"`},
+		{name: "QuotedEquals", input: `"a=b"`, want: "a=b"},
+		{name: "QuotedAssignments", input: `"a=b bare c=\"x y\""`, want: `a=b bare c="x y"`},
+		{name: "NamedAssignments", input: `value="a=b bare c=\"x y\""`, want: `a=b bare c="x y"`},
 		{name: "Backslashes", input: `"C:\\Users\\name"`, want: `C:\Users\name`},
 		{name: "LiteralBackslashN", input: `"a\\nb"`, want: `a\nb`},
 		{name: "EscapedMultiline", input: `"line1\nline2\tend"`, want: "line1\nline2\tend"},
@@ -66,6 +69,11 @@ func TestParamsStdinValues(t *testing.T) {
 		{name: "MixedMultiline", input: "\"line1\nline2\\nend\\t\\\\path\"", want: "line1\nline2\nend\t\\path"},
 		{name: "NamedMultiline", input: "value=\"line1\nline2\\nend\\t\\\\path\"", want: "line1\nline2\nend\t\\path"},
 		{name: "MultilineQuote", input: "\"line1\nline2\\\"\"", want: "line1\nline2\""},
+		{name: "LineContinuation", input: "\"echo one \\\n  two\"", want: "echo one \\\n  two"},
+		{name: "NamedLineContinuation", input: "value=\"echo one \\\n  two\"", want: "echo one \\\n  two"},
+		{name: "OddBackslashes", input: "\"line1 " + strings.Repeat(`\`, 3) + "\nline2\"", want: "line1 " + strings.Repeat(`\`, 3) + "\nline2"},
+		{name: "EvenBackslashes", input: "\"line1 " + strings.Repeat(`\`, 2) + "\nline2\"", want: "line1 \\\nline2"},
+		{name: "MixedLineContinuation", input: "\"line1 " + strings.Repeat(`\`, 2) + "\nline2 \\\nline3\\nend\"", want: "line1 " + strings.Repeat(`\`, 2) + "\nline2 \\\nline3\\nend"},
 		{name: "JSONEscapes", input: `{"value":"say \"hello\"\nC:\\Users"}`, want: "say \"hello\"\nC:\\Users"},
 		{name: "Unicode", input: `"こんにちは 🌍"`, want: "こんにちは 🌍"},
 		{name: "LiteralShell", input: "\"$(printf changed) `printf changed` $HOME 'quoted'\"", want: "$(printf changed) `printf changed` $HOME 'quoted'"},
@@ -85,6 +93,40 @@ func TestParamsStdinValues(t *testing.T) {
 						command, "--params-stdin", "--run-id="+stdinRunID(t), stdinDAGFile)
 					result.ExpectExitCode(0)
 					expectStdinRun(t, dagu, env, command, tc.want)
+				})
+			}
+		})
+	}
+}
+
+// Legacy YAML defaults and explicit flags retain shell line continuations
+// without enabling stdin parameter input.
+func TestParamsLineContinuation(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{"start", "enqueue"} {
+		t.Run(command, func(t *testing.T) {
+			t.Parallel()
+			for _, source := range []string{"Default", "Flag"} {
+				t.Run(source, func(t *testing.T) {
+					t.Parallel()
+					dagu := harness.NewRunner(t)
+					env := stdinEnv(t)
+					value := "echo one \\\n  two"
+					args := []string{command, "--run-id=" + stdinRunID(t)}
+					if source == "Flag" {
+						value = "echo three \\\n  four"
+						args = append(args, "--params=value=\""+value+"\"")
+					}
+					args = append(args, "params_stdin_continuation.yaml")
+					dagu.RunWithEnv(env, args...).ExpectExitCode(0)
+					expectStdinRun(t, dagu, env, command, value)
+					if command == "start" {
+						want := "one two\n"
+						if source == "Flag" {
+							want = "three four\n"
+						}
+						dagu.ExpectFileContent("params_continuation.out", want)
+					}
 				})
 			}
 		})
