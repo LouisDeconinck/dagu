@@ -42,6 +42,8 @@ import { useI18n } from '@/i18n/I18nProvider';
 
 type Metrics = Record<Status, number>;
 
+const RANGE_BOUND_FORMAT = 'YYYY-MM-DDTHH:mm:ss';
+
 const TRACKED_STATUSES = [
   Status.Success,
   Status.Failed,
@@ -64,18 +66,6 @@ function createEmptyMetrics(): Metrics {
     metrics[status] = 0;
   }
   return metrics as Metrics;
-}
-
-function getDayBounds(
-  date: dayjs.Dayjs,
-  tzOffsetInSec: number | undefined
-): { startOfDay: dayjs.Dayjs; endOfDay: dayjs.Dayjs } {
-  const adjusted =
-    tzOffsetInSec !== undefined ? date.utcOffset(tzOffsetInSec / 60) : date;
-  return {
-    startOfDay: adjusted.startOf('day'),
-    endOfDay: adjusted.endOf('day'),
-  };
 }
 
 function compareDAGNames(left: string, right: string): number {
@@ -310,37 +300,44 @@ function Dashboard(): React.ReactElement | null {
   // whenever the preset is applied or restored rather than being persisted.
   const resolvePresetRange = React.useCallback(
     (preset: RunDatePreset): DashboardDateRange => {
-      const { startOfDay } = getDayBounds(dayjs(), config.tzOffsetInSec);
+      const offset = config.tzOffsetInSec;
+      const now = dayjs();
+      // UTC calendar arithmetic keeps the fixed offset independent of browser DST.
+      const startOfDay =
+        offset !== undefined
+          ? now.utc().add(offset, 'second').startOf('day')
+          : now.startOf('day');
+      const timestamp = (date: dayjs.Dayjs) => date.unix() - (offset ?? 0);
       switch (preset) {
         case RunDatePreset.yesterday:
           return {
-            startDate: startOfDay.subtract(1, 'day').unix(),
-            endDate: startOfDay.unix(),
+            startDate: timestamp(startOfDay.subtract(1, 'day')),
+            endDate: timestamp(startOfDay),
           };
         case RunDatePreset.last7days:
           return {
-            startDate: startOfDay.subtract(7, 'day').unix(),
+            startDate: timestamp(startOfDay.subtract(7, 'day')),
             endDate: undefined,
           };
         case RunDatePreset.last30days:
           return {
-            startDate: startOfDay.subtract(30, 'day').unix(),
+            startDate: timestamp(startOfDay.subtract(30, 'day')),
             endDate: undefined,
           };
         case RunDatePreset.thisWeek:
           return {
-            startDate: startOfDay.startOf('week').unix(),
+            startDate: timestamp(startOfDay.startOf('week')),
             endDate: undefined,
           };
         case RunDatePreset.thisMonth:
           return {
-            startDate: startOfDay.startOf('month').unix(),
+            startDate: timestamp(startOfDay.startOf('month')),
             endDate: undefined,
           };
         case RunDatePreset.all:
           return { startDate: undefined, endDate: undefined };
         case RunDatePreset.today:
-          return { startDate: startOfDay.unix(), endDate: undefined };
+          return { startDate: timestamp(startOfDay), endDate: undefined };
       }
     },
     [config.tzOffsetInSec]
@@ -465,7 +462,7 @@ function Dashboard(): React.ReactElement | null {
     }
     const bound =
       config.tzOffsetInSec !== undefined
-        ? dayjs.unix(timestamp).utcOffset(config.tzOffsetInSec / 60)
+        ? dayjs.unix(timestamp).utc().add(config.tzOffsetInSec, 'second')
         : dayjs.unix(timestamp);
     return bound.format('YYYY-MM-DDTHH:mm');
   };
@@ -475,11 +472,23 @@ function Dashboard(): React.ReactElement | null {
       return undefined;
     }
     const withSeconds = value.split(':').length < 3 ? `${value}:00` : value;
-    return config.tzOffsetInSec !== undefined
-      ? dayjs(withSeconds)
-          .utcOffset(config.tzOffsetInSec / 60, true)
-          .unix()
-      : dayjs(withSeconds).unix();
+    const offset = config.tzOffsetInSec;
+    const parsed =
+      offset !== undefined
+        ? dayjs.utc(withSeconds, RANGE_BOUND_FORMAT, true)
+        : dayjs(withSeconds, RANGE_BOUND_FORMAT, true);
+    return parsed.isValid() ? parsed.unix() - (offset ?? 0) : undefined;
+  };
+
+  const handleRangeBoundChange = (
+    bound: keyof DashboardDateRange,
+    value: string
+  ) => {
+    const timestamp = parseRangeBound(value);
+    if (value && timestamp === undefined) {
+      return;
+    }
+    setDateRange((current) => ({ ...current, [bound]: timestamp }));
   };
 
   const selectedDAGName = selectedDAGRun !== 'all' ? selectedDAGRun : undefined;
@@ -789,16 +798,10 @@ function Dashboard(): React.ReactElement | null {
               fromDate={formatRangeBound(dateRange.startDate)}
               toDate={formatRangeBound(dateRange.endDate)}
               onFromDateChange={(value) =>
-                setDateRange((current) => ({
-                  ...current,
-                  startDate: parseRangeBound(value),
-                }))
+                handleRangeBoundChange('startDate', value)
               }
               onToDateChange={(value) =>
-                setDateRange((current) => ({
-                  ...current,
-                  endDate: parseRangeBound(value),
-                }))
+                handleRangeBoundChange('endDate', value)
               }
             />
           )}

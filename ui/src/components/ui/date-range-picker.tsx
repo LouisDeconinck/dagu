@@ -1,8 +1,19 @@
 import { Calendar } from 'lucide-react';
 import React, { useRef, useState, useEffect } from 'react';
 import { cn } from '../../lib/utils';
+import dayjs from '../../lib/dayjs';
 import { Input } from './input';
 import { I18nProps } from '@/i18n/I18nProps';
+
+const DATE_TIME_FORMAT = 'YYYY-MM-DDTHH:mm';
+const DATE_TIME_SECONDS_FORMAT = `${DATE_TIME_FORMAT}:ss`;
+const DISPLAY_FORMAT = 'YYYY-MM-DD HH:mm:ss';
+
+// Picker values are wall-clock fields; browser timezone rules do not apply.
+function parseWallTime(value: string): dayjs.Dayjs {
+  const withSeconds = value.split(':').length < 3 ? `${value}:00` : value;
+  return dayjs.utc(withSeconds, DATE_TIME_SECONDS_FORMAT, true);
+}
 
 interface DateRangePickerProps extends React.HTMLAttributes<HTMLDivElement> {
   fromDate: string | undefined;
@@ -38,18 +49,9 @@ function CustomDateTimeInput({
   // Format date for display
   useEffect(() => {
     if (value) {
-      // Convert from YYYY-MM-DDTHH:mm to YYYY-MM-DD HH:mm:ss
-      const date = new Date(value);
-      if (!isNaN(date.getTime())) {
-        const year = date.getFullYear();
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const day = String(date.getDate()).padStart(2, '0');
-        const hours = String(date.getHours()).padStart(2, '0');
-        const minutes = String(date.getMinutes()).padStart(2, '0');
-        const seconds = String(date.getSeconds()).padStart(2, '0');
-        setDisplayValue(
-          `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
-        );
+      const date = parseWallTime(value);
+      if (date.isValid()) {
+        setDisplayValue(date.format(DISPLAY_FORMAT));
       }
     } else {
       setDisplayValue('');
@@ -63,18 +65,6 @@ function CustomDateTimeInput({
     }
   }, [displayValue, cursorPosition]);
 
-  const parseDisplayValue = (display: string): string => {
-    // Convert from YYYY-MM-DD HH:mm:ss to YYYY-MM-DDTHH:mm
-    const match = display.match(
-      /(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/
-    );
-    if (match) {
-      const [, year, month, day, hour, minute] = match;
-      return `${year}-${month}-${day}T${hour}:${minute}`;
-    }
-    return '';
-  };
-
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newValue = e.target.value;
     setDisplayValue(newValue);
@@ -86,48 +76,39 @@ function CustomDateTimeInput({
       onChange('');
       return;
     }
-    const parsed = parseDisplayValue(newValue);
-    if (parsed) {
-      onChange(parsed);
+    const parsed = dayjs.utc(newValue, DISPLAY_FORMAT, true);
+    if (parsed.isValid()) {
+      onChange(parsed.format(DATE_TIME_FORMAT));
     }
   };
 
   const adjustValue = (increment: number) => {
     const pos = inputRef.current?.selectionStart || 0;
-    const dateStr = value || new Date().toISOString().slice(0, 16);
-    const date = new Date(dateStr);
-
-    if (isNaN(date.getTime())) {
+    const parsed = parseWallTime(value || dayjs.utc().format(DATE_TIME_FORMAT));
+    if (!parsed.isValid()) {
       return;
     }
+    const date = parsed.toDate();
 
     // Determine which segment to adjust based on cursor position
     // Format: YYYY-MM-DD HH:mm:ss
     // Positions: 0-4 (year), 5-7 (month), 8-10 (day), 11-13 (hour), 14-16 (minute), 17-19 (second)
 
     if (pos <= 4) {
-      date.setFullYear(date.getFullYear() + increment);
+      date.setUTCFullYear(date.getUTCFullYear() + increment);
     } else if (pos <= 7) {
-      date.setMonth(date.getMonth() + increment);
+      date.setUTCMonth(date.getUTCMonth() + increment);
     } else if (pos <= 10) {
-      date.setDate(date.getDate() + increment);
+      date.setUTCDate(date.getUTCDate() + increment);
     } else if (pos <= 13) {
-      date.setHours(date.getHours() + increment);
+      date.setUTCHours(date.getUTCHours() + increment);
     } else if (pos <= 16) {
-      date.setMinutes(date.getMinutes() + increment);
+      date.setUTCMinutes(date.getUTCMinutes() + increment);
     } else {
-      date.setSeconds(date.getSeconds() + increment);
+      date.setUTCSeconds(date.getUTCSeconds() + increment);
     }
 
-    // Format back to datetime-local string
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
-    const seconds = String(date.getSeconds()).padStart(2, '0');
-
-    onChange(`${year}-${month}-${day}T${hours}:${minutes}:${seconds}`);
+    onChange(dayjs.utc(date).format(DATE_TIME_SECONDS_FORMAT));
     setCursorPosition(pos);
   };
 
@@ -155,7 +136,10 @@ function CustomDateTimeInput({
   const handleDatePickerChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     // The native date picker gives us YYYY-MM-DDTHH:mm format, and an empty
     // value when its own clear control is used.
-    onChange(e.target.value);
+    const next = e.target.value;
+    if (!next || parseWallTime(next).isValid()) {
+      onChange(next);
+    }
   };
 
   const openDatePicker = () => {

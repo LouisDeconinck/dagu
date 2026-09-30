@@ -128,10 +128,14 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 
 function renderPage({
   selectedWorkspace = '',
-}: { selectedWorkspace?: string } = {}) {
+  configOverrides = {},
+}: {
+  selectedWorkspace?: string;
+  configOverrides?: Partial<Config>;
+} = {}) {
   return render(
     <MemoryRouter initialEntries={['/dashboard']}>
-      <ConfigContext.Provider value={makeConfig()}>
+      <ConfigContext.Provider value={makeConfig(configOverrides)}>
         <SearchStateProvider>
           <AppBarContext.Provider
             value={{
@@ -165,6 +169,8 @@ describe('DashboardPage', () => {
   const clientGetMock = vi.fn();
 
   beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-30T12:00:00Z'));
     localStorage.clear();
     sessionStorage.clear();
     clientGetMock.mockReset();
@@ -183,6 +189,7 @@ describe('DashboardPage', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
   });
 
@@ -370,6 +377,122 @@ describe('DashboardPage', () => {
       );
     });
     expect(latestDashboardQuery().toDate).toBeUndefined();
+  });
+
+  // A configured fixed offset must not inherit the browser's DST changes.
+  it.each([
+    {
+      now: '2026-03-10T12:00:00Z',
+      bounds: [
+        ['Today', '2026-03-10'],
+        ['Yesterday', '2026-03-09', '2026-03-10'],
+        ['Last 7 days', '2026-03-03'],
+        ['Last 30 days', '2026-02-08'],
+        ['This week', '2026-03-08'],
+        ['This month', '2026-03-01'],
+      ],
+    },
+    {
+      now: '2026-11-02T12:00:00Z',
+      bounds: [
+        ['Today', '2026-11-02'],
+        ['Yesterday', '2026-11-01', '2026-11-02'],
+        ['Last 7 days', '2026-10-26'],
+        ['Last 30 days', '2026-10-03'],
+        ['This week', '2026-11-01'],
+        ['This month', '2026-11-01'],
+      ],
+    },
+  ])('keeps Tokyo preset bounds at $now', async ({ now, bounds }) => {
+    vi.setSystemTime(new Date(now));
+    const user = userEvent.setup();
+    renderPage({
+      configOverrides: { tz: 'Asia/Tokyo', tzOffsetInSec: 9 * 3600 },
+    });
+
+    for (const [label, from, to] of bounds) {
+      await user.click(screen.getByRole('combobox', { name: 'Date range' }));
+      await user.click(await screen.findByRole('option', { name: label }));
+      expect(latestDashboardQuery().fromDate).toBe(
+        Date.parse(`${from}T00:00:00+09:00`) / 1000
+      );
+      expect(latestDashboardQuery().toDate).toBe(
+        to ? Date.parse(`${to}T00:00:00+09:00`) / 1000 : undefined
+      );
+    }
+  });
+
+  it.each([
+    { tz: 'UTC', tzOffsetInSec: 0, offset: 'Z' },
+    { tz: 'Asia/Tokyo', tzOffsetInSec: 9 * 3600, offset: '+09:00' },
+    { tz: 'Asia/Kolkata', tzOffsetInSec: 19800, offset: '+05:30' },
+  ])(
+    'keeps custom wall-clock bounds in $tz',
+    async ({ tz, tzOffsetInSec, offset }) => {
+      const user = userEvent.setup();
+      renderPage({ configOverrides: { tz, tzOffsetInSec } });
+      await user.click(screen.getByRole('combobox', { name: 'Date range' }));
+      await user.click(await screen.findByRole('option', { name: 'Custom' }));
+      const inputs = await screen.findAllByPlaceholderText(
+        'YYYY-MM-DD HH:mm:ss'
+      );
+
+      fireEvent.change(inputs[0]!, {
+        target: { value: '2026-03-08 02:30:00' },
+      });
+      fireEvent.change(inputs[1]!, {
+        target: { value: '2026-03-08 02:45:00' },
+      });
+
+      expect(latestDashboardQuery().fromDate).toBe(
+        Date.parse(`2026-03-08T02:30:00${offset}`) / 1000
+      );
+      expect(latestDashboardQuery().toDate).toBe(
+        Date.parse(`2026-03-08T02:45:00${offset}`) / 1000
+      );
+      expect(inputs[0]).toHaveValue('2026-03-08 02:30:00');
+      expect(inputs[1]).toHaveValue('2026-03-08 02:45:00');
+    }
+  );
+
+  it('keeps the last valid bound while invalid input is edited', async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(screen.getByRole('combobox', { name: 'Date range' }));
+    await user.click(await screen.findByRole('option', { name: 'Custom' }));
+    const [input] = await screen.findAllByPlaceholderText(
+      'YYYY-MM-DD HH:mm:ss'
+    );
+    fireEvent.change(input!, { target: { value: '2024-02-29 12:00:00' } });
+    const fromDate = Date.parse('2024-02-29T12:00:00Z') / 1000;
+    expect(latestDashboardQuery().fromDate).toBe(fromDate);
+    const stored = sessionStorage.getItem('dagu.searchState');
+
+    for (const value of [
+      '2026-02-30 12:00:00',
+      '2026-13-01 12:00:00',
+      '2026-03-01 24:00:00',
+      '2026-03-01 12:60:00',
+      '2026-03-01 12:00:60',
+    ]) {
+      fireEvent.change(input!, { target: { value } });
+      expect(latestDashboardQuery().fromDate).toBe(fromDate);
+      expect(sessionStorage.getItem('dagu.searchState')).toBe(stored);
+    }
+  });
+
+  it('uses browser-local time without a configured offset', async () => {
+    const user = userEvent.setup();
+    renderPage({ configOverrides: { tzOffsetInSec: undefined } });
+    await user.click(screen.getByRole('combobox', { name: 'Date range' }));
+    await user.click(await screen.findByRole('option', { name: 'Custom' }));
+    const [input] = await screen.findAllByPlaceholderText(
+      'YYYY-MM-DD HH:mm:ss'
+    );
+    fireEvent.change(input!, { target: { value: '2026-03-10 12:00:00' } });
+    expect(latestDashboardQuery().fromDate).toBe(
+      new Date('2026-03-10T12:00:00').getTime() / 1000
+    );
   });
 
   it('queries all history without framing the chart at the epoch', async () => {
