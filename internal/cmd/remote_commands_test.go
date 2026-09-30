@@ -174,6 +174,55 @@ func TestRemoteClientRetryDAGRunSendsChildTarget(t *testing.T) {
 	assert.Equal(t, "child-run", *got.body.SubDAGRunId)
 }
 
+func TestRemoteDAGLookup(t *testing.T) {
+	t.Parallel()
+
+	details := &api.DAGDetails{Name: "declared"}
+	listed := api.DAGFile{FileName: "actual", Dag: api.DAG{Name: "declared"}}
+	for _, tt := range []struct {
+		name     string
+		status   int
+		details  *api.DAGDetails
+		listed   []api.DAGFile
+		fileName string
+		wantErr  string
+	}{
+		{name: "Details", status: http.StatusOK, details: details, fileName: "lookup"},
+		{name: "NameFallback", status: http.StatusNotFound, listed: []api.DAGFile{listed}, fileName: "actual"},
+		{name: "MissingDetails", status: http.StatusOK, wantErr: "missing DAG identity"},
+		{name: "EmptyName", status: http.StatusOK, details: &api.DAGDetails{}, wantErr: "missing DAG identity"},
+		{name: "NotFound", status: http.StatusNotFound, wantErr: "was not found"},
+		{name: "Ambiguous", status: http.StatusNotFound, listed: []api.DAGFile{listed, listed}, wantErr: "ambiguous"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/dags" {
+					assert.Equal(t, "lookup", r.URL.Query().Get("name"))
+					assert.NoError(t, json.NewEncoder(w).Encode(struct {
+						Dags []api.DAGFile `json:"dags"`
+					}{Dags: tt.listed}))
+					return
+				}
+				assert.Equal(t, "/dags/lookup", r.URL.Path)
+				w.WriteHeader(tt.status)
+				assert.NoError(t, json.NewEncoder(w).Encode(api.GetDAGDetails200JSONResponse{Dag: tt.details}))
+			}))
+			defer server.Close()
+			client := &remoteClient{baseURL: server.URL, client: server.Client()}
+			dag, err := client.resolveDAG(context.Background(), "lookup")
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.fileName, dag.FileName)
+			assert.Equal(t, "declared", dag.Dag.Name)
+		})
+	}
+}
+
 func TestRemoteStartSendsSteps(t *testing.T) {
 	t.Parallel()
 
@@ -181,7 +230,7 @@ func TestRemoteStartSendsSteps(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
-			_, _ = w.Write([]byte(`{"fileName":"etl"}`))
+			_, _ = w.Write([]byte(`{"dag":{"name":"etl"}}`))
 			return
 		}
 		var body api.ExecuteDAGJSONBody
@@ -406,7 +455,7 @@ func TestRemoteRunParams(t *testing.T) {
 					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 						w.Header().Set("Content-Type", "application/json")
 						if r.Method == http.MethodGet {
-							_, _ = w.Write([]byte(`{"fileName":"etl"}`))
+							_, _ = w.Write([]byte(`{"dag":{"name":"etl"}}`))
 							return
 						}
 						var body struct {
