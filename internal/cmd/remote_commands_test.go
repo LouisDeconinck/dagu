@@ -17,6 +17,7 @@ import (
 
 	api "github.com/dagucloud/dagu/v2/api/v1"
 	"github.com/dagucloud/dagu/v2/internal/ir"
+	"github.com/dagucloud/dagu/v2/internal/spec"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -227,6 +228,7 @@ func TestRemoteRunParams(t *testing.T) {
 		args       []string
 		stdin      string
 		wantParams *string
+		wantValues []string
 		wantErr    string
 	}{
 		{
@@ -291,6 +293,27 @@ func TestRemoteRunParams(t *testing.T) {
 			stdin:      `{"P1":"foo","P2":"bar"}`,
 			wantParams: new(`{"P1":"foo","P2":"bar"}`),
 		},
+		{
+			name:       "QuotedStdin",
+			args:       []string{"etl"},
+			stdin:      "  \"P1=foo P2=bar\"\n",
+			wantParams: new("P1=foo P2=bar"),
+			wantValues: []string{"P1=foo", "P2=bar"},
+		},
+		{
+			name:       "QuotedFlag",
+			args:       []string{`--params="P1=foo P2=bar"`, "etl"},
+			stdin:      "P1=stdin",
+			wantParams: new("P1=foo P2=bar"),
+			wantValues: []string{"P1=foo", "P2=bar"},
+		},
+		{
+			name:       "QuotedValueStdin",
+			args:       []string{"etl"},
+			stdin:      `"\"hello world\""`,
+			wantParams: new(`"hello world"`),
+			wantValues: []string{"P1=default1", "P2=default2", "1=hello world"},
+		},
 	}
 	for _, commandSpec := range commands {
 		t.Run(commandSpec.name, func(t *testing.T) {
@@ -353,7 +376,18 @@ func TestRemoteRunParams(t *testing.T) {
 					require.NoError(t, err)
 					select {
 					case params := <-requests:
-						assert.Equal(t, tt.wantParams, params)
+						if tt.wantParams == nil {
+							require.Nil(t, params)
+							return
+						}
+						require.NotNil(t, params)
+						assert.Equal(t, *tt.wantParams, *params)
+						if tt.wantValues != nil {
+							source := []byte("params: P1=default1 P2=default2\nsteps:\n  - name: print\n    run: echo ok\n")
+							dag, err := spec.LoadYAML(ctx, source, spec.WithParams(*params))
+							require.NoError(t, err)
+							assert.Equal(t, tt.wantValues, dag.Params)
+						}
 					default:
 						t.Fatal("run was not submitted")
 					}
