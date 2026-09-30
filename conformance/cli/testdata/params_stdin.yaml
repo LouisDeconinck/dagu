@@ -5,4 +5,4 @@ params:
 working_dir: .
 steps:
   - id: write
-    run: printf '%s\n' "${params.value}" > params_stdin.out
+    run: printf '%s\n' "$value" > params_stdin.out

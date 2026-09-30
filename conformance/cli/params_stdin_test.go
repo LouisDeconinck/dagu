@@ -26,6 +26,22 @@ type stdinRun struct {
 	Params   string `json:"params"`
 }
 
+type stdinPrecedenceCase struct {
+	name  string
+	flags []string
+	dash  []string
+	want  string
+}
+
+var stdinPrecedenceCases = []stdinPrecedenceCase{
+	{name: "Inherited", want: "default"},
+	{name: "Disabled", flags: []string{"--params-stdin=false"}, want: "default"},
+	{name: "Flag", flags: []string{"--params-stdin", "--params=value=flag"}, want: "flag"},
+	{name: "EmptyFlag", flags: []string{"--params-stdin", "--params="}, want: "default"},
+	{name: "Dash", flags: []string{"--params-stdin", "--params=value=flag"}, dash: []string{"--", "value=dash"}, want: "dash"},
+	{name: "EmptyDash", flags: []string{"--params-stdin", "--params=value=flag"}, dash: []string{"--"}, want: "default"},
+}
+
 func TestParamsStdinValues(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -38,6 +54,15 @@ func TestParamsStdinValues(t *testing.T) {
 		{name: "JSON", input: `{"value":"from-stdin"}`, want: "from-stdin"},
 		{name: "Quoted", input: `"hello world"`, want: "hello world"},
 		{name: "Spaced", input: `" hello world "`, want: " hello world "},
+		{name: "NamedQuoted", input: `value=" hello world "`, want: " hello world "},
+		{name: "EscapedQuotes", input: `"say \"hello\""`, want: `say "hello"`},
+		{name: "Backslashes", input: `"C:\\Users\\name"`, want: `C:\Users\name`},
+		{name: "LiteralBackslashN", input: `"a\\nb"`, want: `a\nb`},
+		{name: "EscapedMultiline", input: `"line1\nline2\tend"`, want: "line1\nline2\tend"},
+		{name: "Multiline", input: "\"line1\nline2\"", want: "line1\nline2"},
+		{name: "JSONEscapes", input: `{"value":"say \"hello\"\nC:\\Users"}`, want: "say \"hello\"\nC:\\Users"},
+		{name: "Unicode", input: `"こんにちは 🌍"`, want: "こんにちは 🌍"},
+		{name: "LiteralShell", input: `"$(printf changed) $HOME 'quoted'"`, want: "$(printf changed) $HOME 'quoted'"},
 		{name: "EmptyValue", input: `""`, want: ""},
 		{name: "EmptyInput", want: "default"},
 		{name: "Whitespace", input: " \n\t\r\n", want: "default"},
@@ -65,23 +90,10 @@ func TestParamsStdinValues(t *testing.T) {
 func TestParamsStdinPrecedence(t *testing.T) {
 	t.Parallel()
 
-	cases := []struct {
-		name  string
-		flags []string
-		dash  []string
-		want  string
-	}{
-		{name: "Inherited", want: "default"},
-		{name: "Disabled", flags: []string{"--params-stdin=false"}, want: "default"},
-		{name: "Flag", flags: []string{"--params-stdin", "--params=value=flag"}, want: "flag"},
-		{name: "EmptyFlag", flags: []string{"--params-stdin", "--params="}, want: "default"},
-		{name: "Dash", flags: []string{"--params-stdin", "--params=value=flag"}, dash: []string{"--", "value=dash"}, want: "dash"},
-		{name: "EmptyDash", flags: []string{"--params-stdin", "--params=value=flag"}, dash: []string{"--"}, want: "default"},
-	}
 	for _, command := range []string{"start", "enqueue"} {
 		t.Run(command, func(t *testing.T) {
 			t.Parallel()
-			for _, tc := range cases {
+			for _, tc := range stdinPrecedenceCases {
 				t.Run(tc.name, func(t *testing.T) {
 					t.Parallel()
 					dagu := harness.NewRunner(t)
@@ -94,10 +106,7 @@ func TestParamsStdinPrecedence(t *testing.T) {
 					require.NoError(t, err)
 					require.NoError(t, writer.Close())
 
-					args := append([]string{command, "--run-id=" + stdinRunID(t)}, tc.flags...)
-					args = append(args, stdinDAGFile)
-					args = append(args, tc.dash...)
-					dagu.RunWithStdin(env, stdin, args...).ExpectExitCode(0)
+					dagu.RunWithStdin(env, stdin, stdinPrecedenceArgs(t, command, tc)...).ExpectExitCode(0)
 					expectStdinRun(t, dagu, env, command, tc.want)
 					remaining, err := io.ReadAll(stdin)
 					require.NoError(t, err)
@@ -108,10 +117,81 @@ func TestParamsStdinPrecedence(t *testing.T) {
 	}
 }
 
-// An inherited pipe need not reach EOF before an unselected command finishes.
-func TestParamsStdinOpenPipe(t *testing.T) {
+// Unselected input remains unread even when reading would block or fail.
+func TestParamsStdinUnusedInput(t *testing.T) {
 	t.Parallel()
 
+	for _, command := range []string{"start", "enqueue"} {
+		t.Run(command, func(t *testing.T) {
+			t.Parallel()
+			for _, source := range []string{"OpenPipe", "Oversized", "Unreadable"} {
+				t.Run(source, func(t *testing.T) {
+					t.Parallel()
+					for _, tc := range stdinPrecedenceCases {
+						t.Run(tc.name, func(t *testing.T) {
+							t.Parallel()
+							dagu := harness.NewRunner(t)
+							env := sharedEnv(t)
+							var stdin *os.File
+							var err error
+							switch source {
+							case "OpenPipe":
+								var writer *os.File
+								stdin, writer, err = os.Pipe()
+								require.NoError(t, err)
+								t.Cleanup(func() { require.NoError(t, writer.Close()) })
+							case "Oversized":
+								dagu.WriteFile("stdin.txt", strings.Repeat("x", stdinSizeLimit+1))
+								stdin, err = os.Open(dagu.ProjectPath("stdin.txt")) // #nosec G304 -- isolated test input.
+							case "Unreadable":
+								stdin = unreadableStdin(t, dagu)
+							}
+							require.NoError(t, err)
+							t.Cleanup(func() { require.NoError(t, stdin.Close()) })
+							dagu.RunWithStdin(env, stdin, stdinPrecedenceArgs(t, command, tc)...).ExpectExitCode(0)
+							expectStdinRun(t, dagu, env, command, tc.want)
+							if source == "Oversized" {
+								position, err := stdin.Seek(0, io.SeekCurrent)
+								require.NoError(t, err)
+								require.Zero(t, position)
+							}
+						})
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestParamsStdinShellLoop(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{"start", "enqueue"} {
+		t.Run(command, func(t *testing.T) {
+			t.Parallel()
+			dagu := harness.NewRunner(t)
+			env := sharedEnv(t)
+			dagu.WriteFile("stdin_loop.txt", "first\nsecond\n")
+			dagu.RunWithEnv(env, "start", "--run-id="+stdinRunID(t),
+				"--params=command="+command+" prefix="+stdinRunID(t), "params_stdin_loop.yaml").ExpectExitCode(0)
+			dagu.ExpectFileContent("stdin_loop.out", "first\nsecond\n")
+			result := dagu.RunWithEnv(env, "history", "--format=json", "--run-id="+stdinRunID(t), stdinDAGName)
+			result.ExpectExitCode(0)
+			var runs []stdinRun
+			require.NoError(t, json.Unmarshal([]byte(result.Stdout()), &runs))
+			status := "queued"
+			if command == "start" {
+				status = "succeeded"
+			}
+			require.ElementsMatch(t, []stdinRun{
+				{DAGRunID: stdinRunID(t) + "-first", Status: status, Params: "value=default"},
+				{DAGRunID: stdinRunID(t) + "-second", Status: status, Params: "value=default"},
+			}, runs)
+		})
+	}
+}
+
+func TestParamsStdinFragments(t *testing.T) {
+	t.Parallel()
 	for _, command := range []string{"start", "enqueue"} {
 		t.Run(command, func(t *testing.T) {
 			t.Parallel()
@@ -119,12 +199,51 @@ func TestParamsStdinOpenPipe(t *testing.T) {
 			env := sharedEnv(t)
 			stdin, writer, err := os.Pipe()
 			require.NoError(t, err)
-			t.Cleanup(func() {
-				require.NoError(t, writer.Close())
-				require.NoError(t, stdin.Close())
-			})
-			dagu.RunWithStdin(env, stdin, command, "--run-id="+stdinRunID(t), stdinDAGFile).ExpectExitCode(0)
-			expectStdinRun(t, dagu, env, command, "default")
+			t.Cleanup(func() { _ = stdin.Close() })
+			t.Cleanup(func() { _ = writer.Close() })
+			// Exceed pipe capacity so the input cannot arrive in a single read.
+			prefix := strings.Repeat(" ", stdinSizeLimit/2)
+			const suffix = `hello \"world\"\nこんにちは 🌍"}`
+			written := make(chan error, 1)
+			go func() {
+				_, writeErr := io.WriteString(writer, prefix+`{"value":"`)
+				for _, b := range []byte(suffix) {
+					if writeErr != nil {
+						break
+					}
+					if _, err := writer.Write([]byte{b}); err != nil {
+						writeErr = err
+						break
+					}
+				}
+				if err := writer.Close(); writeErr == nil {
+					writeErr = err
+				}
+				written <- writeErr
+			}()
+			result := dagu.RunWithStdin(env, stdin, command, "--params-stdin", "--run-id="+stdinRunID(t), stdinDAGFile)
+			require.NoError(t, stdin.Close())
+			result.ExpectExitCode(0)
+			require.NoError(t, <-written)
+			expectStdinRun(t, dagu, env, command, "hello \"world\"\nこんにちは 🌍")
+		})
+	}
+}
+
+func TestParamsStdinReadError(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{"start", "enqueue"} {
+		t.Run(command, func(t *testing.T) {
+			t.Parallel()
+			dagu := harness.NewRunner(t)
+			env := sharedEnv(t)
+			stdin := unreadableStdin(t, dagu)
+			t.Cleanup(func() { require.NoError(t, stdin.Close()) })
+			result := dagu.RunWithStdin(env, stdin, command, "--params-stdin", "--run-id="+stdinRunID(t), stdinDAGFile)
+			result.ExpectNonZeroExitCode()
+			result.ExpectStderrContains("failed to read params from stdin")
+			require.Empty(t, stdinHistory(t, dagu, env))
+			dagu.ExpectNoFile("params_stdin.out")
 		})
 	}
 }
@@ -201,6 +320,21 @@ func stdinHistory(t *testing.T, dagu *harness.Runner, env []string) []stdinRun {
 	var runs []stdinRun
 	require.NoError(t, json.Unmarshal([]byte(result.Stdout()), &runs))
 	return runs
+}
+
+func stdinPrecedenceArgs(t *testing.T, command string, tc stdinPrecedenceCase) []string {
+	t.Helper()
+	args := append([]string{command, "--run-id=" + stdinRunID(t)}, tc.flags...)
+	args = append(args, stdinDAGFile)
+	return append(args, tc.dash...)
+}
+
+// A write-only file can be inspected but cannot be read on Unix or Windows.
+func unreadableStdin(t *testing.T, dagu *harness.Runner) *os.File {
+	t.Helper()
+	stdin, err := os.OpenFile(dagu.ProjectPath("unreadable.txt"), os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304 -- isolated test input.
+	require.NoError(t, err)
+	return stdin
 }
 
 // Run IDs distinguish process sockets even across isolated DAGU_HOME values.
