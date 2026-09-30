@@ -673,15 +673,16 @@ type signalListener interface {
 // listenSignals subscribes to SIGINT and SIGTERM signals and forwards them to the provided listener.
 // It also listens for context cancellation and signals the listener with an os.Interrupt.
 func listenSignals(ctx context.Context, listener signalListener) {
-	go func() {
-		if signalctx.OSSignalsDisabled(ctx) {
+	if signalctx.OSSignalsDisabled(ctx) {
+		go func() {
 			<-ctx.Done()
 			listener.Signal(ctx, os.Interrupt)
-			return
-		}
-
-		signalChan := make(chan os.Signal, 1)
-		signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+		}()
+		return
+	}
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
 		defer signal.Stop(signalChan)
 
 		select {

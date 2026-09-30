@@ -31,8 +31,10 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/persis/testutil"
 	profilepkg "github.com/dagucloud/dagu/v2/internal/profile"
 	"github.com/dagucloud/dagu/v2/internal/runtime/agent"
+	runtimeexec "github.com/dagucloud/dagu/v2/internal/runtime/executor"
 	"github.com/dagucloud/dagu/v2/internal/runtime/runstate"
 	secretpkg "github.com/dagucloud/dagu/v2/internal/secret"
+	secretref "github.com/dagucloud/dagu/v2/internal/secret/ref"
 	"github.com/dagucloud/dagu/v2/internal/service/scheduler"
 	"github.com/dagucloud/dagu/v2/internal/test"
 
@@ -193,6 +195,156 @@ func agentRunCompletionTimeout() time.Duration {
 		return 3 * time.Minute
 	}
 	return 10 * time.Second
+}
+
+type startupBarrier struct {
+	started  chan struct{}
+	release  chan struct{}
+	returned chan struct{}
+	once     sync.Once
+}
+
+func (b *startupBarrier) wait() {
+	close(b.started)
+	<-b.release
+	close(b.returned)
+}
+
+func (b *startupBarrier) unblock() {
+	b.once.Do(func() { close(b.release) })
+}
+
+type startupSecretResolver struct{ barrier *startupBarrier }
+
+func (r startupSecretResolver) ResolveReference(context.Context, secretref.Ref) (string, error) {
+	r.barrier.wait()
+	return "late-secret", nil
+}
+
+func (startupSecretResolver) CheckReferenceAccessibility(context.Context, secretref.Ref) error {
+	return nil
+}
+
+type startupProfileResolver struct {
+	barrier    *startupBarrier
+	panicValue any
+}
+
+func (r startupProfileResolver) ResolveRuntime(context.Context, profilepkg.RuntimeRequest) (*profilepkg.RuntimeResolved, error) {
+	r.barrier.wait()
+	if r.panicValue != nil {
+		panic(r.panicValue)
+	}
+	return &profilepkg.RuntimeResolved{Selected: &profilepkg.Resolved{Name: "late-profile"}}, nil
+}
+
+type startupSocketServer struct{ barrier *startupBarrier }
+
+func (s startupSocketServer) Serve(ctx context.Context, listen chan error) error {
+	close(s.barrier.started)
+	<-ctx.Done()
+	listen <- ctx.Err()
+	close(s.barrier.returned)
+	return ctx.Err()
+}
+
+func (startupSocketServer) Shutdown(context.Context) error { return nil }
+
+// Startup termination cannot wait for a provider that ignores cancellation.
+func TestStopStartup(t *testing.T) {
+	for _, phase := range []string{"BeforeRun", "Dry", "Secrets", "Profile", "LatePanic", "Factory", "Socket"} {
+		for _, signal := range []os.Signal{os.Interrupt, os.Kill} {
+			t.Run(phase+"/"+signal.String(), func(t *testing.T) {
+				th := test.Setup(t)
+				marker := filepath.Join(t.TempDir(), "executed")
+				script := writeFileCommand(marker, "started")
+				yaml := fmt.Sprintf("max_clean_up_time_sec: 1\nsteps:\n  - script: %q\nhandler_on:\n  init:\n    script: %q\n  abort:\n    script: %q\n  exit:\n    script: %q\n", script, script, script, script)
+				barrier := &startupBarrier{started: make(chan struct{}), release: make(chan struct{}), returned: make(chan struct{})}
+				opts := agent.Options{Dry: phase == "Dry"}
+				if phase == "Secrets" {
+					yaml += "secrets:\n  - name: TOKEN\n    ref: prod/token\n"
+					opts.SecretReferenceResolver = startupSecretResolver{barrier: barrier}
+				} else if phase == "Profile" || phase == "LatePanic" {
+					opts.ProfileName = "initial-profile"
+					resolver := startupProfileResolver{barrier: barrier}
+					if phase == "LatePanic" {
+						resolver.panicValue = "late startup panic"
+					}
+					opts.ProfileResolver = resolver
+				} else if phase == "Factory" {
+					opts.SubWorkflowRunnerFactory = func(ctx context.Context) (runtimeexec.SubWorkflowRunner, error) {
+						close(barrier.started)
+						<-ctx.Done()
+						close(barrier.returned)
+						return nil, ctx.Err()
+					}
+				} else if phase == "Socket" {
+					opts.SocketServerFactory = func(string, sock.HTTPHandlerFunc) (agent.SocketServer, error) {
+						return startupSocketServer{barrier: barrier}, nil
+					}
+				}
+				dag := th.DAG(t, yaml)
+				dagAgent := dag.Agent(test.WithAgentOptions(opts))
+				done := make(chan struct{})
+				var runErr error
+				t.Cleanup(func() {
+					barrier.unblock()
+					dagAgent.Signal(th.Context, os.Kill)
+					waitForCancel(t, done, agentRunCompletionTimeout())
+				})
+				beforeRun := phase == "BeforeRun" || phase == "Dry"
+				if beforeRun {
+					dagAgent.Signal(th.Context, signal)
+				}
+				go func() {
+					defer close(done)
+					runErr = dagAgent.Run(th.Context)
+				}()
+				if !beforeRun {
+					waitForCancel(t, barrier.started, agentRunStartTimeout())
+					go dagAgent.Signal(th.Context, signal)
+				}
+				waitForCancel(t, done, 2*time.Second)
+				require.NoError(t, runErr)
+				if opts.Dry {
+					dag.AssertDAGRunCount(t, 0)
+				} else {
+					dag.AssertLatestStatus(t, ir.Aborted)
+				}
+				status := dagAgent.Status(th.Context)
+				require.Equal(t, ir.Aborted, status.Status)
+				require.NotEmpty(t, status.FinishedAt)
+				if !beforeRun {
+					barrier.unblock()
+					waitForCancel(t, barrier.returned, time.Second)
+				}
+				require.Never(t, func() bool {
+					_, err := os.Stat(marker)
+					return err == nil || dagAgent.Status(th.Context).ProfileName != opts.ProfileName
+				}, 200*time.Millisecond, 10*time.Millisecond, "late startup completion changed an aborted run")
+			})
+		}
+	}
+}
+
+func TestStartupPanic(t *testing.T) {
+	th := test.Setup(t)
+	barrier := &startupBarrier{started: make(chan struct{}), release: make(chan struct{}), returned: make(chan struct{})}
+	barrier.unblock()
+	dag := th.DAG(t, "steps:\n  - run: echo done\n")
+	dagAgent := dag.Agent(test.WithAgentOptions(agent.Options{ProfileResolver: startupProfileResolver{barrier: barrier, panicValue: "startup panic"}}))
+	require.PanicsWithValue(t, "startup panic", func() { _ = dagAgent.Run(th.Context) })
+}
+
+func TestStopStartupDuplicate(t *testing.T) {
+	th := test.Setup(t)
+	dag := th.DAG(t, "steps:\n  - run: echo done\n")
+	first := dag.Agent()
+	first.RunSuccess(t)
+	second := dag.Agent(test.WithDAGRunID(first.Status(th.Context).DAGRunID))
+	second.Signal(th.Context, os.Interrupt)
+	require.ErrorIs(t, second.Run(th.Context), dagrun.ErrDAGRunAlreadyExists)
+	dag.AssertLatestStatus(t, ir.Succeeded)
 }
 
 func TestStopSharedDeadline(t *testing.T) {

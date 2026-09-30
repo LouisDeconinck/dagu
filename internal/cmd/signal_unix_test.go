@@ -7,6 +7,7 @@ package cmd_test
 
 import (
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -45,6 +46,81 @@ func TestSignalPropagation(t *testing.T) {
 				run.assertStatus(t, ir.Aborted)
 			})
 		}
+	}
+}
+
+// A supervisor must finish shutdown while a runner's startup secret stays blocked.
+func TestSignalDuringStartup(t *testing.T) {
+	for _, shutdownSignal := range []os.Signal{syscall.SIGTERM, syscall.SIGINT} {
+		t.Run(shutdownSignal.String(), func(t *testing.T) {
+			th := test.SetupCommand(t, test.WithBuiltExecutable())
+			dir := t.TempDir()
+			fifo := filepath.Join(dir, "secret")
+			require.NoError(t, syscall.Mkfifo(fifo, 0600))
+			secretFile, err := os.OpenFile(fifo, os.O_RDWR, 0600)
+			require.NoError(t, err)
+			marker := filepath.Join(dir, "executed")
+			dag := th.DAG(t, fmt.Sprintf(`
+max_clean_up_time_sec: 1
+secrets:
+  - name: TOKEN
+    provider: file
+    key: %q
+steps:
+  - script: %q
+`, fifo, "printf done > "+test.PosixQuote(marker)))
+			logFile, err := os.Create(filepath.Join(dir, "supervisor.log"))
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = logFile.Close() })
+			command := exec.Command(th.Config.Paths.Executable, test.WithConfigFlag([]string{"scheduler"}, th.Config)...) //nolint:gosec // Test executes the repository binary.
+			command.Env = append(th.ChildEnv, "DAGU_SIGNAL_PROPAGATION=true", "GOMAXPROCS=1")
+			command.Stdout = logFile
+			command.Stderr = logFile
+			require.NoError(t, command.Start())
+			done := make(chan error, 1)
+			go func() { done <- command.Wait() }()
+			exited := false
+			t.Cleanup(func() {
+				_, _ = secretFile.Write([]byte("fixture"))
+				_ = secretFile.Close()
+				if !exited {
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						terminateTestCommand(command, done)
+					}
+				}
+			})
+			require.Eventually(t, func() bool {
+				data, _ := os.ReadFile(logFile.Name())
+				return strings.Contains(string(data), "Scheduler started")
+			}, commandLogWaitTimeout(), 20*time.Millisecond)
+			enqueue := exec.Command(th.Config.Paths.Executable, test.WithConfigFlag([]string{"enqueue", dag.Location}, th.Config)...) //nolint:gosec // Test executes the repository binary.
+			enqueue.Env = command.Env
+			require.NoError(t, enqueue.Run())
+			require.Eventually(t, func() bool {
+				found := false
+				_ = filepath.WalkDir(th.Config.Paths.LogDir, func(path string, entry fs.DirEntry, err error) error {
+					if err == nil && !entry.IsDir() && strings.HasSuffix(path, ".log") {
+						data, _ := os.ReadFile(path)
+						found = found || strings.Contains(string(data), "Resolving secrets")
+					}
+					return nil
+				})
+				return found
+			}, commandLogWaitTimeout(), 20*time.Millisecond)
+			require.NoError(t, command.Process.Signal(shutdownSignal))
+			select {
+			case err := <-done:
+				exited = true
+				require.NoError(t, err)
+			case <-time.After(3 * time.Second):
+				t.Fatal("supervisor waited for blocked startup beyond the cleanup deadline")
+			}
+			dag.AssertLatestStatus(t, ir.Aborted)
+			_, err = os.Stat(marker)
+			require.ErrorIs(t, err, os.ErrNotExist, "step started after shutdown")
+		})
 	}
 }
 
