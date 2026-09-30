@@ -67,23 +67,29 @@ func PropagateSignal(ctx context.Context, sig os.Signal) <-chan struct{} {
 	return done
 }
 
-// track registers cmd for the duration of the returned func. Callers invoke the
-// returned func once the command has exited.
-func track(ctx context.Context, cmd *exec.Cmd) func() {
+// startTracked starts cmd and enrolls it before shutdown can take its snapshot.
+// The returned function records process exit. Runs started after the snapshot
+// remain outside the shutdown operation.
+func startTracked(ctx context.Context, cmd *exec.Cmd) (func(), error) {
 	reg := ProcessRegistryFrom(ctx)
-	if reg == nil || cmd == nil {
-		return func() {}
+	if reg != nil {
+		reg.mu.Lock()
+		defer reg.mu.Unlock()
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	if reg == nil || reg.done != nil {
+		return func() {}, nil
 	}
 	done := make(chan struct{})
-	reg.mu.Lock()
 	reg.procs[cmd] = done
-	reg.mu.Unlock()
 	return func() {
 		reg.mu.Lock()
 		delete(reg.procs, cmd)
 		close(done)
 		reg.mu.Unlock()
-	}
+	}, nil
 }
 
 // Propagate forwards sig to each currently tracked subprocess's process tree.

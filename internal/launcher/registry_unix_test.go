@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -19,6 +20,60 @@ import (
 
 	"github.com/dagucloud/dagu/v2/internal/launcher"
 )
+
+type propagationWriter struct {
+	ctx  context.Context
+	reg  *launcher.ProcessRegistry
+	once sync.Once
+}
+
+func (w *propagationWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { w.reg.Propagate(w.ctx, syscall.SIGTERM) })
+	return len(p), nil
+}
+
+// A child can emit readiness while the launcher is still returning from Start.
+func TestPropagationDuringStart(t *testing.T) {
+	for _, asynchronous := range []bool{false, true} {
+		t.Run(strconv.FormatBool(asynchronous), func(t *testing.T) {
+			for range 30 {
+				reg := launcher.NewProcessRegistry()
+				ctx := launcher.ContextWithProcessRegistry(t.Context(), reg)
+				pidFile := filepath.Join(t.TempDir(), "pid")
+				spec := launcher.CmdSpec{
+					Executable: "sh",
+					Args:       []string{"-c", `printf '%s' $$ > "$1"; printf ready; exec sleep 30`, "probe", pidFile},
+					Stdout:     &propagationWriter{ctx: ctx, reg: reg},
+				}
+				done := make(chan error, 1)
+				go func() {
+					if !asynchronous {
+						done <- launcher.Run(ctx, spec)
+						return
+					}
+					result, err := launcher.StartProcess(ctx, spec)
+					if err != nil {
+						done <- err
+						return
+					}
+					done <- <-result.Done
+				}()
+				select {
+				case err := <-done:
+					require.Error(t, err)
+				case <-time.After(3 * time.Second):
+					data, err := os.ReadFile(pidFile)
+					require.NoError(t, err)
+					pid, err := strconv.Atoi(string(data))
+					require.NoError(t, err)
+					_ = syscall.Kill(-pid, syscall.SIGKILL)
+					<-done
+					t.Fatal("shutdown missed a child that had already emitted readiness")
+				}
+			}
+		})
+	}
+}
 
 func TestPropagationWaitsForAllRuns(t *testing.T) {
 	reg := launcher.NewProcessRegistry()

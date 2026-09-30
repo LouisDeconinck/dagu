@@ -415,12 +415,11 @@ func Run(ctx context.Context, spec CmdSpec) error {
 	cmd.Stdout = io.MultiWriter(stdout, fileOrDefault(spec.Stdout, os.Stdout))
 	cmd.Stderr = io.MultiWriter(stderr, fileOrDefault(spec.Stderr, os.Stderr))
 
-	if err := cmd.Start(); err != nil {
+	untrack, err := startTracked(ctx, cmd)
+	if err != nil {
 		return buildCommandError(err, stdout, stderr)
 	}
-	// Register only after Start so cmd.Process is assigned before the
-	// process registry may read it concurrently during signal propagation.
-	defer track(ctx, cmd)()
+	defer untrack()
 	if err := cmd.Wait(); err != nil {
 		return buildCommandError(err, stdout, stderr)
 	}
@@ -472,14 +471,14 @@ func StartProcess(ctx context.Context, spec CmdSpec) (*StartResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
+	untrack, err := startTracked(ctx, cmd)
+	if err != nil {
 		cleanupTransport(cleanup)
 		return nil, fmt.Errorf("failed to start command: %w", err)
 	}
 
 	pid := cmd.Process.Pid
 	startedAt, _ := procutil.StartTime(pid)
-	untrack := track(ctx, cmd)
 	done := make(chan error, 1)
 	go execWithRecovery(ctx, func() {
 		defer close(done)

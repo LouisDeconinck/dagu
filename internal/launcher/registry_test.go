@@ -120,3 +120,25 @@ func TestRunWithCanceledRegistryContext(t *testing.T) {
 	cancel()
 	require.ErrorIs(t, launcher.Run(ctx, quickSpec()), context.Canceled)
 }
+
+func TestProcessRegistryLateStart(t *testing.T) {
+	reg := launcher.NewProcessRegistry()
+	ctx := launcher.ContextWithProcessRegistry(t.Context(), reg)
+	done := reg.Propagate(ctx, os.Interrupt)
+	result, err := launcher.StartProcess(ctx, longRunningSpec())
+	require.NoError(t, err)
+	require.Equal(t, done, reg.Propagate(ctx, os.Interrupt))
+	select {
+	case <-result.Done:
+		t.Fatal("a run started after shutdown received the propagated signal")
+	case <-time.After(100 * time.Millisecond):
+	}
+	proc, err := os.FindProcess(result.PID)
+	require.NoError(t, err)
+	require.NoError(t, proc.Kill())
+	select {
+	case <-result.Done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("late run did not exit after explicit termination")
+	}
+}
