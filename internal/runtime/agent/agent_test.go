@@ -243,6 +243,53 @@ handler_on:
 	dag.AssertLatestStatus(t, ir.Succeeded)
 }
 
+func TestStopCallerCancellation(t *testing.T) {
+	for _, alreadyCanceled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("AlreadyCanceled=%t", alreadyCanceled), func(t *testing.T) {
+			th := test.Setup(t)
+			dir := t.TempDir()
+			ready, release := filepath.Join(dir, "ready"), filepath.Join(dir, "release")
+			dag := th.DAG(t, fmt.Sprintf(`
+max_clean_up_time_sec: 2
+steps:
+  - name: probe
+    script: %q
+    repeat_policy:
+      repeat: while
+      condition: "true"
+      expected: "true"
+`, signalFileThenWaitScript(ready, release, 50*time.Millisecond)))
+			dagAgent := dag.Agent()
+			done := make(chan struct{})
+			go func() { defer close(done); _ = dagAgent.Run(th.Context) }()
+			t.Cleanup(func() {
+				_ = os.WriteFile(release, nil, 0600)
+				dagAgent.Signal(th.Context, os.Kill)
+				waitForCancel(t, done, agentRunCompletionTimeout())
+			})
+			waitForTestFile(t, ready, agentRunStartTimeout())
+			ctx, cancel := context.WithCancel(th.Context)
+			defer cancel()
+			if alreadyCanceled {
+				cancel()
+			}
+			stopped := make(chan struct{})
+			go func() { defer close(stopped); dagAgent.Signal(ctx, os.Interrupt) }()
+			time.Sleep(100 * time.Millisecond)
+			cancel()
+			select {
+			case <-done:
+				t.Fatal("caller cancellation interrupted run cleanup")
+			case <-time.After(100 * time.Millisecond):
+			}
+			require.NoError(t, os.WriteFile(release, nil, 0600))
+			waitForCancel(t, done, agentRunCompletionTimeout())
+			waitForCancel(t, stopped, time.Second)
+			dag.AssertLatestStatus(t, ir.Succeeded)
+		})
+	}
+}
+
 func pwdCommand() string {
 	return test.ForOS("pwd", "(Get-Location).Path")
 }

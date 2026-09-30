@@ -2309,6 +2309,7 @@ func (a *Agent) stopChildren(ctx context.Context, sig os.Signal, allowOverride b
 	}
 
 	a.cleanupOnce.Do(func() {
+		ctx := context.WithoutCancel(ctx)
 		signalCtx, cancel := context.WithTimeout(ctx, a.dag.MaxCleanUpTime)
 		go func() {
 			defer close(a.cleanupDone)
