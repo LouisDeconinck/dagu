@@ -1,12 +1,14 @@
 // Copyright (C) 2026 Yota Hamada
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-package cli_test
+// Package spec076_cli_run_params_test checks Spec 076: CLI Run Parameter Input.
+package spec076_cli_run_params_test
 
 import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -52,6 +54,7 @@ func TestParamsStdinValues(t *testing.T) {
 		{name: "Positional", input: "from-stdin\n", want: "from-stdin"},
 		{name: "Named", input: "value=from-stdin\n", want: "from-stdin"},
 		{name: "JSON", input: `{"value":"from-stdin"}`, want: "from-stdin"},
+		{name: "JSONArray", input: `["from-stdin"]`, want: "from-stdin"},
 		{name: "Quoted", input: `"hello world"`, want: "hello world"},
 		{name: "Spaced", input: `" hello world "`, want: " hello world "},
 		{name: "NamedQuoted", input: `value=" hello world "`, want: " hello world "},
@@ -62,7 +65,7 @@ func TestParamsStdinValues(t *testing.T) {
 		{name: "Multiline", input: "\"line1\nline2\"", want: "line1\nline2"},
 		{name: "JSONEscapes", input: `{"value":"say \"hello\"\nC:\\Users"}`, want: "say \"hello\"\nC:\\Users"},
 		{name: "Unicode", input: `"こんにちは 🌍"`, want: "こんにちは 🌍"},
-		{name: "LiteralShell", input: `"$(printf changed) $HOME 'quoted'"`, want: "$(printf changed) $HOME 'quoted'"},
+		{name: "LiteralShell", input: "\"$(printf changed) `printf changed` $HOME 'quoted'\"", want: "$(printf changed) `printf changed` $HOME 'quoted'"},
 		{name: "EmptyValue", input: `""`, want: ""},
 		{name: "EmptyInput", want: "default"},
 		{name: "Whitespace", input: " \n\t\r\n", want: "default"},
@@ -74,7 +77,7 @@ func TestParamsStdinValues(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					t.Parallel()
 					dagu := harness.NewRunner(t)
-					env := sharedEnv(t)
+					env := stdinEnv(t)
 					result := dagu.RunWithStdin(env, strings.NewReader(tc.input),
 						command, "--params-stdin", "--run-id="+stdinRunID(t), stdinDAGFile)
 					result.ExpectExitCode(0)
@@ -97,7 +100,7 @@ func TestParamsStdinPrecedence(t *testing.T) {
 				t.Run(tc.name, func(t *testing.T) {
 					t.Parallel()
 					dagu := harness.NewRunner(t)
-					env := sharedEnv(t)
+					env := stdinEnv(t)
 					const input = "value=stdin\nnext-workflow\n"
 					stdin, writer, err := os.Pipe()
 					require.NoError(t, err)
@@ -131,7 +134,7 @@ func TestParamsStdinUnusedInput(t *testing.T) {
 						t.Run(tc.name, func(t *testing.T) {
 							t.Parallel()
 							dagu := harness.NewRunner(t)
-							env := sharedEnv(t)
+							env := stdinEnv(t)
 							var stdin *os.File
 							var err error
 							switch source {
@@ -169,7 +172,7 @@ func TestParamsStdinShellLoop(t *testing.T) {
 		t.Run(command, func(t *testing.T) {
 			t.Parallel()
 			dagu := harness.NewRunner(t)
-			env := sharedEnv(t)
+			env := stdinEnv(t)
 			dagu.WriteFile("stdin_loop.txt", "first\nsecond\n")
 			dagu.RunWithEnv(env, "start", "--run-id="+stdinRunID(t),
 				"--params=command="+command+" prefix="+stdinRunID(t), "params_stdin_loop.yaml").ExpectExitCode(0)
@@ -196,7 +199,7 @@ func TestParamsStdinFragments(t *testing.T) {
 		t.Run(command, func(t *testing.T) {
 			t.Parallel()
 			dagu := harness.NewRunner(t)
-			env := sharedEnv(t)
+			env := stdinEnv(t)
 			stdin, writer, err := os.Pipe()
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = stdin.Close() })
@@ -236,7 +239,7 @@ func TestParamsStdinReadError(t *testing.T) {
 		t.Run(command, func(t *testing.T) {
 			t.Parallel()
 			dagu := harness.NewRunner(t)
-			env := sharedEnv(t)
+			env := stdinEnv(t)
 			stdin := unreadableStdin(t, dagu)
 			t.Cleanup(func() { require.NoError(t, stdin.Close()) })
 			result := dagu.RunWithStdin(env, stdin, command, "--params-stdin", "--run-id="+stdinRunID(t), stdinDAGFile)
@@ -265,7 +268,7 @@ func TestParamsStdinLimit(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					t.Parallel()
 					dagu := harness.NewRunner(t)
-					env := sharedEnv(t)
+					env := stdinEnv(t)
 					dagu.WriteFile("stdin.txt", input+strings.Repeat(" ", size-stdinSizeLimit))
 					stdin, err := os.Open(dagu.ProjectPath("stdin.txt")) // #nosec G304 -- isolated test input.
 					require.NoError(t, err)
@@ -286,17 +289,98 @@ func TestParamsStdinLimit(t *testing.T) {
 	}
 }
 
+func TestParamsStdinCharacterDevice(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{"start", "enqueue"} {
+		t.Run(command, func(t *testing.T) {
+			t.Parallel()
+			dagu := harness.NewRunner(t)
+			env := stdinEnv(t)
+			stdin, err := os.Open(os.DevNull)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, stdin.Close()) })
+			dagu.RunWithStdin(env, stdin, command, "--params-stdin", "--run-id="+stdinRunID(t), stdinDAGFile).ExpectExitCode(0)
+			expectStdinRun(t, dagu, env, command, "default")
+		})
+	}
+}
+
+func TestParamsStdinLimitOpenPipe(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{"start", "enqueue"} {
+		t.Run(command, func(t *testing.T) {
+			t.Parallel()
+			dagu := harness.NewRunner(t)
+			env := stdinEnv(t)
+			stdin, writer, err := os.Pipe()
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				require.NoError(t, writer.Close())
+				require.NoError(t, stdin.Close())
+			})
+			written := make(chan error, 1)
+			go func() {
+				_, err := io.WriteString(writer, strings.Repeat(" ", stdinSizeLimit+1))
+				written <- err
+			}()
+			// Leave the writer open: oversize rejection must not wait for EOF.
+			result := dagu.RunWithStdin(env, stdin, command, "--params-stdin", "--run-id="+stdinRunID(t), stdinDAGFile)
+			result.ExpectNonZeroExitCode()
+			result.ExpectStderrContains("params from stdin exceed", "1048576 byte limit")
+			require.NoError(t, <-written)
+			require.Empty(t, stdinHistory(t, dagu, env))
+			dagu.ExpectNoFile("params_stdin.out")
+		})
+	}
+}
+
 func TestParamsStdinFromRunID(t *testing.T) {
 	t.Parallel()
+	for _, input := range []string{"Populated", "Empty", "OpenPipe", "Disabled"} {
+		t.Run(input, func(t *testing.T) {
+			t.Parallel()
+			dagu := harness.NewRunner(t)
+			env := stdinEnv(t)
+			var stdin io.Reader = strings.NewReader("")
+			sourceID := "source-" + strings.TrimPrefix(stdinRunID(t), "Test")
+			flag := "--params-stdin"
+			switch input {
+			case "Populated":
+				stdin = strings.NewReader("value=stdin")
+			case "OpenPipe":
+				reader, writer, err := os.Pipe()
+				require.NoError(t, err)
+				t.Cleanup(func() {
+					require.NoError(t, writer.Close())
+					require.NoError(t, reader.Close())
+				})
+				stdin = reader
+			case "Disabled":
+				flag = "--params-stdin=false"
+				dagu.RunWithEnv(env, "start", "--run-id="+sourceID, "--params=value=saved", stdinDAGFile).ExpectExitCode(0)
+			}
+			result := dagu.RunWithStdin(env, stdin,
+				"start", flag, "--from-run-id="+sourceID, "--run-id="+stdinRunID(t), stdinDAGFile)
+			if input == "Disabled" {
+				result.ExpectExitCode(0)
+				expectStdinRun(t, dagu, env, "start", "saved")
+				return
+			}
+			result.ExpectNonZeroExitCode()
+			result.ExpectStderrContains("parameters cannot be provided when using --from-run-id")
+			require.Empty(t, stdinHistory(t, dagu, env))
+			dagu.ExpectNoFile("params_stdin.out")
+		})
+	}
+}
 
-	dagu := harness.NewRunner(t)
-	env := sharedEnv(t)
-	result := dagu.RunWithStdin(env, strings.NewReader("value=stdin"),
-		"start", "--params-stdin", "--from-run-id=source", "--run-id="+stdinRunID(t), stdinDAGFile)
-	result.ExpectNonZeroExitCode()
-	result.ExpectStderrContains("parameters cannot be provided when using --from-run-id")
-	require.Empty(t, stdinHistory(t, dagu, env))
-	dagu.ExpectNoFile("params_stdin.out")
+// Keep follow-up commands on the same run store and fixture catalog.
+func stdinEnv(t *testing.T) []string {
+	t.Helper()
+	return []string{
+		"DAGU_HOME=" + filepath.Join(t.TempDir(), "dagu"),
+		"DAGU_DAGS_DIR=.",
+	}
 }
 
 func expectStdinRun(t *testing.T, dagu *harness.Runner, env []string, command, value string) {
