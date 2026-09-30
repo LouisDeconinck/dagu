@@ -464,7 +464,7 @@ function Dashboard(): React.ReactElement | null {
       config.tzOffsetInSec !== undefined
         ? dayjs.unix(timestamp).utc().add(config.tzOffsetInSec, 'second')
         : dayjs.unix(timestamp);
-    return bound.format('YYYY-MM-DDTHH:mm');
+    return bound.format(RANGE_BOUND_FORMAT);
   };
 
   const parseRangeBound = (value: string): number | undefined => {

@@ -430,7 +430,9 @@ describe('DashboardPage', () => {
     'keeps custom wall-clock bounds in $tz',
     async ({ tz, tzOffsetInSec, offset }) => {
       const user = userEvent.setup();
-      renderPage({ configOverrides: { tz, tzOffsetInSec } });
+      const { unmount } = renderPage({
+        configOverrides: { tz, tzOffsetInSec },
+      });
       await user.click(screen.getByRole('combobox', { name: 'Date range' }));
       await user.click(await screen.findByRole('option', { name: 'Custom' }));
       const inputs = await screen.findAllByPlaceholderText(
@@ -438,20 +440,66 @@ describe('DashboardPage', () => {
       );
 
       fireEvent.change(inputs[0]!, {
-        target: { value: '2026-03-08 02:30:00' },
+        target: { value: '2026-03-08 02:30:45' },
       });
       fireEvent.change(inputs[1]!, {
-        target: { value: '2026-03-08 02:45:00' },
+        target: { value: '2026-03-08 02:45:12' },
       });
 
-      expect(latestDashboardQuery().fromDate).toBe(
-        Date.parse(`2026-03-08T02:30:00${offset}`) / 1000
+      const fromDate = Date.parse(`2026-03-08T02:30:45${offset}`) / 1000;
+      const toDate = Date.parse(`2026-03-08T02:45:12${offset}`) / 1000;
+      expect(latestDashboardQuery().fromDate).toBe(fromDate);
+      expect(latestDashboardQuery().toDate).toBe(toDate);
+      expect(inputs[0]).toHaveValue('2026-03-08 02:30:45');
+      expect(inputs[1]).toHaveValue('2026-03-08 02:45:12');
+
+      unmount();
+      renderPage({ configOverrides: { tz, tzOffsetInSec } });
+      const restoredInputs = await screen.findAllByPlaceholderText(
+        'YYYY-MM-DD HH:mm:ss'
       );
-      expect(latestDashboardQuery().toDate).toBe(
-        Date.parse(`2026-03-08T02:45:00${offset}`) / 1000
+      expect(latestDashboardQuery().fromDate).toBe(fromDate);
+      expect(latestDashboardQuery().toDate).toBe(toDate);
+      expect(restoredInputs[0]).toHaveValue('2026-03-08 02:30:45');
+      expect(restoredInputs[1]).toHaveValue('2026-03-08 02:45:12');
+    }
+  );
+
+  it.each(['fromDate', 'toDate'] as const)(
+    'keeps repeated second adjustments in %s',
+    async (bound) => {
+      const user = userEvent.setup();
+      renderPage();
+      await user.click(screen.getByRole('combobox', { name: 'Date range' }));
+      await user.click(await screen.findByRole('option', { name: 'Custom' }));
+      const inputs = await screen.findAllByPlaceholderText(
+        'YYYY-MM-DD HH:mm:ss'
       );
-      expect(inputs[0]).toHaveValue('2026-03-08 02:30:00');
-      expect(inputs[1]).toHaveValue('2026-03-08 02:45:00');
+      fireEvent.change(inputs[0]!, {
+        target: { value: '2026-09-01 12:30:59' },
+      });
+      fireEvent.change(inputs[1]!, {
+        target: { value: '2026-09-01 13:30:59' },
+      });
+      const initial = latestDashboardQuery()[bound]!;
+      const input = inputs[bound === 'fromDate' ? 0 : 1] as HTMLInputElement;
+      input.setSelectionRange(18, 18);
+
+      for (const [key, seconds] of [
+        ['ArrowUp', 1],
+        ['ArrowUp', 2],
+        ['ArrowDown', 1],
+        ['ArrowDown', 0],
+      ] as const) {
+        fireEvent.keyDown(input, { key });
+        expect(latestDashboardQuery()[bound]).toBe(initial + seconds);
+        expect(input).toHaveValue(
+          new Date((initial + seconds) * 1000)
+            .toISOString()
+            .slice(0, 19)
+            .replace('T', ' ')
+        );
+      }
     }
   );
 
@@ -489,10 +537,11 @@ describe('DashboardPage', () => {
     const [input] = await screen.findAllByPlaceholderText(
       'YYYY-MM-DD HH:mm:ss'
     );
-    fireEvent.change(input!, { target: { value: '2026-03-10 12:00:00' } });
+    fireEvent.change(input!, { target: { value: '2026-03-10 12:00:45' } });
     expect(latestDashboardQuery().fromDate).toBe(
-      new Date('2026-03-10T12:00:00').getTime() / 1000
+      new Date('2026-03-10T12:00:45').getTime() / 1000
     );
+    expect(input).toHaveValue('2026-03-10 12:00:45');
   });
 
   it('queries all history without framing the chart at the epoch', async () => {
