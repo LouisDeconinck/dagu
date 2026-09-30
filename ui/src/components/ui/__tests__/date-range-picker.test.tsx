@@ -44,13 +44,13 @@ describe('DateRangePicker', () => {
     expect(onFromDateChange).not.toHaveBeenCalled();
   });
 
-  it('reports a whole date once it parses', () => {
+  it('preserves seconds in typed input', () => {
     const onFromDateChange = vi.fn();
     const input = renderPicker(onFromDateChange);
 
-    fireEvent.change(input, { target: { value: '2026-08-15 09:30:00' } });
+    fireEvent.change(input, { target: { value: '2026-08-15 09:30:45' } });
 
-    expect(onFromDateChange).toHaveBeenCalledWith('2026-08-15T09:30');
+    expect(onFromDateChange).toHaveBeenCalledWith('2026-08-15T09:30:45');
   });
 
   it('preserves a wall-clock value during the browser DST gap', () => {
@@ -107,6 +107,6 @@ describe('DateRangePicker', () => {
 
     fireEvent.change(input, { target: { value: '2024-02-29 12:00:00' } });
 
-    expect(onFromDateChange).toHaveBeenCalledWith('2024-02-29T12:00');
+    expect(onFromDateChange).toHaveBeenCalledWith('2024-02-29T12:00:00');
   });
 });

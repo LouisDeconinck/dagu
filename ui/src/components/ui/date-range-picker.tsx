@@ -78,7 +78,7 @@ function CustomDateTimeInput({
     }
     const parsed = dayjs.utc(newValue, DISPLAY_FORMAT, true);
     if (parsed.isValid()) {
-      onChange(parsed.format(DATE_TIME_FORMAT));
+      onChange(parsed.format(DATE_TIME_SECONDS_FORMAT));
     }
   };
 
