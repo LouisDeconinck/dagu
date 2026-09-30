@@ -6,7 +6,6 @@
 package launcher_test
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,9 +16,34 @@ import (
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/procutil"
 	"github.com/dagucloud/dagu/v2/internal/launcher"
-	"github.com/dagucloud/dagu/v2/internal/test"
 	"github.com/stretchr/testify/require"
 )
+
+const (
+	processTreePIDEnv   = "DAGU_TEST_PROCESS_TREE_PID"
+	processTreeChildEnv = "DAGU_TEST_PROCESS_TREE_CHILD"
+)
+
+func TestProcessTreeHelper(t *testing.T) {
+	pidFile := os.Getenv(processTreePIDEnv)
+	if pidFile == "" {
+		return
+	}
+	if os.Getenv(processTreeChildEnv) == "true" {
+		require.NoError(t, os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600))
+	} else {
+		executable, err := os.Executable()
+		require.NoError(t, err)
+		child := exec.Command(executable, "-test.run=^TestProcessTreeHelper$") //nolint:gosec // Test launches its own executable.
+		child.Env = append(os.Environ(), processTreeChildEnv+"=true")
+		require.NoError(t, child.Start())
+		defer func() {
+			_ = child.Process.Kill()
+			_ = child.Wait()
+		}()
+	}
+	time.Sleep(time.Minute)
+}
 
 // Windows propagation uses forced process-tree termination for both signals.
 func TestPropagationStopsProcessTree(t *testing.T) {
@@ -28,10 +52,12 @@ func TestPropagationStopsProcessTree(t *testing.T) {
 			reg := launcher.NewProcessRegistry()
 			ctx := launcher.ContextWithProcessRegistry(t.Context(), reg)
 			pidFile := filepath.Join(t.TempDir(), "child-pid")
-			script := fmt.Sprintf(`$child = Start-Process powershell -NoNewWindow -PassThru -ArgumentList '-NoProfile -NonInteractive -Command "Start-Sleep -Seconds 60"'; [IO.File]::WriteAllText(%s, [string]$child.Id); Start-Sleep -Seconds 60`, test.PowerShellQuote(pidFile))
+			executable, err := os.Executable()
+			require.NoError(t, err)
 			result, err := launcher.StartProcess(ctx, launcher.CmdSpec{
-				Executable: "powershell",
-				Args:       []string{"-NoProfile", "-NonInteractive", "-Command", script},
+				Executable: executable,
+				Args:       []string{"-test.run=^TestProcessTreeHelper$"},
+				Env:        append(os.Environ(), processTreePIDEnv+"="+pidFile),
 			})
 			require.NoError(t, err)
 			var childPID int
