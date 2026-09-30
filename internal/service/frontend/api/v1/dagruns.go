@@ -56,6 +56,7 @@ var filenameUnsafeChars = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 
 const dagRunReadTimeout = 10 * time.Second
 const statusClientClosedRequest = 499
+const maxLogReadLines = 10000
 const artifactTextPreviewMaxBytes int64 = 2 * 1024 * 1024
 const artifactImagePreviewMaxBytes int64 = 5 * 1024 * 1024
 
@@ -150,15 +151,31 @@ func dagRunReadCanceledResponse(message string) api.Error {
 	}
 }
 
-// buildLogReadOptions constructs LogReadOptions from request parameters.
-func (a *API) buildLogReadOptions(head, tail, offset, limit *int) fileutil.LogReadOptions {
+// buildLogReadOptions enforces log limits regardless of schema validation.
+func (a *API) buildLogReadOptions(head, tail, offset, limit *int) (fileutil.LogReadOptions, error) {
+	for _, param := range []struct {
+		name  string
+		value *int
+	}{
+		{"head", head},
+		{"tail", tail},
+		{"limit", limit},
+	} {
+		if param.value != nil && (*param.value < 1 || *param.value > maxLogReadLines) {
+			return fileutil.LogReadOptions{}, &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Code:       api.ErrorCodeBadRequest,
+				Message:    fmt.Sprintf("%s must be between 1 and %d", param.name, maxLogReadLines),
+			}
+		}
+	}
 	return fileutil.LogReadOptions{
 		Head:     valueOf(head),
 		Tail:     valueOf(tail),
 		Offset:   valueOf(offset),
 		Limit:    valueOf(limit),
 		Encoding: a.logEncodingCharset,
-	}
+	}, nil
 }
 
 // ExecuteDAGRunFromSpec implements api.StrictServerInterface.
@@ -862,7 +879,10 @@ func (a *API) GetDAGRunLog(ctx context.Context, request api.GetDAGRunLogRequestO
 		return nil, err
 	}
 
-	options := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	options, err := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	if err != nil {
+		return nil, err
+	}
 	content, lineCount, totalLines, hasMore, isEstimate, err := fileutil.ReadLogContent(dagStatus.Log, options)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1101,7 +1121,10 @@ func (a *API) GetDAGRunStepLog(ctx context.Context, request api.GetDAGRunStepLog
 		}, nil
 	}
 
-	options := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	options, err := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	if err != nil {
+		return nil, err
+	}
 	logFile := selectLogFile(node, *request.Params.Stream)
 
 	content, lineCount, totalLines, hasMore, isEstimate, err := fileutil.ReadLogContent(logFile, options)
@@ -2468,7 +2491,10 @@ func (a *API) GetSubDAGRunLog(ctx context.Context, request api.GetSubDAGRunLogRe
 		return nil, err
 	}
 
-	options := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	options, err := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	if err != nil {
+		return nil, err
+	}
 	content, lineCount, totalLines, hasMore, isEstimate, err := fileutil.ReadLogContent(dagStatus.Log, options)
 	if err != nil {
 		if strings.Contains(err.Error(), "file not found") {
@@ -2636,7 +2662,10 @@ func (a *API) GetSubDAGRunStepLog(ctx context.Context, request api.GetSubDAGRunS
 		}, nil
 	}
 
-	options := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	options, err := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	if err != nil {
+		return nil, err
+	}
 	logFile := selectLogFile(node, *request.Params.Stream)
 
 	content, lineCount, totalLines, hasMore, isEstimate, err := fileutil.ReadLogContent(logFile, options)
@@ -4431,7 +4460,7 @@ func (a *API) getDAGRunLogsData(ctx context.Context, identifier string) (DAGRunL
 	// Parse tail parameter with bounds validation (1-10000, default 500)
 	tail := 500
 	if queryParams != nil {
-		tail = clampInt(parseIntParam(queryParams.Get("tail"), 500), 1, 10000)
+		tail = clampInt(parseIntParam(queryParams.Get("tail"), 500), 1, maxLogReadLines)
 	}
 
 	options := fileutil.LogReadOptions{
