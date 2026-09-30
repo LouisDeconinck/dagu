@@ -2698,4 +2698,26 @@ signalHandling:
 		cfg := testLoad(t, WithAppHomeDir(homeDir))
 		assert.True(t, cfg.SignalHandling.EnablePropagation)
 	})
+
+	for _, camelCase := range []bool{false, true} {
+		t.Run(fmt.Sprintf("EnvironmentDisablesAdmin/%t", camelCase), func(t *testing.T) {
+			homeDir := t.TempDir()
+			yaml := "signal_handling:\n  enable_propagation: true\n"
+			if camelCase {
+				yaml = "signalHandling:\n  enablePropagation: true\n"
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(homeDir, "admin.yaml"), []byte(yaml), 0600))
+			t.Setenv("DAGU_SIGNAL_PROPAGATION", "false")
+			cfg := testLoad(t, WithAppHomeDir(homeDir))
+			assert.False(t, cfg.SignalHandling.EnablePropagation)
+		})
+	}
+
+	t.Run("CanonicalDisablesLegacy", func(t *testing.T) {
+		homeDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(homeDir, "admin.yaml"), []byte("signalHandling:\n  enablePropagation: true\n"), 0600))
+		require.NoError(t, os.WriteFile(filepath.Join(homeDir, "config.yaml"), []byte("signal_handling:\n  enable_propagation: false\n"), 0600))
+		cfg := testLoad(t, WithAppHomeDir(homeDir))
+		assert.False(t, cfg.SignalHandling.EnablePropagation)
+	})
 }

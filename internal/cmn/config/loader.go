@@ -1722,8 +1722,11 @@ func (l *ConfigLoader) loadExecutionModeConfig(cfg *Config, _ Definition) {
 // spelling "signalHandling.enablePropagation" is still accepted when it comes
 // from admin.yaml, which bypasses the legacy key check for compatibility.
 func (l *ConfigLoader) loadSignalHandlingConfig(cfg *Config, _ Definition) {
-	cfg.SignalHandling.EnablePropagation = l.v.GetBool("signal_handling.enable_propagation") ||
-		l.v.GetBool("signalhandling.enablepropagation")
+	if l.v.IsSet("signal_handling.enable_propagation") {
+		cfg.SignalHandling.EnablePropagation = l.v.GetBool("signal_handling.enable_propagation")
+		return
+	}
+	cfg.SignalHandling.EnablePropagation = l.v.GetBool("signalhandling.enablepropagation")
 }
 
 func (l *ConfigLoader) loadCacheConfig(cfg *Config, def Definition) {
