@@ -574,7 +574,9 @@ function Dashboard(): React.ReactElement | null {
         earliest = timestamp;
       }
     }
-    return earliest === undefined ? undefined : { startTimestamp: earliest };
+    return earliest === undefined
+      ? undefined
+      : { startTimestamp: earliest, endTimestamp: dateRange.endDate };
   }, [dagRunsList, dateRange.endDate, dateRange.startDate]);
 
   React.useEffect(() => {

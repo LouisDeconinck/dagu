@@ -466,6 +466,36 @@ describe('DashboardPage', () => {
     });
   });
 
+  it('keeps the timeline end after clearing a custom start', async () => {
+    const user = userEvent.setup();
+    mockDAGInventory(['etl'], 1);
+    mockDAGRuns([historicalRun]);
+    renderPage();
+
+    await user.click(screen.getByRole('combobox', { name: 'Date range' }));
+    await user.click(await screen.findByRole('option', { name: 'Custom' }));
+    const inputs = await screen.findAllByPlaceholderText('YYYY-MM-DD HH:mm:ss');
+    fireEvent.change(inputs[0]!, {
+      target: { value: '2026-04-01 00:00:00' },
+    });
+    fireEvent.change(inputs[1]!, {
+      target: { value: '2026-05-01 00:00:00' },
+    });
+    const endTimestamp = dayjs('2026-05-01T00:00').utcOffset(0, true).unix();
+    expect(dashboardTimeChartMock.mock.lastCall?.[0].selectedDate).toEqual({
+      startTimestamp: dayjs('2026-04-01T00:00').utcOffset(0, true).unix(),
+      endTimestamp,
+    });
+
+    fireEvent.change(inputs[0]!, { target: { value: '' } });
+    expect(latestDashboardQuery().fromDate).toBeUndefined();
+    expect(latestDashboardQuery().toDate).toBe(endTimestamp);
+    expect(dashboardTimeChartMock.mock.lastCall?.[0].selectedDate).toEqual({
+      startTimestamp: dayjs(historicalRun.startedAt).unix(),
+      endTimestamp,
+    });
+  });
+
   // A preset means "relative to now", so a session left open across a date
   // boundary must not keep querying the range it computed back then.
   it('resolves a stored date preset relative to now', async () => {
