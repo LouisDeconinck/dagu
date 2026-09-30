@@ -101,3 +101,9 @@ func TestProcessesWithoutRegistryAreNotPropagated(t *testing.T) {
 		_ = proc.Kill()
 	}
 }
+
+func TestRunWithCanceledRegistryContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(launcher.ContextWithProcessRegistry(t.Context(), launcher.NewProcessRegistry()))
+	cancel()
+	require.ErrorIs(t, launcher.Run(ctx, quickSpec()), context.Canceled)
+}

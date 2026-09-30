@@ -1,0 +1,57 @@
+// Copyright (C) 2026 Yota Hamada
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+package cmd
+
+import (
+	"context"
+	"os"
+	"os/signal"
+
+	"github.com/dagucloud/dagu/v2/internal/cmn/signalctx"
+)
+
+type shutdownSignalError struct {
+	signal os.Signal
+}
+
+func (e shutdownSignalError) Error() string {
+	return e.signal.String() + " signal received"
+}
+
+func (e shutdownSignalError) Is(target error) bool {
+	return target == context.Canceled
+}
+
+func (e shutdownSignalError) As(target any) bool {
+	sig, ok := target.(*os.Signal)
+	if ok {
+		*sig = e.signal
+	}
+	return ok
+}
+
+// notifyShutdownContext preserves the received signal as the cancellation
+// cause so services can forward it even after their context becomes done.
+func notifyShutdownContext(parent context.Context, propagate bool, signals ...os.Signal) (context.Context, context.CancelFunc) {
+	if !propagate {
+		return signal.NotifyContext(parent, signals...)
+	}
+	ctx, cancel := context.WithCancelCause(parent)
+	if signalctx.OSSignalsDisabled(parent) {
+		return ctx, func() { cancel(nil) }
+	}
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, signals...)
+	go func() {
+		select {
+		case sig := <-quit:
+			cancel(shutdownSignalError{signal: sig})
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, func() {
+		cancel(nil)
+		signal.Stop(quit)
+	}
+}

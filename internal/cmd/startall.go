@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/signal"
 	"sync"
 	"syscall"
 	"time"
@@ -108,7 +107,7 @@ func runStartAll(ctx *Context, _ []string) error {
 
 	// Create a context that will be cancelled on interrupt signal.
 	// This must be created BEFORE server initialization so auth provider init can be cancelled.
-	signalCtx, stop := signal.NotifyContext(ctx.Context, syscall.SIGINT, syscall.SIGTERM)
+	signalCtx, stop := notifyShutdownContext(ctx.Context, ctx.Config.SignalHandling.EnablePropagation, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	// Create a signal-aware context for services (used for auth init and all service operations)

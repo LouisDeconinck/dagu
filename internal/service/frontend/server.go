@@ -1662,7 +1662,7 @@ func runShutdownSequence(shutdownCtx context.Context, actions shutdownActions) e
 }
 
 func (srv *Server) setupGracefulShutdown(ctx context.Context) {
-	received := os.Interrupt
+	var received os.Signal
 	if signalctx.OSSignalsDisabled(ctx) {
 		<-ctx.Done()
 		logger.Info(ctx, "Context done, shutting down server")
@@ -1680,9 +1680,12 @@ func (srv *Server) setupGracefulShutdown(ctx context.Context) {
 		}
 	}
 
-	// Forward the shutdown signal to DAG-run subprocesses launched through
-	// this server when signal propagation is enabled; a no-op otherwise.
-	launcher.PropagateSignal(ctx, received)
+	if received == nil {
+		_ = errors.As(context.Cause(ctx), &received)
+	}
+	if received != nil {
+		launcher.PropagateSignal(ctx, received)
+	}
 
 	shutdownCtx, cancel := newGracefulShutdownContext(ctx)
 	defer cancel()

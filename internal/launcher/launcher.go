@@ -501,6 +501,11 @@ func newCommand(ctx context.Context, spec CmdSpec, withContext bool) (*exec.Cmd,
 	var cmd *exec.Cmd
 	if withContext {
 		cmd = exec.CommandContext(ctx, spec.Executable, spec.Args...)
+		if ProcessRegistryFrom(ctx) != nil {
+			// Registered runs stop through signal propagation so they can
+			// finish cleanup and persist their terminal status.
+			cmd.Cancel = nil
+		}
 	} else {
 		cmd = exec.Command(spec.Executable, spec.Args...)
 	}
