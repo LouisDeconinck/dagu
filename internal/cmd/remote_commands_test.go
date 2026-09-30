@@ -9,6 +9,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -208,69 +211,156 @@ func TestRemoteStartSendsSteps(t *testing.T) {
 	assert.Equal(t, map[string]map[string]string{"extract": {"rows": "3"}}, *body.Outputs)
 }
 
-func TestRemoteStartReadsParamsFromStdin(t *testing.T) {
-	pipeStdin(t, "P1=foo P2=bar")
-
-	bodies := make(chan api.ExecuteDAGJSONBody, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet {
-			_, _ = w.Write([]byte(`{"fileName":"etl"}`))
-			return
-		}
-		var body api.ExecuteDAGJSONBody
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-		bodies <- body
-		_, _ = w.Write([]byte(`{"dagRunId":"run-1"}`))
-	}))
-	defer server.Close()
-
-	command := &cobra.Command{Use: "start"}
-	initFlags(command, startFlags...)
-	ctx := &Context{
-		Context: context.Background(),
-		Command: command,
-		Remote:  &remoteClient{baseURL: server.URL, client: server.Client()},
+// These cases replace process stdin and must remain sequential.
+func TestRemoteRunParams(t *testing.T) {
+	commands := []struct {
+		name  string
+		flags []commandLineFlag
+		run   func(*Context, []string) error
+	}{
+		{name: "start", flags: startFlags, run: remoteRunStart},
+		{name: "enqueue", flags: enqueueFlags, run: remoteRunEnqueue},
 	}
-
-	require.NoError(t, remoteRunStart(ctx, []string{"etl"}))
-
-	body := <-bodies
-	require.NotNil(t, body.Params)
-	assert.Equal(t, "P1=foo P2=bar", *body.Params)
-}
-
-func TestRemoteStartParamsFlagBeatsStdin(t *testing.T) {
-	pipeStdin(t, "P1=stdin")
-
-	bodies := make(chan api.ExecuteDAGJSONBody, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet {
-			_, _ = w.Write([]byte(`{"fileName":"etl"}`))
-			return
-		}
-		var body api.ExecuteDAGJSONBody
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
-		bodies <- body
-		_, _ = w.Write([]byte(`{"dagRunId":"run-1"}`))
-	}))
-	defer server.Close()
-
-	command := &cobra.Command{Use: "start"}
-	initFlags(command, startFlags...)
-	require.NoError(t, command.Flags().Set("params", "P1=flag"))
-	ctx := &Context{
-		Context: context.Background(),
-		Command: command,
-		Remote:  &remoteClient{baseURL: server.URL, client: server.Client()},
+	oversizedInput := strings.Repeat("x", maxStdinParamsSize+1)
+	tests := []struct {
+		name       string
+		args       []string
+		stdin      string
+		wantParams *string
+		wantErr    string
+	}{
+		{
+			name:       "NamedStdin",
+			args:       []string{"etl"},
+			stdin:      "P1=foo P2=bar",
+			wantParams: new("P1=foo P2=bar"),
+		},
+		{
+			name:       "FlagBeatsStdin",
+			args:       []string{"--params=P1=flag", "etl"},
+			stdin:      "P1=stdin",
+			wantParams: new("P1=flag"),
+		},
+		{
+			name:  "EmptyFlagBeatsStdin",
+			args:  []string{"--params=", "etl"},
+			stdin: "P1=stdin",
+		},
+		{
+			name:       "DashBeatsFlagAndStdin",
+			args:       []string{"--params=P1=flag", "etl", "--", "P1=dash"},
+			stdin:      "P1=stdin",
+			wantParams: new("P1=dash"),
+		},
+		{
+			name:  "EmptyDashBeatsFlagAndStdin",
+			args:  []string{"--params=P1=flag", "etl", "--"},
+			stdin: "P1=stdin",
+		},
+		{
+			name:  "EmptyFlagSkipsOversizedStdin",
+			args:  []string{"--params=", "etl"},
+			stdin: oversizedInput,
+		},
+		{
+			name:       "FlagSkipsOversizedStdin",
+			args:       []string{"--params=P1=flag", "etl"},
+			stdin:      oversizedInput,
+			wantParams: new("P1=flag"),
+		},
+		{
+			name:       "DashSkipsOversizedStdin",
+			args:       []string{"etl", "--", "P1=dash"},
+			stdin:      oversizedInput,
+			wantParams: new("P1=dash"),
+		},
+		{
+			name:    "OversizedStdinRejected",
+			args:    []string{"etl"},
+			stdin:   oversizedInput,
+			wantErr: "params from stdin exceed",
+		},
+		{
+			name:  "WhitespaceStdin",
+			args:  []string{"etl"},
+			stdin: " \n\t\n",
+		},
+		{
+			name:       "JSONStdin",
+			args:       []string{"etl"},
+			stdin:      `{"P1":"foo","P2":"bar"}`,
+			wantParams: new(`{"P1":"foo","P2":"bar"}`),
+		},
 	}
+	for _, commandSpec := range commands {
+		t.Run(commandSpec.name, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					if len(tt.stdin) > maxStdinParamsSize {
+						// Files avoid blocking on pipe capacity before the command reads.
+						path := filepath.Join(t.TempDir(), "params.txt")
+						require.NoError(t, os.WriteFile(path, []byte(tt.stdin), 0o600))
+						file, err := os.Open(path)
+						require.NoError(t, err)
+						original := os.Stdin
+						os.Stdin = file
+						t.Cleanup(func() {
+							os.Stdin = original
+							require.NoError(t, file.Close())
+						})
+					} else {
+						pipeStdin(t, tt.stdin)
+					}
 
-	require.NoError(t, remoteRunStart(ctx, []string{"etl"}))
+					requests := make(chan *string, 1)
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						if r.Method == http.MethodGet {
+							_, _ = w.Write([]byte(`{"fileName":"etl"}`))
+							return
+						}
+						var body struct {
+							Params *string `json:"params"`
+						}
+						if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) {
+							w.WriteHeader(http.StatusBadRequest)
+							return
+						}
+						requests <- body.Params
+						_, _ = w.Write([]byte(`{"dagRunId":"run-1"}`))
+					}))
+					defer server.Close()
 
-	body := <-bodies
-	require.NotNil(t, body.Params)
-	assert.Equal(t, "P1=flag", *body.Params)
+					command := &cobra.Command{Use: commandSpec.name}
+					initFlags(command, commandSpec.flags...)
+					require.NoError(t, command.Flags().Parse(tt.args))
+					ctx := &Context{
+						Context: context.Background(),
+						Command: command,
+						Remote:  &remoteClient{baseURL: server.URL, client: server.Client()},
+					}
+
+					err := commandSpec.run(ctx, command.Flags().Args())
+					if tt.wantErr != "" {
+						require.ErrorContains(t, err, tt.wantErr)
+						select {
+						case <-requests:
+							t.Fatal("run submitted after invalid stdin")
+						default:
+						}
+						return
+					}
+					require.NoError(t, err)
+					select {
+					case params := <-requests:
+						assert.Equal(t, tt.wantParams, params)
+					default:
+						t.Fatal("run was not submitted")
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestWaitForRemoteStopHonorsContextCancellation(t *testing.T) {

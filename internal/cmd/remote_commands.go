@@ -210,23 +210,16 @@ func remoteResolveDAG(ctx *Context, arg string) (*api.DAGFile, error) {
 // remoteRunParams resolves run parameters for remote commands: "--" arguments
 // first, then --params, then piped or redirected stdin when neither is given.
 func remoteRunParams(ctx *Context, args []string) (string, error) {
-	params := ""
-	hasParams := ctx.Command.ArgsLenAtDash() >= 0
-	if hasParams {
-		params = joinNonEmpty(args[1:])
+	if argsLenAtDash := ctx.Command.ArgsLenAtDash(); argsLenAtDash >= 0 {
+		return joinNonEmpty(args[argsLenAtDash:]), nil
 	}
-	if flagParams, _ := ctx.StringParam("params"); flagParams != "" {
-		params = flagParams
-		hasParams = true
+	if ctx.Command.Flags().Changed("params") {
+		return ctx.StringParam("params")
 	}
-	if !hasParams && stdinHasParamsInput() {
-		var err error
-		params, err = readStdinParams()
-		if err != nil {
-			return "", err
-		}
+	if !stdinHasParamsInput() {
+		return "", nil
 	}
-	return params, nil
+	return readStdinParams()
 }
 
 func remoteRunStart(ctx *Context, args []string) error {
