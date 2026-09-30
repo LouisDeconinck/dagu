@@ -74,7 +74,7 @@ steps:
 	pipeCommandStdin(t, "s1 s2\n")
 
 	th.RunCommand(t, cmd.Enqueue(), test.CmdTest{
-		Args:        []string{"enqueue", dag.Location},
+		Args:        []string{"enqueue", "--params-stdin", dag.Location},
 		ExpectedOut: []string{`params="[1=s1 2=s2]`},
 	})
 }

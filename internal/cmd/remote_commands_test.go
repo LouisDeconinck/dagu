@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -230,86 +231,113 @@ func TestRemoteRunParams(t *testing.T) {
 		wantParams *string
 		wantValues []string
 		wantErr    string
+		wantUnread bool
+		startOnly  bool
 	}{
 		{
-			name:       "NamedStdin",
+			name:       "InheritedStdinIgnored",
 			args:       []string{"etl"},
+			stdin:      "P1=stdin",
+			wantUnread: true,
+		},
+		{
+			name:       "DisabledStdinIgnored",
+			args:       []string{"--params-stdin=false", "etl"},
+			stdin:      "P1=stdin",
+			wantUnread: true,
+		},
+		{
+			name:       "InheritedOversizedStdinIgnored",
+			args:       []string{"etl"},
+			stdin:      oversizedInput,
+			wantUnread: true,
+		},
+		{
+			name:       "NamedStdin",
+			args:       []string{"--params-stdin", "etl"},
 			stdin:      "P1=foo P2=bar",
 			wantParams: new("P1=foo P2=bar"),
 		},
 		{
+			name:      "FromRunIDRejectsStdin",
+			args:      []string{"--params-stdin", "--from-run-id=source", "etl"},
+			stdin:     "P1=stdin",
+			wantErr:   "parameters cannot be provided when using --from-run-id",
+			startOnly: true,
+		},
+		{
 			name:       "FlagBeatsStdin",
-			args:       []string{"--params=P1=flag", "etl"},
+			args:       []string{"--params-stdin", "--params=P1=flag", "etl"},
 			stdin:      "P1=stdin",
 			wantParams: new("P1=flag"),
 		},
 		{
 			name:  "EmptyFlagBeatsStdin",
-			args:  []string{"--params=", "etl"},
+			args:  []string{"--params-stdin", "--params=", "etl"},
 			stdin: "P1=stdin",
 		},
 		{
 			name:       "DashBeatsFlagAndStdin",
-			args:       []string{"--params=P1=flag", "etl", "--", "P1=dash"},
+			args:       []string{"--params-stdin", "--params=P1=flag", "etl", "--", "P1=dash"},
 			stdin:      "P1=stdin",
 			wantParams: new("P1=dash"),
 		},
 		{
 			name:  "EmptyDashBeatsFlagAndStdin",
-			args:  []string{"--params=P1=flag", "etl", "--"},
+			args:  []string{"--params-stdin", "--params=P1=flag", "etl", "--"},
 			stdin: "P1=stdin",
 		},
 		{
 			name:  "EmptyFlagSkipsOversizedStdin",
-			args:  []string{"--params=", "etl"},
+			args:  []string{"--params-stdin", "--params=", "etl"},
 			stdin: oversizedInput,
 		},
 		{
 			name:       "FlagSkipsOversizedStdin",
-			args:       []string{"--params=P1=flag", "etl"},
+			args:       []string{"--params-stdin", "--params=P1=flag", "etl"},
 			stdin:      oversizedInput,
 			wantParams: new("P1=flag"),
 		},
 		{
 			name:       "DashSkipsOversizedStdin",
-			args:       []string{"etl", "--", "P1=dash"},
+			args:       []string{"--params-stdin", "etl", "--", "P1=dash"},
 			stdin:      oversizedInput,
 			wantParams: new("P1=dash"),
 		},
 		{
 			name:    "OversizedStdinRejected",
-			args:    []string{"etl"},
+			args:    []string{"--params-stdin", "etl"},
 			stdin:   oversizedInput,
 			wantErr: "params from stdin exceed",
 		},
 		{
 			name:  "WhitespaceStdin",
-			args:  []string{"etl"},
+			args:  []string{"--params-stdin", "etl"},
 			stdin: " \n\t\n",
 		},
 		{
 			name:       "JSONStdin",
-			args:       []string{"etl"},
+			args:       []string{"--params-stdin", "etl"},
 			stdin:      `{"P1":"foo","P2":"bar"}`,
 			wantParams: new(`{"P1":"foo","P2":"bar"}`),
 		},
 		{
 			name:       "QuotedStdin",
-			args:       []string{"etl"},
+			args:       []string{"--params-stdin", "etl"},
 			stdin:      "  \"P1=foo P2=bar\"\n",
 			wantParams: new("P1=foo P2=bar"),
 			wantValues: []string{"P1=foo", "P2=bar"},
 		},
 		{
 			name:       "QuotedFlag",
-			args:       []string{`--params="P1=foo P2=bar"`, "etl"},
+			args:       []string{"--params-stdin", `--params="P1=foo P2=bar"`, "etl"},
 			stdin:      "P1=stdin",
 			wantParams: new("P1=foo P2=bar"),
 			wantValues: []string{"P1=foo", "P2=bar"},
 		},
 		{
 			name:       "QuotedValueStdin",
-			args:       []string{"etl"},
+			args:       []string{"--params-stdin", "etl"},
 			stdin:      `"\"hello world\""`,
 			wantParams: new(`"hello world"`),
 			wantValues: []string{"P1=default1", "P2=default2", "1=hello world"},
@@ -319,6 +347,9 @@ func TestRemoteRunParams(t *testing.T) {
 		t.Run(commandSpec.name, func(t *testing.T) {
 			for _, tt := range tests {
 				t.Run(tt.name, func(t *testing.T) {
+					if tt.startOnly && commandSpec.name != "start" {
+						t.Skip("enqueue does not support --from-run-id")
+					}
 					if len(tt.stdin) > maxStdinParamsSize {
 						// Files avoid blocking on pipe capacity before the command reads.
 						path := filepath.Join(t.TempDir(), "params.txt")
@@ -374,6 +405,11 @@ func TestRemoteRunParams(t *testing.T) {
 						return
 					}
 					require.NoError(t, err)
+					if tt.wantUnread {
+						remaining, err := io.ReadAll(os.Stdin)
+						require.NoError(t, err)
+						assert.Equal(t, tt.stdin, string(remaining))
+					}
 					select {
 					case params := <-requests:
 						if tt.wantParams == nil {

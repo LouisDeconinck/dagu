@@ -14,13 +14,20 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/spec"
 )
 
-// stdinHasParamsInput reports whether stdin is a pipe or a redirected file, so
-// a run may read parameters from it. Terminals and other character devices
-// (e.g. /dev/null) are never treated as params input, keeping non-piped runs
-// free of stdin reads.
-func stdinHasParamsInput() bool {
+// stdinHasParamsInput reports whether stdin parameters were requested and stdin
+// is a pipe or redirected file. Character devices are never parameter input.
+func stdinHasParamsInput(ctx *Context) bool {
+	if !stdinParamsRequested(ctx) {
+		return false
+	}
 	info, err := os.Stdin.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice == 0
+}
+
+// stdinParamsRequested reports whether stdin was selected as a parameter source.
+func stdinParamsRequested(ctx *Context) bool {
+	enabled, err := ctx.Command.Flags().GetBool(paramsStdinFlag.name)
+	return err == nil && enabled
 }
 
 // maxStdinParamsSize bounds the bytes read from stdin as run params, so a

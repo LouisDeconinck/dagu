@@ -97,6 +97,12 @@ var (
 		usage:     "Parameters to pass to the dag-run (overrides DAG defaults; supports positional values and key=value pairs, e.g., P1=foo P2=bar)",
 	}
 
+	paramsStdinFlag = commandLineFlag{
+		name:   "params-stdin",
+		usage:  "Read run parameters from piped or redirected stdin (up to 1 MiB; -- and --params take precedence)",
+		isBool: true,
+	}
+
 	nameFlag = commandLineFlag{
 		name:      "name",
 		shorthand: "N",

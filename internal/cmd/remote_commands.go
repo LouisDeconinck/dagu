@@ -209,7 +209,7 @@ func remoteResolveDAG(ctx *Context, arg string) (*api.DAGFile, error) {
 }
 
 // remoteRunParams resolves run parameters for remote commands: "--" arguments
-// first, then --params, then piped or redirected stdin when neither is given.
+// first, then --params, then stdin when --params-stdin is enabled.
 func remoteRunParams(ctx *Context, args []string) (string, error) {
 	if argsLenAtDash := ctx.Command.ArgsLenAtDash(); argsLenAtDash >= 0 {
 		return joinNonEmpty(args[argsLenAtDash:]), nil
@@ -217,7 +217,7 @@ func remoteRunParams(ctx *Context, args []string) (string, error) {
 	if ctx.Command.Flags().Changed("params") {
 		return ctx.StringParam("params")
 	}
-	if !stdinHasParamsInput() {
+	if !stdinHasParamsInput(ctx) {
 		return "", nil
 	}
 	params, err := readStdinParams()
@@ -243,7 +243,7 @@ func remoteRunStart(ctx *Context, args []string) error {
 		if err := validateRunID(fromRunID); err != nil {
 			return fmt.Errorf("invalid from-run-id: %w", err)
 		}
-		if len(args) != 1 || ctx.Command.Flags().Changed("params") || ctx.Command.ArgsLenAtDash() != -1 {
+		if len(args) != 1 || ctx.Command.Flags().Changed("params") || ctx.Command.ArgsLenAtDash() != -1 || stdinParamsRequested(ctx) {
 			return fmt.Errorf("parameters cannot be provided when using --from-run-id")
 		}
 		dag, err := remoteResolveDAG(ctx, args[0])

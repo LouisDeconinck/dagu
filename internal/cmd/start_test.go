@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -256,6 +257,37 @@ steps:
 	})
 }
 
+// Inherited stdin must remain available to the caller, such as a shell loop.
+// These cases replace process stdin and must remain sequential.
+func TestRunPreservesStdin(t *testing.T) {
+	for _, commandName := range []string{"start", "enqueue"} {
+		t.Run(commandName, func(t *testing.T) {
+			th := test.SetupCommand(t)
+			dag := th.DAG(t, `params: VALUE=default
+steps:
+  - name: print
+    run: echo $VALUE
+`)
+			const input = "VALUE=from-stdin\n"
+			pipeCommandStdin(t, input)
+			command := cmd.Start()
+			if commandName == "enqueue" {
+				command = cmd.Enqueue()
+			}
+			th.RunCommand(t, command, test.CmdTest{
+				Args: []string{commandName, dag.Location},
+			})
+
+			status, err := th.DAGRunMgr.GetLatestStatus(th.Context, dag.DAG)
+			require.NoError(t, err)
+			require.Equal(t, "VALUE=default", status.Params)
+			remaining, err := io.ReadAll(os.Stdin)
+			require.NoError(t, err)
+			require.Equal(t, input, string(remaining))
+		})
+	}
+}
+
 // TestCmdStart_StdinParams replaces the process-global os.Stdin, so the test
 // and its subtests must stay sequential to avoid feeding other commands.
 func TestCmdStart_StdinParams(t *testing.T) {
@@ -276,7 +308,7 @@ steps:
 		pipeCommandStdin(t, "s1 s2\n")
 
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args:        []string{"start", dag.Location},
+			Args:        []string{"start", "--params-stdin", dag.Location},
 			ExpectedOut: []string{`params="[1=s1 2=s2]`},
 		})
 		assertLatestParams(t, th, dag.Location, "1=s1 2=s2")
@@ -288,7 +320,7 @@ steps:
 		pipeCommandStdin(t, "KEY1=v1\nKEY2=v2\n")
 
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args: []string{"start", dag.Location},
+			Args: []string{"start", "--params-stdin", dag.Location},
 		})
 		assertLatestParams(t, th, dag.Location, "KEY1=v1 KEY2=v2")
 	})
@@ -303,7 +335,7 @@ steps:
 		pipeCommandStdin(t, `{"KEY":"v1"}`)
 
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args: []string{"start", dag.Location},
+			Args: []string{"start", "--params-stdin", dag.Location},
 		})
 		assertLatestParams(t, th, dag.Location, "KEY=v1")
 	})
@@ -314,7 +346,7 @@ steps:
 		pipeCommandStdin(t, "")
 
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args: []string{"start", dag.Location},
+			Args: []string{"start", "--params-stdin", dag.Location},
 		})
 		assertLatestParams(t, th, dag.Location, "KEY1=default1 KEY2=default2")
 	})
@@ -325,7 +357,7 @@ steps:
 		pipeCommandStdin(t, "  \n\t\n")
 
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args: []string{"start", dag.Location},
+			Args: []string{"start", "--params-stdin", dag.Location},
 		})
 		assertLatestParams(t, th, dag.Location, "KEY1=default1 KEY2=default2")
 	})
@@ -336,7 +368,7 @@ steps:
 		pipeCommandStdin(t, "s1 s2\n")
 
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args: []string{"start", `--params="c1 c2"`, dag.Location},
+			Args: []string{"start", "--params-stdin", `--params="c1 c2"`, dag.Location},
 		})
 		assertLatestParams(t, th, dag.Location, "1=c1 2=c2")
 	})
@@ -347,7 +379,7 @@ steps:
 		pipeCommandStdin(t, "s1 s2\n")
 
 		th.RunCommand(t, cmd.Start(), test.CmdTest{
-			Args: []string{"start", dag.Location, "--", "d1", "d2"},
+			Args: []string{"start", "--params-stdin", dag.Location, "--", "d1", "d2"},
 		})
 		assertLatestParams(t, th, dag.Location, "1=d1 2=d2")
 	})
@@ -358,7 +390,7 @@ steps:
 		pipeCommandStdin(t, "one two three\n")
 
 		err := th.RunCommandWithError(t, cmd.Start(), test.CmdTest{
-			Args: []string{"start", dag.Location},
+			Args: []string{"start", "--params-stdin", dag.Location},
 		})
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "too many positional params: expected at most 2, got 3")
@@ -395,6 +427,15 @@ func assertLatestParams(t *testing.T, th test.Command, dagPath, want string) {
 }
 
 func TestCmdStart_FromRunID(t *testing.T) {
+	t.Run("RejectsStdinParams", func(t *testing.T) {
+		t.Parallel()
+		th := test.SetupCommand(t)
+		err := th.RunCommandWithError(t, cmd.Start(), test.CmdTest{
+			Args: []string{"start", "--from-run-id=source", "--params-stdin", "dag.yaml"},
+		})
+		require.ErrorContains(t, err, "parameters cannot be provided when using --from-run-id")
+	})
+
 	t.Run("ReschedulesWithStoredParameters", func(t *testing.T) {
 		t.Parallel()
 

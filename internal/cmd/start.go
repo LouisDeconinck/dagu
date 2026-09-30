@@ -51,9 +51,11 @@ A DAG definition is a blueprint that defines the DAG structure. This command cre
 instance with a unique DAG-run ID.
 
 Parameters after the "--" separator are passed as execution parameters (either positional or key=value pairs).
-When neither "--" nor --params is given, piped or redirected stdin supplies the parameters
-(e.g. 'echo "P1=foo P2=bar" | dagu start my_dag'). Command-line parameters take precedence:
-stdin is not read when params are provided on the command line.
+With --params-stdin, piped or redirected stdin supplies the parameters
+(e.g. 'echo "P1=foo P2=bar" | dagu start --params-stdin my_dag'). Input is read
+until EOF, up to 1 MiB. Arguments after "--" and --params take precedence.
+Without --params-stdin, stdin is left unread.
+--params-stdin cannot be combined with --from-run-id.
 Flags can override default settings such as DAG-run ID, DAG name, or suppress output.
 
 Use --only to run just the named steps (by name or ID) in a new DAG-run of the
@@ -77,7 +79,7 @@ This command parses the DAG definition, resolves parameters, and initiates the D
 }
 
 // Command line flags for the start command
-var startFlags = []commandLineFlag{paramsFlag, nameFlag, dagRunIDFlag, fromRunIDFlag, parentDAGRunFlag, rootDAGRunFlag, labelsFlag, tagsFlag, defaultWorkingDirFlag, profileFlag, startWorkerIDFlag, attemptIDFlag, triggerTypeFlag, triggerActorFlag, scheduleTimeFlag, sourceFileFlag, noReuseFlag, onlyFlag, outputsFromFlag, outputFlag}
+var startFlags = []commandLineFlag{paramsFlag, paramsStdinFlag, nameFlag, dagRunIDFlag, fromRunIDFlag, parentDAGRunFlag, rootDAGRunFlag, labelsFlag, tagsFlag, defaultWorkingDirFlag, profileFlag, startWorkerIDFlag, attemptIDFlag, triggerTypeFlag, triggerActorFlag, scheduleTimeFlag, sourceFileFlag, noReuseFlag, onlyFlag, outputsFromFlag, outputFlag}
 
 var fromRunIDFlag = commandLineFlag{
 	name:  "from-run-id",
@@ -191,7 +193,7 @@ func runStart(ctx *Context, args []string) error {
 		if len(args) == 0 {
 			return fmt.Errorf("DAG name or file must be provided when using --from-run-id")
 		}
-		if len(args) > 1 || ctx.Command.Flags().Changed("params") || ctx.Command.ArgsLenAtDash() != -1 {
+		if len(args) > 1 || ctx.Command.Flags().Changed("params") || ctx.Command.ArgsLenAtDash() != -1 || stdinParamsRequested(ctx) {
 			return fmt.Errorf("parameters cannot be provided when using --from-run-id")
 		}
 
@@ -389,8 +391,8 @@ func getDAGRunInfo(ctx *Context) (dagRunID, rootDAGRun, parentDAGRun string, isS
 }
 
 // loadDAGWithParams loads the DAG and its parameters from command arguments.
-// Parameters come from args after "--", else the --params flag, else piped or
-// redirected stdin; command-line parameters take precedence over stdin.
+// Parameters come from args after "--", else the --params flag, else stdin
+// when --params-stdin is enabled.
 func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, string, error) {
 	dagPath := args[0]
 
@@ -435,7 +437,7 @@ func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, 
 	var params string
 
 	if ctx.Command.ArgsLenAtDash() != -1 && len(args) > 0 {
-		if stdinHasParamsInput() {
+		if stdinHasParamsInput(ctx) {
 			logger.Warn(ctx, "Ignoring piped stdin: params were provided after '--'")
 		}
 		dashArgs := args[ctx.Command.ArgsLenAtDash():]
@@ -448,10 +450,10 @@ func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, 
 		}
 		switch {
 		case ctx.Command.Flags().Changed("params"):
-			if stdinHasParamsInput() {
+			if stdinHasParamsInput(ctx) {
 				logger.Warn(ctx, "Ignoring piped stdin: params were provided via --params")
 			}
-		case stdinHasParamsInput():
+		case stdinHasParamsInput(ctx):
 			params, err = readStdinParams()
 			if err != nil {
 				return nil, "", err

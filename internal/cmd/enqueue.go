@@ -22,8 +22,10 @@ func Enqueue() *cobra.Command {
 			Short: "Enqueue a DAG-run to the queue.",
 			Long: `Enqueue a DAG-run to the queue.
 
-Parameters can also be provided on piped or redirected stdin when neither "--" nor
---params is given (e.g. 'echo "P1=foo" | dagu enqueue my_dag').
+With --params-stdin, parameters can be provided on piped or redirected stdin
+(e.g. 'echo "P1=foo" | dagu enqueue --params-stdin my_dag'). Input is read until
+EOF, up to 1 MiB. Arguments after "--" and --params take precedence.
+Without --params-stdin, stdin is left unread.
 
 Examples:
 	dagu enqueue --run-id=run_id my_dag -- P1=foo P2=bar
@@ -34,7 +36,7 @@ Examples:
 	)
 }
 
-var enqueueFlags = []commandLineFlag{paramsFlag, nameFlag, dagRunIDFlag, queueFlag, labelsFlag, tagsFlag, defaultWorkingDirFlag, profileFlag, triggerTypeFlag, triggerActorFlag, scheduleTimeFlag, noReuseFlag}
+var enqueueFlags = []commandLineFlag{paramsFlag, paramsStdinFlag, nameFlag, dagRunIDFlag, queueFlag, labelsFlag, tagsFlag, defaultWorkingDirFlag, profileFlag, triggerTypeFlag, triggerActorFlag, scheduleTimeFlag, noReuseFlag}
 
 func runEnqueue(ctx *Context, args []string) error {
 	if ctx.IsRemote() {

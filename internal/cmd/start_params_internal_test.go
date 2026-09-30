@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,9 +31,14 @@ func pipeStdin(t *testing.T, input string) {
 }
 
 func TestStdinHasParamsInput(t *testing.T) {
+	command := &cobra.Command{}
+	initFlags(command, paramsStdinFlag)
+	require.NoError(t, command.Flags().Set(paramsStdinFlag.name, "true"))
+	ctx := &Context{Command: command}
+
 	t.Run("Pipe", func(t *testing.T) {
 		pipeStdin(t, "P1=foo")
-		require.True(t, stdinHasParamsInput())
+		require.True(t, stdinHasParamsInput(ctx))
 	})
 
 	t.Run("RedirectedFile", func(t *testing.T) {
@@ -46,7 +52,7 @@ func TestStdinHasParamsInput(t *testing.T) {
 			os.Stdin = original
 			require.NoError(t, file.Close())
 		})
-		require.True(t, stdinHasParamsInput())
+		require.True(t, stdinHasParamsInput(ctx))
 	})
 
 	t.Run("CharacterDevice", func(t *testing.T) {
@@ -60,7 +66,7 @@ func TestStdinHasParamsInput(t *testing.T) {
 			os.Stdin = original
 			require.NoError(t, devNull.Close())
 		})
-		require.False(t, stdinHasParamsInput())
+		require.False(t, stdinHasParamsInput(ctx))
 	})
 }
 
