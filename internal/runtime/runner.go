@@ -75,13 +75,13 @@ type Runner struct {
 	canceled      int32
 	failed        int32
 	mu            sync.RWMutex
-	pause         time.Duration
 	lastError     error
 	preconditions []ir.ConditionResult
 	// preconditionCancel interrupts the running DAG-level precondition check.
 	preconditionCancel context.CancelFunc
 	forceCancel        context.CancelFunc
 	forcedStop         bool
+	stepsDone          chan struct{}
 
 	handlerMu sync.RWMutex
 	handlers  map[ir.HandlerType]*Node
@@ -112,7 +112,6 @@ func New(cfg *Config) *Runner {
 		dagRunID:             cfg.DAGRunID,
 		messagesHandler:      cfg.MessagesHandler,
 		stepExecutor:         NewStepExecutor(),
-		pause:                time.Millisecond * 100,
 		onWait:               cfg.OnWait,
 		forcedStatus:         cfg.ForcedStatus,
 		materializations:     cfg.MaterializationStore,
@@ -158,20 +157,7 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUp
 	r.resetRunState(plan)
 
 	// Create a cancellable context for the entire execution
-	parentCtx, forceCancel := context.WithCancel(ctx)
-	r.mu.Lock()
-	r.forceCancel = forceCancel
-	if r.forcedStop {
-		forceCancel()
-	}
-	r.mu.Unlock()
-	defer func() {
-		forceCancel()
-		r.mu.Lock()
-		r.forceCancel = nil
-		r.mu.Unlock()
-	}()
-	ctx = parentCtx
+	parentCtx := ctx
 	var cancel context.CancelFunc
 	if r.timeout > 0 {
 		ctx, cancel = context.WithTimeout(ctx, r.timeout)
@@ -180,6 +166,22 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUp
 	}
 	defer cancel()
 	defer plan.Finish()
+	// Forced step cleanup must not cancel lifecycle handler execution.
+	executionCtx, forceCancel := context.WithCancel(ctx)
+	r.mu.Lock()
+	r.forceCancel = forceCancel
+	r.stepsDone = nil
+	if r.forcedStop {
+		forceCancel()
+	}
+	r.mu.Unlock()
+	defer func() {
+		forceCancel()
+		r.mu.Lock()
+		r.forceCancel = nil
+		r.stepsDone = nil
+		r.mu.Unlock()
+	}()
 
 	// Initialize node count metrics
 	nodes := plan.Nodes()
@@ -196,7 +198,7 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUp
 			r.setFailed()
 			r.Cancel(plan)
 		} else {
-			checkCtx, stopCheck := r.watchPreconditionStop(ctx)
+			checkCtx, stopCheck := r.watchPreconditionStop(executionCtx)
 			results, conditionErr := EvaluateConditions(checkCtx, shell, rCtx.DAG.Preconditions)
 			stopCheck()
 			r.setPreconditionResults(results)
@@ -227,11 +229,18 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUp
 		}
 	}
 
-	if rCtx.DAG.IsAgent() {
-		r.runAgentLoop(ctx, plan, progressCh)
-	} else {
-		r.runGraphLoop(ctx, plan, nodes, progressCh)
-	}
+	stepsDone := make(chan struct{})
+	r.mu.Lock()
+	r.stepsDone = stepsDone
+	r.mu.Unlock()
+	func() {
+		defer close(stepsDone)
+		if rCtx.DAG.IsAgent() {
+			r.runAgentLoop(executionCtx, plan, progressCh)
+		} else {
+			r.runGraphLoop(executionCtx, plan, nodes, progressCh)
+		}
+	}()
 
 	// Collect final metrics
 	r.metrics.totalExecutionTime = time.Since(r.metrics.startTime)
@@ -1146,7 +1155,8 @@ func (r *Runner) Signal(
 	r.Stop(ctx, plan, cmdutil.TerminationFromSignal(sig), done, allowOverride)
 }
 
-// Stop requests that all active nodes stop according to lifecycle intent.
+// Stop requests workflow steps to stop according to lifecycle intent.
+// Completion excludes lifecycle handlers, which retain their own timeouts.
 func (r *Runner) Stop(
 	ctx context.Context, plan *Plan, intent cmdutil.TerminationIntent, done chan bool, allowOverride bool,
 ) {
@@ -1176,7 +1186,6 @@ func (r *Runner) Stop(
 		if cancel != nil {
 			cancel()
 		}
-		nodes = r.NodesInRunOrder(plan)
 	}
 	for _, node := range nodes {
 		// for a repetitive task, we'll wait for the job to finish
@@ -1191,12 +1200,13 @@ func (r *Runner) Stop(
 	}
 
 	if done != nil && isTermination {
-		defer func() {
-			for plan.HasActiveNodes() {
-				time.Sleep(r.pause)
-			}
-			done <- true
-		}()
+		r.mu.RLock()
+		stepsDone := r.stepsDone
+		r.mu.RUnlock()
+		if stepsDone != nil {
+			<-stepsDone
+		}
+		done <- true
 	}
 }
 
@@ -1397,18 +1407,8 @@ func isReady(ctx context.Context, plan *Plan, node *Node) bool {
 	return true
 }
 
-func (r *Runner) runEventHandler(ctx context.Context, plan *Plan, node *Node, extraEnvs map[string]string) (handlerErr error) {
+func (r *Runner) runEventHandler(ctx context.Context, plan *Plan, node *Node, extraEnvs map[string]string) error {
 	defer node.Finish()
-	if r.isForced() {
-		node.SetStatus(ir.NodeSkipped)
-		return nil
-	}
-	defer func() {
-		if r.isForced() {
-			node.SetStatus(ir.NodeAborted)
-			handlerErr = nil
-		}
-	}()
 
 	var err error
 	ctx, err = r.setupEnvironEventHandler(ctx, plan, node, extraEnvs)
@@ -1492,12 +1492,6 @@ func (r *Runner) setCanceled() {
 	r.canceled = 1
 }
 
-func (r *Runner) isForced() bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.forcedStop
-}
-
 func (r *Runner) setFailed() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1529,6 +1523,8 @@ func (r *Runner) resetRunState(plan *Plan) {
 	r.canceled = 0
 	if plan.isCancelRequested() {
 		r.canceled = 1
+	} else {
+		r.forcedStop = false
 	}
 	r.failed = 0
 	r.lastError = nil

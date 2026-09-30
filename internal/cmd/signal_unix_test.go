@@ -139,20 +139,15 @@ func TestSignalCleanupBeyondServiceTimeout(t *testing.T) {
 
 func TestSignalCleanupTimeout(t *testing.T) {
 	for _, commandName := range []string{"server", "scheduler", "start-all"} {
-		for _, scenario := range []string{"Step", "Repeat", "Abort", "Exit"} {
+		for _, scenario := range []string{"Step", "Repeat"} {
 			t.Run(commandName+"/"+scenario, func(t *testing.T) {
 				run := startSignalRun(t, commandName, 1, func(yaml string) string {
 					switch scenario {
 					case "Repeat":
 						yaml += "    repeat_policy:\n      repeat: while\n      condition: \"true\"\n      expected: \"true\"\n"
-					case "Abort", "Exit":
-						yaml += fmt.Sprintf("handler_on:\n  %s:\n    shell: /bin/sh\n    script: sleep 60\n", strings.ToLower(scenario))
 					}
 					return yaml
 				})
-				if scenario == "Abort" || scenario == "Exit" {
-					releaseHoldFile(t, run.release)
-				}
 				require.NoError(t, run.command.Process.Signal(syscall.SIGTERM))
 				// The run finish time includes handlers. Service shutdown has its
 				// own budget and can finish later.
@@ -161,14 +156,93 @@ func TestSignalCleanupTimeout(t *testing.T) {
 					return err == nil && status.Status == ir.Aborted && status.FinishedAt != ""
 				}, 5*time.Second, 20*time.Millisecond, "runner exceeded the cleanup deadline: %s", run.output())
 				require.NoError(t, run.wait(t))
-				if scenario == "Step" || scenario == "Repeat" {
-					_, err := os.Stat(run.cleaned)
-					require.ErrorIs(t, err, os.ErrNotExist)
-				}
+				_, err := os.Stat(run.cleaned)
+				require.ErrorIs(t, err, os.ErrNotExist)
 				run.assertStatus(t, ir.Aborted)
 			})
 		}
 	}
+}
+
+func TestSignalHandlerBudgets(t *testing.T) {
+	for _, commandName := range []string{"server", "scheduler", "start-all"} {
+		t.Run(commandName, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "exited")
+			run := startSignalRun(t, commandName, 1, func(yaml string) string {
+				return yaml + fmt.Sprintf("handler_on:\n  abort:\n    script: sleep 2\n  exit:\n    script: %q\n", "printf done > "+test.PosixQuote(marker))
+			})
+			releaseHoldFile(t, run.release)
+			require.NoError(t, run.command.Process.Signal(syscall.SIGTERM))
+			require.NoError(t, run.wait(t))
+			data, err := os.ReadFile(marker)
+			require.NoError(t, err, "supervisor exited before handlers: %s", run.output())
+			require.Equal(t, "done", string(data))
+			status, err := run.th.DAGRunMgr.GetLatestStatus(run.th.Context, run.dag.DAG)
+			require.NoError(t, err)
+			require.Equal(t, ir.Aborted, status.Status)
+			require.Equal(t, ir.NodeSucceeded, status.OnAbort.Status)
+			require.Equal(t, ir.NodeSucceeded, status.OnExit.Status)
+		})
+	}
+}
+
+// Lifecycle handlers retain their own execution budgets after a CLI stop.
+func TestStopHandlers(t *testing.T) {
+	th := test.SetupCommand(t, test.WithBuiltExecutable())
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	aborted := filepath.Join(dir, "aborted")
+	exited := filepath.Join(dir, "exited")
+	dag := th.DAG(t, fmt.Sprintf(`
+steps:
+  - script: |
+      printf ready > %s
+      sleep 60
+handler_on:
+  abort:
+    script: |
+      sleep 10
+      printf done > %s
+  exit:
+    script: printf done > %s
+`, test.PosixQuote(ready), test.PosixQuote(aborted), test.PosixQuote(exited)))
+	command := exec.Command(th.Config.Paths.Executable, test.WithConfigFlag([]string{"start", dag.Location}, th.Config)...) //nolint:gosec // Test executes the repository binary.
+	command.Env = append(th.ChildEnv, "DAGU_SIGNAL_PROPAGATION=false")
+	logFile, err := os.CreateTemp(dir, "run-*.log")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = logFile.Close() })
+	command.Stdout, command.Stderr = logFile, logFile
+	require.NoError(t, command.Start())
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- command.Wait() }()
+	run := &signalRun{th: th, dag: dag, command: command, waitCh: waitCh, logFile: logFile}
+	t.Cleanup(func() {
+		if !run.exited {
+			terminateTestCommand(command, waitCh)
+		}
+	})
+	run.waitForFile(t, ready)
+	stop := exec.Command(th.Config.Paths.Executable, test.WithConfigFlag([]string{"stop", dag.Location}, th.Config)...) //nolint:gosec // Test executes the repository binary.
+	stop.Env = command.Env
+	output, err := stop.CombinedOutput()
+	require.NoError(t, err, "output: %s", output)
+	select {
+	case err := <-waitCh:
+		run.exited = true
+		require.NoError(t, err)
+	case <-time.After(20 * time.Second):
+		t.Fatalf("run did not finish its handlers: %s", run.output())
+	}
+	for _, marker := range []string{aborted, exited} {
+		data, err := os.ReadFile(marker)
+		require.NoError(t, err, "handler did not complete: %s", run.output())
+		require.Equal(t, "done", string(data))
+	}
+	status, err := th.DAGRunMgr.GetLatestStatus(th.Context, dag.DAG)
+	require.NoError(t, err)
+	require.Equal(t, ir.Aborted, status.Status)
+	require.Equal(t, ir.NodeSucceeded, status.OnAbort.Status)
+	require.Equal(t, ir.NodeSucceeded, status.OnExit.Status)
 }
 
 // A cleanup command must survive automatic resends until the DAG deadline,

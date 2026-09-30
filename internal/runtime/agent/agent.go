@@ -2409,11 +2409,12 @@ func (a *Agent) requestStop(ctx context.Context, sig os.Signal, allowOverride bo
 			defer cancel()
 			resendTicker := time.NewTicker(5 * time.Second)
 			defer resendTicker.Stop()
-			go runner.Stop(ctx, plan, intent, nil, allowOverride)
+			stepsDone := make(chan bool, 1)
+			go runner.Stop(ctx, plan, intent, stepsDone, allowOverride)
 			for {
 				select {
-				case <-runnerDone:
-					logger.Info(ctx, "All child processes have been terminated")
+				case <-stepsDone:
+					logger.Info(ctx, "Workflow steps have stopped")
 					return
 				case <-signalCtx.Done():
 					forceIntent := cmdutil.ForceTermination()

@@ -2496,8 +2496,8 @@ func TestRunner_SignalHandling(t *testing.T) {
 		r.runner.Stop(r.Context, plan.Plan, cmdutil.ForceTermination(), nil, false)
 		result := plan.assertRun(t, ir.Aborted)
 		result.assertNodeStatus(t, "1", ir.NodeNotStarted)
-		result.assertNodeStatus(t, "onAbort", ir.NodeSkipped)
-		result.assertNodeStatus(t, "onExit", ir.NodeSkipped)
+		result.assertNodeStatus(t, "onAbort", ir.NodeSucceeded)
+		result.assertNodeStatus(t, "onExit", ir.NodeSucceeded)
 	})
 
 	t.Run("SignalBeforeRun", func(t *testing.T) {
