@@ -1222,8 +1222,8 @@ func (n *Node) Signal(ctx context.Context, sig os.Signal, allowOverride bool) {
 func (n *Node) Stop(ctx context.Context, intent cmdutil.TerminationIntent, allowOverride bool) {
 	n.mu.Lock()
 	status := n.Status()
-	// An aborted node can still be cleaning up and require forced termination.
-	if status != ir.NodeRunning && (status != ir.NodeAborted || n.execCancel == nil) {
+	// Cleanup receives forced termination only after its graceful stop.
+	if status != ir.NodeRunning && (status != ir.NodeAborted || n.execCancel == nil || !intent.IsForce()) {
 		n.mu.Unlock()
 		return
 	}

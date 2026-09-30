@@ -249,6 +249,12 @@ func TestNode(t *testing.T) {
 		require.Equal(t, cmdutil.TerminationModeGraceful, (<-exec.stopped).Mode)
 		require.Equal(t, ir.NodeAborted, node.State().Status)
 		require.True(t, plan.HasActiveNodes(), "aborted execution still needs cleanup")
+		node.Stop(node.Context, cmdutil.TerminationFromSignal(syscall.SIGTERM), false)
+		select {
+		case intent := <-exec.stopped:
+			t.Fatalf("cleanup received another graceful stop: %v", intent)
+		default:
+		}
 		node.Stop(node.Context, cmdutil.ForceTermination(), false)
 		select {
 		case intent := <-exec.stopped:

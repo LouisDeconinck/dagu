@@ -71,6 +71,54 @@ func TestSignalCleanupTimeout(t *testing.T) {
 	run.assertStatus(t, ir.Aborted)
 }
 
+// A cleanup command must survive automatic resends until the DAG deadline,
+// including standalone runs without supervisor signal propagation.
+func TestSignalCleanupWithoutPropagation(t *testing.T) {
+	th := test.SetupCommand(t, test.WithBuiltExecutable())
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	cleaned := filepath.Join(dir, "cleaned")
+	dag := th.DAG(t, fmt.Sprintf(`
+max_clean_up_time_sec: 20
+steps:
+  - id: probe
+    run: |
+      cleanup() {
+        trap - TERM INT
+        sleep 8 && printf done > %s
+        exit 0
+      }
+      trap cleanup TERM INT
+      printf ready > %s
+      while :; do sleep 0.05; done
+    with:
+      shell: /bin/sh
+`, test.PosixQuote(cleaned), test.PosixQuote(ready)))
+	command := exec.Command(th.Config.Paths.Executable, test.WithConfigFlag([]string{"start", dag.Location}, th.Config)...) //nolint:gosec // Test executes the repository binary.
+	command.Env = append(th.ChildEnv, "DAGU_SIGNAL_PROPAGATION=false")
+	logFile, err := os.CreateTemp(dir, "run-*.log")
+	require.NoError(t, err)
+	defer func() { _ = logFile.Close() }()
+	command.Stdout = logFile
+	command.Stderr = logFile
+	require.NoError(t, command.Start())
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- command.Wait() }()
+	run := &signalRun{th: th, dag: dag, command: command, waitCh: waitCh, logFile: logFile}
+	t.Cleanup(func() {
+		_ = th.DAGRunMgr.Stop(th.Context, dag.DAG, "")
+		if !run.exited {
+			terminateTestCommand(command, waitCh)
+		}
+	})
+	run.waitForFile(t, ready)
+	require.NoError(t, command.Process.Signal(syscall.SIGTERM))
+	require.NoError(t, run.wait(t))
+	_, err = os.Stat(cleaned)
+	require.NoError(t, err, "cleanup was interrupted before its deadline: %s", run.output())
+	run.assertStatus(t, ir.Aborted)
+}
+
 func TestSecondSignalDuringRunCleanup(t *testing.T) {
 	for _, commandName := range []string{"server", "scheduler", "start-all"} {
 		t.Run(commandName, func(t *testing.T) {
