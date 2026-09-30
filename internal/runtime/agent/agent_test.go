@@ -119,11 +119,128 @@ func agentRunStartTimeout() time.Duration {
 	return 5 * time.Second
 }
 
+// The cleanup deadline includes handlers and pauses between executions.
+func TestStopCleanupDeadline(t *testing.T) {
+	for _, scenario := range []string{"Repeat", "RepeatInterval", "RetryInterval", "Delay", "Init", "Abort", "Exit", "TimeoutExit"} {
+		t.Run(scenario, func(t *testing.T) {
+			th := test.Setup(t)
+			dir := t.TempDir()
+			ready := filepath.Join(dir, "ready")
+			release := filepath.Join(dir, "release")
+			afterForce := filepath.Join(dir, "after-force")
+			blocking := signalFileThenWaitScript(ready, release, 50*time.Millisecond)
+			yaml := fmt.Sprintf("max_clean_up_time_sec: 1\nsteps:\n  - name: probe\n    script: %q\n", blocking)
+			switch scenario {
+			case "Repeat":
+				yaml += "    repeat_policy:\n      repeat: while\n      condition: \"true\"\n      expected: \"true\"\n"
+			case "RepeatInterval":
+				yaml = fmt.Sprintf("max_clean_up_time_sec: 1\nsteps:\n  - name: probe\n    script: %q\n    repeat_policy:\n      repeat: while\n      condition: \"true\"\n      expected: \"true\"\n      interval_sec: 30\n", writeFileCommand(ready, "started"))
+			case "RetryInterval":
+				yaml = fmt.Sprintf("max_clean_up_time_sec: 1\nsteps:\n  - name: probe\n    script: %q\n    retry_policy:\n      limit: 1\n      interval_sec: 30\n", writeFileCommand(ready, "started")+"\nexit 1")
+			case "Delay":
+				yaml = "delay_sec: 30\n" + yaml
+			case "Init":
+				yaml = fmt.Sprintf("max_clean_up_time_sec: 1\nhandler_on:\n  init:\n    script: %q\n  exit:\n    script: %q\nsteps:\n  - run: echo done\n", blocking, writeFileCommand(afterForce, "started"))
+			case "TimeoutExit":
+				yaml = fmt.Sprintf("timeout_sec: 1\nmax_clean_up_time_sec: 1\nhandler_on:\n  exit:\n    script: %q\nsteps:\n  - script: %q\n", blocking, test.Sleep(30*time.Second))
+			case "Abort", "Exit":
+				handler := "abort"
+				if scenario == "Exit" {
+					handler = "exit"
+				}
+				yaml += fmt.Sprintf("handler_on:\n  %s:\n    script: %q\n", handler, waitForFileScript(release, 50*time.Millisecond))
+			}
+			dag := th.DAG(t, yaml)
+			dagAgent := dag.Agent()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = dagAgent.Run(th.Context)
+			}()
+			t.Cleanup(func() {
+				_ = os.WriteFile(release, nil, 0600)
+				dagAgent.Signal(th.Context, os.Kill)
+				select {
+				case <-done:
+				case <-time.After(agentRunCompletionTimeout()):
+					t.Error("run did not exit after releasing cleanup")
+				}
+			})
+			waitForTestFile(t, ready, agentRunStartTimeout())
+			if scenario == "RepeatInterval" || scenario == "RetryInterval" {
+				require.Eventually(t, func() bool {
+					node := dagAgent.Status(th.Context).Nodes[0]
+					return node.DoneCount > 0 || node.RetryCount > 0
+				}, agentRunStartTimeout(), 10*time.Millisecond)
+			}
+			go dagAgent.Signal(th.Context, os.Interrupt)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("run exceeded its cleanup deadline")
+			}
+			dag.AssertLatestStatus(t, ir.Aborted)
+			if scenario == "Init" {
+				_, err := os.Stat(afterForce)
+				require.ErrorIs(t, err, os.ErrNotExist, "exit handler started after force termination")
+			}
+		})
+	}
+}
+
 func agentRunCompletionTimeout() time.Duration {
 	if runtime.GOOS == "windows" {
 		return 3 * time.Minute
 	}
 	return 10 * time.Second
+}
+
+func TestStopSharedDeadline(t *testing.T) {
+	th := test.Setup(t)
+	dir := t.TempDir()
+	ready, release := filepath.Join(dir, "ready"), filepath.Join(dir, "release")
+	handlerReady, handlerRelease := filepath.Join(dir, "handler-ready"), filepath.Join(dir, "handler-release")
+	dag := th.DAG(t, fmt.Sprintf(`
+max_clean_up_time_sec: 3
+steps:
+  - name: probe
+    script: %q
+    repeat_policy:
+      repeat: while
+      condition: "true"
+      expected: "true"
+handler_on:
+  exit:
+    script: %q
+`, signalFileThenWaitScript(ready, release, 50*time.Millisecond), signalFileThenWaitScript(handlerReady, handlerRelease, 50*time.Millisecond)))
+	dagAgent := dag.Agent()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = dagAgent.Run(th.Context) }()
+	t.Cleanup(func() {
+		_ = os.WriteFile(release, nil, 0600)
+		_ = os.WriteFile(handlerRelease, nil, 0600)
+		dagAgent.Signal(th.Context, os.Kill)
+		waitForCancel(t, done, agentRunCompletionTimeout())
+	})
+	waitForTestFile(t, ready, agentRunStartTimeout())
+	firstStop := make(chan struct{})
+	started := time.Now()
+	go func() { defer close(firstStop); dagAgent.Signal(th.Context, os.Interrupt) }()
+	// The exit handler receives only the time left after the step finishes.
+	time.Sleep(2 * time.Second)
+	require.NoError(t, os.WriteFile(release, nil, 0600))
+	waitForTestFile(t, handlerReady, agentRunStartTimeout())
+	select {
+	case <-firstStop:
+		t.Fatal("stop returned while the exit handler was still running")
+	default:
+	}
+	secondStop := make(chan struct{})
+	go func() { defer close(secondStop); dagAgent.Signal(th.Context, os.Interrupt) }()
+	waitForCancel(t, done, time.Until(started.Add(4*time.Second)))
+	waitForCancel(t, firstStop, time.Second)
+	waitForCancel(t, secondStop, time.Second)
+	dag.AssertLatestStatus(t, ir.Succeeded)
 }
 
 func pwdCommand() string {

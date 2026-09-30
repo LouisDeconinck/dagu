@@ -121,6 +121,11 @@ type Agent struct {
 	// plan is the execution plan for the DAG.
 	plan *runtime.Plan
 
+	// runnerDone includes lifecycle handlers, before final status persistence.
+	runnerDone  chan struct{}
+	cleanupOnce sync.Once
+	cleanupDone chan struct{}
+
 	// reporter is responsible for sending the report to the user.
 	reporter *reporter
 
@@ -416,6 +421,7 @@ func New(
 	}
 
 	a := &Agent{
+		cleanupDone:              make(chan struct{}),
 		rootDAGRun:               opts.RootDAGRun,
 		parentDAGRun:             opts.ParentDAGRun,
 		dagRunID:                 dagRunID,
@@ -668,9 +674,13 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to setup execution plan: %w", err)
 	}
+	runnerDone := make(chan struct{})
+	finishRunner := sync.OnceFunc(func() { close(runnerDone) })
+	defer finishRunner()
 	a.lock.Lock()
 	a.runner = runner
 	a.plan = plan
+	a.runnerDone = runnerDone
 	a.lock.Unlock()
 
 	// Create a new environment for the dag-run.
@@ -1133,6 +1143,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	}
 
 	lastErr := a.runner.Run(ctx, a.plan, progressCh)
+	finishRunner()
 
 	// Drain the progress goroutine before computing the final status.
 	// This prevents the progress goroutine from overwriting the final
@@ -2283,6 +2294,7 @@ func (a *Agent) stopChildren(ctx context.Context, sig os.Signal, allowOverride b
 	a.lock.RLock()
 	runner := a.runner
 	plan := a.plan
+	runnerDone := a.runnerDone
 	a.lock.RUnlock()
 	if runner == nil || plan == nil {
 		logger.Debug(ctx, "Agent not yet initialized; ignoring stop request",
@@ -2290,54 +2302,40 @@ func (a *Agent) stopChildren(ctx context.Context, sig os.Signal, allowOverride b
 		return
 	}
 
-	if !intent.IsTermination() {
-		// For non-termination signals, just forward the request once and return.
+	if !intent.IsTermination() || intent.IsForce() {
+		// Force and non-termination requests do not start another cleanup period.
 		runner.Stop(ctx, plan, intent, nil, allowOverride)
 		return
 	}
 
-	signalCtx, cancel := context.WithTimeout(ctx, a.dag.MaxCleanUpTime)
-	defer cancel()
-
-	done := make(chan bool, 1)
-	go func() {
-		runner.Stop(ctx, plan, intent, done, allowOverride)
-	}()
-
-	resendTicker := time.NewTicker(5 * time.Second)
-	defer resendTicker.Stop()
-	probeTicker := time.NewTicker(500 * time.Millisecond)
-	defer probeTicker.Stop()
-
-	for {
-		select {
-		case <-done:
-			logger.Info(ctx, "All child processes have been terminated")
-			return
-
-		case <-signalCtx.Done():
-			forceIntent := cmdutil.ForceTermination()
-			logger.Info(ctx, "Max cleanup time reached, forcing child process termination",
-				slog.String("stop-mode", string(forceIntent.Mode)),
-				tag.Signal(forceIntent.SignalName()),
-			)
-			runner.Stop(ctx, plan, forceIntent, nil, false)
-			return
-
-		case <-resendTicker.C:
-			logger.Info(ctx, "Resending stop request to processes that haven't terminated",
-				slog.String("stop-mode", string(intent.Mode)),
-				tag.Signal(intent.SignalName()),
-			)
-			runner.Stop(ctx, plan, intent, nil, false)
-
-		case <-probeTicker.C:
-			if !plan.HasActiveNodes() {
-				logger.Info(ctx, "No running processes detected, termination complete")
-				return
+	a.cleanupOnce.Do(func() {
+		signalCtx, cancel := context.WithTimeout(ctx, a.dag.MaxCleanUpTime)
+		go func() {
+			defer close(a.cleanupDone)
+			defer cancel()
+			resendTicker := time.NewTicker(5 * time.Second)
+			defer resendTicker.Stop()
+			go runner.Stop(ctx, plan, intent, nil, allowOverride)
+			for {
+				select {
+				case <-runnerDone:
+					logger.Info(ctx, "All child processes have been terminated")
+					return
+				case <-signalCtx.Done():
+					forceIntent := cmdutil.ForceTermination()
+					logger.Info(ctx, "Max cleanup time reached, forcing child process termination",
+						slog.String("stop-mode", string(forceIntent.Mode)),
+						tag.Signal(forceIntent.SignalName()),
+					)
+					runner.Stop(ctx, plan, forceIntent, nil, false)
+					return
+				case <-resendTicker.C:
+					runner.Stop(ctx, plan, intent, nil, false)
+				}
 			}
-		}
-	}
+		}()
+	})
+	<-a.cleanupDone
 }
 
 // setupPlan setups the DAG plan. If is retry execution, it loads nodes

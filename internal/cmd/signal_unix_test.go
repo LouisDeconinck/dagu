@@ -62,13 +62,37 @@ func TestSignalCleanupBeyondServiceTimeout(t *testing.T) {
 }
 
 func TestSignalCleanupTimeout(t *testing.T) {
-	run := startSignalRun(t, "start-all", 1)
-	require.NoError(t, run.command.Process.Signal(syscall.SIGTERM))
-	run.waitForFile(t, run.stopped)
-	require.NoError(t, run.wait(t))
-	_, err := os.Stat(run.cleaned)
-	require.ErrorIs(t, err, os.ErrNotExist)
-	run.assertStatus(t, ir.Aborted)
+	for _, commandName := range []string{"server", "scheduler", "start-all"} {
+		for _, scenario := range []string{"Step", "Repeat", "Abort", "Exit"} {
+			t.Run(commandName+"/"+scenario, func(t *testing.T) {
+				run := startSignalRun(t, commandName, 1, func(yaml string) string {
+					switch scenario {
+					case "Repeat":
+						yaml += "    repeat_policy:\n      repeat: while\n      condition: \"true\"\n      expected: \"true\"\n"
+					case "Abort", "Exit":
+						yaml += fmt.Sprintf("handler_on:\n  %s:\n    shell: /bin/sh\n    script: sleep 60\n", strings.ToLower(scenario))
+					}
+					return yaml
+				})
+				if scenario == "Abort" || scenario == "Exit" {
+					releaseHoldFile(t, run.release)
+				}
+				require.NoError(t, run.command.Process.Signal(syscall.SIGTERM))
+				select {
+				case err := <-run.waitCh:
+					run.exited = true
+					require.NoError(t, err, "output: %s", run.output())
+				case <-time.After(5 * time.Second):
+					t.Fatalf("supervisor exceeded the cleanup deadline: %s", run.output())
+				}
+				if scenario == "Step" || scenario == "Repeat" {
+					_, err := os.Stat(run.cleaned)
+					require.ErrorIs(t, err, os.ErrNotExist)
+				}
+				run.assertStatus(t, ir.Aborted)
+			})
+		}
+	}
 }
 
 // A cleanup command must survive automatic resends until the DAG deadline,
@@ -166,7 +190,7 @@ type signalRun struct {
 	logFile  *os.File
 }
 
-func startSignalRun(t *testing.T, commandName string, maxCleanup int) *signalRun {
+func startSignalRun(t *testing.T, commandName string, maxCleanup int, edits ...func(string) string) *signalRun {
 	t.Helper()
 	th := test.SetupCommand(t, test.WithBuiltExecutable())
 	dir := t.TempDir()
@@ -178,7 +202,7 @@ func startSignalRun(t *testing.T, commandName string, maxCleanup int) *signalRun
 		release:  newHoldFile(t),
 		progress: filepath.Join(dir, "progress"),
 	}
-	run.dag = th.DAG(t, fmt.Sprintf(`
+	yaml := fmt.Sprintf(`
 type: graph
 max_clean_up_time_sec: %d
 steps:
@@ -196,7 +220,11 @@ steps:
       trap 'cleanup INT' INT
       printf ready > %s
       while :; do printf x >> %s; sleep 0.05; done
-`, maxCleanup, test.PosixQuote(run.stopped), test.PosixQuote(run.release), test.PosixQuote(run.cleaned), test.PosixQuote(ready), test.PosixQuote(run.progress)))
+`, maxCleanup, test.PosixQuote(run.stopped), test.PosixQuote(run.release), test.PosixQuote(run.cleaned), test.PosixQuote(ready), test.PosixQuote(run.progress))
+	for _, edit := range edits {
+		yaml = edit(yaml)
+	}
+	run.dag = th.DAG(t, yaml)
 	args := []string{commandName}
 	port := ""
 	startupLog := "Scheduler started"

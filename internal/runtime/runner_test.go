@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dagucloud/dagu/v2/internal/cmn/cmdutil"
+
 	"github.com/dagucloud/dagu/v2/internal/executor/registry"
 
 	"github.com/dagucloud/dagu/v2/internal/ir"
@@ -2488,6 +2490,16 @@ func TestRunner_StatusDefersForcedStatusUntilTerminal(t *testing.T) {
 }
 
 func TestRunner_SignalHandling(t *testing.T) {
+	t.Run("ForceBeforeRun", func(t *testing.T) {
+		r := setupRunner(t, withOnAbort(successStep("onAbort")), withOnExit(successStep("onExit")))
+		plan := r.newPlan(t, successStep("1"))
+		r.runner.Stop(r.Context, plan.Plan, cmdutil.ForceTermination(), nil, false)
+		result := plan.assertRun(t, ir.Aborted)
+		result.assertNodeStatus(t, "1", ir.NodeNotStarted)
+		result.assertNodeStatus(t, "onAbort", ir.NodeSkipped)
+		result.assertNodeStatus(t, "onExit", ir.NodeSkipped)
+	})
+
 	t.Run("SignalBeforeRun", func(t *testing.T) {
 		r := setupRunner(t)
 		plan := r.newPlan(t, successStep("1"))
