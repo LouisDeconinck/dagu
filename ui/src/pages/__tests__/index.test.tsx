@@ -6,7 +6,7 @@ import userEvent from '@testing-library/user-event';
 import * as React from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Status } from '@/api/v1/schema';
+import { Status, StatusLabel, TriggerType } from '@/api/v1/schema';
 import dayjs from '../../lib/dayjs';
 import { AppBarContext } from '@/contexts/AppBarContext';
 import { ConfigContext, type Config } from '@/contexts/ConfigContext';
@@ -14,10 +14,11 @@ import { SearchStateProvider } from '@/contexts/SearchStateContext';
 import { WorkspaceKind } from '@/lib/workspace';
 import { usePaginatedDAGRuns } from '../../features/dag-runs/hooks/dagRunPagination';
 import { useClient } from '../../hooks/api';
+import DashboardTimeChart from '../../features/dashboard/components/DashboardTimechart';
 import DashboardPage from '../index';
 
 vi.mock('../../features/dashboard/components/DashboardTimechart', () => ({
-  default: () => <div data-testid="dashboard-timechart" />,
+  default: vi.fn(() => <div data-testid="dashboard-timechart" />),
 }));
 
 vi.mock('../../features/dag-runs/components/dag-run-details', () => ({
@@ -38,6 +39,38 @@ vi.mock('../../hooks/api', () => ({
 
 const useClientMock = vi.mocked(useClient);
 const usePaginatedDAGRunsMock = vi.mocked(usePaginatedDAGRuns);
+const dashboardTimeChartMock = vi.mocked(DashboardTimeChart);
+
+const historicalRun: ReturnType<typeof usePaginatedDAGRuns>['dagRuns'][number] =
+  {
+    name: 'etl',
+    dagRunId: 'old-run',
+    status: Status.Success,
+    statusLabel: StatusLabel.succeeded,
+    artifactsAvailable: false,
+    autoRetryCount: 0,
+    triggerType: TriggerType.manual,
+    queuedAt: '2026-04-02T00:00:00Z',
+    scheduleTime: '',
+    startedAt: '2026-04-02T00:00:00Z',
+    finishedAt: '2026-04-02T00:01:00Z',
+  };
+
+function mockDAGRuns(
+  dagRuns: ReturnType<typeof usePaginatedDAGRuns>['dagRuns'] = []
+) {
+  usePaginatedDAGRunsMock.mockReturnValue({
+    dagRuns,
+    headPage: undefined,
+    error: null,
+    isInitialLoading: false,
+    isLoadingMore: false,
+    loadMoreError: null,
+    hasMore: false,
+    refresh: vi.fn(),
+    loadMore: vi.fn(),
+  });
+}
 
 function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -146,17 +179,7 @@ describe('DashboardPage', () => {
         },
       }),
     } as never);
-    usePaginatedDAGRunsMock.mockReturnValue({
-      dagRuns: [],
-      headPage: undefined,
-      error: null,
-      isInitialLoading: false,
-      isLoadingMore: false,
-      loadMoreError: null,
-      hasMore: false,
-      refresh: vi.fn(),
-      loadMore: vi.fn(),
-    });
+    mockDAGRuns();
   });
 
   afterEach(() => {
@@ -282,17 +305,7 @@ describe('DashboardPage', () => {
 
   it('keeps the timechart when runs exist', async () => {
     mockDAGInventory(['etl'], 1);
-    usePaginatedDAGRunsMock.mockReturnValue({
-      dagRuns: [{ name: 'etl', status: Status.Success } as never],
-      headPage: undefined,
-      error: null,
-      isInitialLoading: false,
-      isLoadingMore: false,
-      loadMoreError: null,
-      hasMore: false,
-      refresh: vi.fn(),
-      loadMore: vi.fn(),
-    });
+    mockDAGRuns([historicalRun]);
 
     renderPage();
 
@@ -359,8 +372,10 @@ describe('DashboardPage', () => {
     expect(latestDashboardQuery().toDate).toBeUndefined();
   });
 
-  it('drops the date bounds for the all-time range', async () => {
+  it('queries all history without framing the chart at the epoch', async () => {
     const user = userEvent.setup();
+    mockDAGInventory(['etl'], 1);
+    mockDAGRuns([historicalRun]);
     renderPage();
 
     await waitFor(() => {
@@ -371,9 +386,61 @@ describe('DashboardPage', () => {
     await user.click(await screen.findByRole('option', { name: 'All time' }));
 
     await waitFor(() => {
-      expect(latestDashboardQuery().fromDate).toBeUndefined();
+      expect(latestDashboardQuery().fromDate).toBe(0);
     });
     expect(latestDashboardQuery().toDate).toBeUndefined();
+    expect(dashboardTimeChartMock.mock.lastCall?.[0].selectedDate).toEqual({
+      startTimestamp: dayjs(historicalRun.startedAt).unix(),
+    });
+  });
+
+  it('queries all history after clearing both custom bounds', async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole('combobox', { name: 'Date range' }));
+    await user.click(await screen.findByRole('option', { name: 'Custom' }));
+    const inputs = await screen.findAllByPlaceholderText('YYYY-MM-DD HH:mm:ss');
+    fireEvent.change(inputs[1]!, {
+      target: { value: '2026-05-01 00:00:00' },
+    });
+    fireEvent.change(inputs[0]!, { target: { value: '' } });
+    expect(latestDashboardQuery().fromDate).toBeUndefined();
+    expect(latestDashboardQuery().toDate).toBe(
+      dayjs('2026-05-01T00:00').utcOffset(0, true).unix()
+    );
+
+    fireEvent.change(inputs[1]!, { target: { value: '' } });
+    expect(latestDashboardQuery().fromDate).toBe(0);
+    expect(latestDashboardQuery().toDate).toBeUndefined();
+    expect((inputs[0] as HTMLInputElement).value).toBe('');
+    expect((inputs[1] as HTMLInputElement).value).toBe('');
+  });
+
+  it('restores all-time history without storing an epoch bound', async () => {
+    const scope = `dashboard:${JSON.stringify({
+      remoteNode: 'remote-a',
+      workspace: 'workspace:all',
+    })}`;
+    sessionStorage.setItem(
+      'dagu.searchState',
+      JSON.stringify({
+        [scope]: { selectedDAGRun: 'all', datePreset: 'all', dateRange: {} },
+      })
+    );
+    renderPage();
+
+    await waitFor(() => {
+      expect(latestDashboardQuery().fromDate).toBe(0);
+    });
+    expect(latestDashboardQuery().toDate).toBeUndefined();
+    expect(
+      JSON.parse(sessionStorage.getItem('dagu.searchState')!)[scope]
+    ).toEqual({
+      selectedDAGRun: 'all',
+      datePreset: 'all',
+      dateRange: {},
+    });
   });
 
   it('applies a custom range through the date-range picker', async () => {

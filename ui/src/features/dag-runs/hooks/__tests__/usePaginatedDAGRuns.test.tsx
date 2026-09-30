@@ -86,7 +86,7 @@ describe('usePaginatedDAGRuns', () => {
     vi.useRealTimers();
   });
 
-  it('re-anchors the row chain when the head page moves', async () => {
+  it('re-anchors all-time history when the head moves', async () => {
     useQueryState.data = {
       dagRuns: [createRun('run-4'), createRun('run-3')],
       nextCursor: 'cursor-1',
@@ -98,8 +98,9 @@ describe('usePaginatedDAGRuns', () => {
       },
     });
 
+    const query = createQuery({ fromDate: 0 });
     const { result, rerender } = renderHook(() =>
-      usePaginatedDAGRuns({ query: createQuery() })
+      usePaginatedDAGRuns({ query })
     );
 
     await act(async () => {
@@ -111,6 +112,12 @@ describe('usePaginatedDAGRuns', () => {
       'run-2',
       'run-1',
     ]);
+
+    expect(getMock.mock.calls[0]?.[1]).toMatchObject({
+      params: {
+        query: expect.objectContaining({ fromDate: 0, cursor: 'cursor-1' }),
+      },
+    });
 
     // The head page moves (run 5 lands on top) and run 3 slides onto the
     // second page; the previously loaded continuation pages are stale.
@@ -125,7 +132,7 @@ describe('usePaginatedDAGRuns', () => {
       },
     });
 
-    rerender({ query: createQuery() });
+    rerender();
 
     await waitFor(() => {
       expect(result.current.dagRuns.map((run) => run.dagRunId)).toEqual([
@@ -148,7 +155,7 @@ describe('usePaginatedDAGRuns', () => {
     ]);
     expect(getMock.mock.calls[1]?.[1]).toMatchObject({
       params: {
-        query: expect.objectContaining({ cursor: 'cursor-3' }),
+        query: expect.objectContaining({ fromDate: 0, cursor: 'cursor-3' }),
       },
     });
   });

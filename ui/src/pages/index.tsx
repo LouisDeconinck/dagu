@@ -490,7 +490,10 @@ function Dashboard(): React.ReactElement | null {
   const dagRunsQuery = React.useMemo(
     () => ({
       remoteNode,
-      fromDate: dateRange.startDate,
+      // An explicit epoch bound avoids the API's default today-only window.
+      fromDate:
+        dateRange.startDate ??
+        (dateRange.endDate === undefined ? 0 : undefined),
       toDate: dateRange.endDate,
       name: selectedDAGName,
       status: DASHBOARD_VISIBLE_STATUSES,
