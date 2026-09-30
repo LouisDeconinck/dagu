@@ -209,6 +209,16 @@ func TestParseStringParams(t *testing.T) {
 			expected: []paramPair{{Name: "msg", Value: "line1\nline2"}},
 		},
 		{
+			name:     "MixedMultilineEscapes",
+			input:    "msg=\"line1\nline2\\nend\\t\\\\path\"",
+			expected: []paramPair{{Name: "msg", Value: "line1\nline2\nend\t\\path"}},
+		},
+		{
+			name:     "MultilineTrailingQuote",
+			input:    "\"line1\nline2\\\"\"",
+			expected: []paramPair{{Value: "line1\nline2\""}},
+		},
+		{
 			name:     "EscapedBackslash",
 			input:    `path="C:\\Users"`,
 			expected: []paramPair{{Name: "path", Value: `C:\Users`}},

@@ -73,6 +73,8 @@ The following forms must be accepted for declared string parameters:
 - Quoted strings decode `\"`, `\\`, `\n`, and `\t` as a quote, backslash, newline,
   and tab. `\\n` preserves a literal backslash followed by `n`.
 - Quoted strings may contain literal newlines. JSON strings use JSON escaping.
+- Literal newlines and escape sequences may appear in the same quoted value;
+  escape decoding must still preserve escaped quotes at either end.
 - Unicode text is preserved. Parameter input does not evaluate shell variable
   references or command substitutions contained in a supplied value.
 

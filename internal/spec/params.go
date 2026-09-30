@@ -287,7 +287,9 @@ func parseStringParams(ctx buildContext, input string) ([]paramPair, error) {
 		value := match[2]
 
 		if strings.HasPrefix(value, `"`) {
-			if unquoted, err := strconv.Unquote(value); err == nil {
+			// Literal newlines and escaped characters share the quoted-value contract.
+			quoted := strings.ReplaceAll(value, "\n", `\n`)
+			if unquoted, err := strconv.Unquote(quoted); err == nil {
 				value = unquoted
 			} else {
 				// Fallback for malformed strings (e.g., unterminated quotes)
