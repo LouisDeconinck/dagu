@@ -331,6 +331,39 @@ func TestArtifactSweep(t *testing.T) {
 		assert.Contains(t, err.Error(), "refusing to sweep filesystem root")
 	})
 
+	// The run history is never an artifact tree, so a root holding it is
+	// refused before anything is examined.
+	t.Run("RejectsRootContainingRunHistory", func(t *testing.T) {
+		th := setupTestRepository(t)
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
+		orphan := artifactSweepRunDir(t, root, "gone-dag", "gone-run", artifactSweepOld)
+
+		_, err := th.Backend.PruneArtifacts(th.Context, persis.ArtifactPruneRequest{Root: th.TmpDir})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to sweep")
+		assert.DirExists(t, orphan)
+	})
+
+	// Logs share the pre-date artifact layout, so a root that is or holds a
+	// protected log directory must not reach its run directories.
+	t.Run("RejectsRootContainingProtectedDir", func(t *testing.T) {
+		th := setupTestRepository(t)
+		base := resolvedDir(t, t.TempDir())
+		logDir := filepath.Join(base, "logs")
+		logRunDir := filepath.Join(logDir, "test_DAG", artifactSweepLegacyName("gone-run"))
+		artifactSweepFill(t, logRunDir)
+
+		for _, root := range []string{logDir, base} {
+			req := oldEnough
+			req.Root = root
+			req.ProtectedDirs = []string{logDir}
+			_, err := th.Backend.PruneArtifacts(th.Context, req)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "refusing to sweep")
+		}
+		assert.DirExists(t, logRunDir)
+	})
+
 	// A symlinked root that stays inside the filesystem sweeps its target as
 	// a plain root does.
 	t.Run("SweepsThroughSymlinkedRoot", func(t *testing.T) {

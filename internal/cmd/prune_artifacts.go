@@ -91,9 +91,10 @@ func runPruneArtifacts(ctx *Context, _ []string) error {
 	}
 
 	result, err := ctx.Persistence.DAGRunRepository.PruneArtifacts(ctx, persis.ArtifactPruneRequest{
-		Root:      root,
-		OlderThan: persis.NewUTC(time.Now().UTC().Add(-dur)),
-		DryRun:    dryRun,
+		Root:          root,
+		ProtectedDirs: []string{ctx.Config.Paths.LogDir},
+		OlderThan:     persis.NewUTC(time.Now().UTC().Add(-dur)),
+		DryRun:        dryRun,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to prune artifacts: %w", err)

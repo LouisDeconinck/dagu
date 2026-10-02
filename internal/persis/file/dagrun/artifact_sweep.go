@@ -48,22 +48,15 @@ func (store *Store) PruneArtifacts(ctx context.Context, req persis.ArtifactPrune
 	if root == "" {
 		return nil, fmt.Errorf("artifact directory is not configured")
 	}
-	abs, err := filepath.Abs(root)
+	abs, err := resolveDir(root)
 	if err != nil {
 		return nil, fmt.Errorf("invalid artifact root %q: %w", root, err)
 	}
-	// Abs and Clean do not resolve symlinks, so a root linked to the
-	// filesystem root would pass the guard below and sweep the link target.
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("invalid artifact root %q: %w", root, err)
-		}
-		resolved = abs
-	}
-	abs = resolved
 	if filepath.Dir(abs) == abs {
 		return nil, fmt.Errorf("refusing to sweep filesystem root %q", abs)
+	}
+	if err := store.checkSweepRoot(abs, req.ProtectedDirs); err != nil {
+		return nil, err
 	}
 
 	cutoff := req.OlderThan.Time
@@ -107,6 +100,54 @@ func (store *Store) PruneArtifacts(ctx context.Context, req persis.ArtifactPrune
 	}
 	s.pruneEmptied()
 	return &s.result, nil
+}
+
+// resolveDir returns dir as an absolute path with symlinks evaluated, so that
+// guards see the directory a sweep would actually reach: Abs and Clean leave a
+// link to the filesystem root looking like an ordinary path. A path that does
+// not exist is returned absolute.
+func resolveDir(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return abs, nil
+		}
+		return "", err
+	}
+	return resolved, nil
+}
+
+// checkSweepRoot refuses a root that equals or contains the run history or a
+// protected directory. Such a root is not an artifact tree, and logs share the
+// pre-date artifact layout, so sweeping it could remove what no run produced
+// as an artifact.
+func (store *Store) checkSweepRoot(root string, protected []string) error {
+	for _, dir := range append([]string{store.baseDir}, protected...) {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		resolved, err := resolveDir(dir)
+		if err != nil {
+			return fmt.Errorf("invalid protected directory %q: %w", dir, err)
+		}
+		if dirContains(root, resolved) {
+			return fmt.Errorf("refusing to sweep %q: it contains %q", root, resolved)
+		}
+	}
+	return nil
+}
+
+// dirContains reports whether path is base or lies beneath it.
+func dirContains(base, path string) bool {
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // artifactSweep carries the policy and outcome of one sweep of an artifact

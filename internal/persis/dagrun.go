@@ -102,6 +102,9 @@ type ArtifactPruneRequest struct {
 	// Root is the artifact tree to sweep; empty uses the store's configured
 	// artifact root.
 	Root string
+	// ProtectedDirs are directories the sweep must never reach. A root that
+	// equals or contains one of them, or the store's run history, is refused.
+	ProtectedDirs []string
 	// OlderThan bounds removal to entries created before it. Stores clamp it
 	// to a minimum age, because a run's artifact directory exists before its
 	// record does.

@@ -102,6 +102,26 @@ func TestPruneArtifactsCommand(t *testing.T) {
 		assert.NoDirExists(t, dir)
 	})
 
+	// The log directory shares the pre-date artifact layout; passing it as
+	// --root must not remove the logs of runs whose records are gone.
+	t.Run("RejectsLogDirRoot", func(t *testing.T) {
+		t.Parallel()
+
+		th := test.SetupCommand(t)
+		logDir := th.Config.Paths.LogDir
+		logRunDir := filepath.Join(logDir, "gone-dag",
+			"dag-run_"+time.Now().UTC().Add(-72*time.Hour).Format("20060102_150405Z")+"_gone-run")
+		require.NoError(t, os.MkdirAll(logRunDir, 0o750))
+
+		err := th.RunCommandWithError(t, cmd.PruneArtifacts(), test.CmdTest{
+			Args: []string{"prune-artifacts", "--root", logDir, "--yes"},
+		})
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to sweep")
+		assert.DirExists(t, logRunDir)
+	})
+
 	t.Run("RejectsInvalidOlderThan", func(t *testing.T) {
 		t.Parallel()
 
