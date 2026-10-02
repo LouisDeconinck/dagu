@@ -66,13 +66,6 @@ func (store *Store) PruneArtifacts(ctx context.Context, req persis.ArtifactPrune
 		return nil, fmt.Errorf("refusing to sweep filesystem root %q", abs)
 	}
 
-	// An enumeration failure aborts the sweep: a run missed here would look
-	// orphaned and its artifacts would be reclaimed while still live.
-	live, err := store.liveArtifactNames(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	cutoff := req.OlderThan.Time
 	if cutoff.IsZero() {
 		cutoff = time.Now()
@@ -82,6 +75,18 @@ func (store *Store) PruneArtifacts(ctx context.Context, req persis.ArtifactPrune
 	}
 
 	candidates, err := collectArtifactCandidates(ctx, abs, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return &persis.ArtifactPruneResult{}, nil
+	}
+
+	// Liveness is read after the walk: a run's record is written before, or
+	// within moments of, its artifact directory, so every candidate found
+	// above already has its record on disk. An enumeration failure aborts the
+	// sweep, because a run missed here would look orphaned while still live.
+	live, err := store.liveArtifactNames(ctx)
 	if err != nil {
 		return nil, err
 	}
