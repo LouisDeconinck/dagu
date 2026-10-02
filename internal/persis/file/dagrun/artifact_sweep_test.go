@@ -37,6 +37,21 @@ func artifactSweepRunDir(t *testing.T, root, dagName, dagRunID string, at time.T
 	return dir
 }
 
+// artifactSweepFill creates dir holding one file, as a run that wrote an
+// artifact leaves behind.
+func artifactSweepFill(t *testing.T, dir string) {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(dir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "out.txt"), []byte("x"), 0o600))
+}
+
+// artifactSweepLegacyName returns the pre-date run directory name of a run
+// started at artifactSweepOld.
+func artifactSweepLegacyName(dagRunID string) string {
+	return DAGRunDirPrefix + formatDAGRunTimestamp(persis.NewUTC(artifactSweepOld)) + "_" + dagRunID
+}
+
 // resolvedDir evaluates symlinks in dir, the form the sweep reports paths in.
 // TempDir itself can sit behind a link (macOS /var -> /private/var), so
 // expectations must be built from the resolved base.
@@ -220,18 +235,40 @@ func TestArtifactSweep(t *testing.T) {
 		assert.FileExists(t, filepath.Join(root, "README.md"))
 	})
 
+	// Run-shaped names count only at the artifact layout positions. Run
+	// history, backups, and deeper trees reuse those names and survive.
+	t.Run("IgnoresRunShapedDirsOutsideLayout", func(t *testing.T) {
+		th := setupTestRepository(t)
+		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
+
+		day := filepath.FromSlash(artifactSweepOld.Format("2006/01/02"))
+		kept := []string{
+			filepath.Join(root, "backup", "test_DAG", artifactSweepLegacyName("gone-run")),
+			filepath.Join(root, "dag-runs", "test_DAG", "dag-runs", day, artifactSweepLegacyName("gone-run")),
+			filepath.Join(root, "team", day, artifactSweepOld.Format("150405")+"_gone-dag_"+artifactpath.RunSuffix("gone-run")),
+		}
+		for _, dir := range kept {
+			artifactSweepFill(t, dir)
+		}
+
+		result := sweepArtifacts(t, th, oldEnough)
+
+		assert.Empty(t, result.Dirs)
+		for _, dir := range kept {
+			assert.DirExists(t, dir)
+		}
+	})
+
 	t.Run("RemovesLegacyDirs", func(t *testing.T) {
 		th := setupTestRepository(t)
 		root := filepath.Join(resolvedDir(t, th.TmpDir), "artifacts")
 
 		th.CreateAttempt(t, time.Now(), "live-run", ir.Running)
 
-		stale := filepath.Join(root, "legacy-dag", "dag-run_"+artifactSweepOld.Format("20060102_150405Z")+"_dead-run")
-		live := filepath.Join(root, "legacy-dag", "dag-run_"+artifactSweepOld.Format("20060102_150405Z")+"_live-run")
-		for _, dir := range []string{stale, live} {
-			require.NoError(t, os.MkdirAll(dir, 0o750))
-			require.NoError(t, os.WriteFile(filepath.Join(dir, "out.txt"), []byte("x"), 0o600))
-		}
+		stale := filepath.Join(root, "legacy-dag", artifactSweepLegacyName("dead-run"))
+		live := filepath.Join(root, "legacy-dag", artifactSweepLegacyName("live-run"))
+		artifactSweepFill(t, stale)
+		artifactSweepFill(t, live)
 
 		result := sweepArtifacts(t, th, oldEnough)
 
@@ -248,10 +285,8 @@ func TestArtifactSweep(t *testing.T) {
 
 		th.CreateAttempt(t, time.Now(), "live-run", ir.Running)
 
-		colliding := filepath.Join(root, "legacy-dag",
-			"dag-run_"+artifactSweepOld.Format("20060102_150405Z")+"_"+artifactpath.RunSuffix("live-run"))
-		require.NoError(t, os.MkdirAll(colliding, 0o750))
-		require.NoError(t, os.WriteFile(filepath.Join(colliding, "out.txt"), []byte("x"), 0o600))
+		colliding := filepath.Join(root, "legacy-dag", artifactSweepLegacyName(artifactpath.RunSuffix("live-run")))
+		artifactSweepFill(t, colliding)
 
 		result := sweepArtifacts(t, th, oldEnough)
 
@@ -269,8 +304,7 @@ func TestArtifactSweep(t *testing.T) {
 
 		day := filepath.Join(root, filepath.FromSlash(artifactSweepOld.Format("2006/01/02")))
 		colliding := filepath.Join(day, artifactSweepOld.Format("150405")+"_gone-dag_0123456789abcdef")
-		require.NoError(t, os.MkdirAll(colliding, 0o750))
-		require.NoError(t, os.WriteFile(filepath.Join(colliding, "out.txt"), []byte("x"), 0o600))
+		artifactSweepFill(t, colliding)
 
 		result := sweepArtifacts(t, th, oldEnough)
 

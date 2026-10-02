@@ -29,6 +29,11 @@ const minArtifactPruneAge = time.Hour
 // PruneArtifacts implements persis.DAGRunStore. It removes artifact
 // directories and index records that no surviving DAG run points to.
 //
+// Only entries at artifact layout positions are candidates: run directories
+// and index records in <root>/YYYY/MM/DD, and pre-date run directories in
+// <root>/<dag>. Run history and logs reuse those names deeper in a tree, so
+// nothing below these positions is examined.
+//
 // Liveness is decided by name rather than by a status's ArchiveDir: a run
 // directory name ends in the hash of its DAG-run ID, so a directory whose
 // suffix no surviving run record produces is orphaned no matter how the
@@ -76,28 +81,47 @@ func (store *Store) PruneArtifacts(ctx context.Context, req persis.ArtifactPrune
 		cutoff = floor
 	}
 
-	s := &artifactSweep{
-		root:    abs,
-		cutoff:  cutoff,
-		dryRun:  req.DryRun,
-		live:    live,
-		emptied: map[string]struct{}{},
-	}
-	if err := s.run(ctx); err != nil {
+	candidates, err := collectArtifactCandidates(ctx, abs, cutoff)
+	if err != nil {
 		return nil, err
 	}
+
+	s := &artifactSweep{
+		root:    abs,
+		dryRun:  req.DryRun,
+		emptied: map[string]struct{}{},
+	}
+	for _, c := range candidates {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if live.claims(c) {
+			continue
+		}
+		s.remove(ctx, c)
+	}
+	s.pruneEmptied()
 	return &s.result, nil
 }
 
-// artifactSweep carries the liveness sets and policy for one sweep of an
-// artifact root.
+// artifactSweep carries the policy and outcome of one sweep of an artifact
+// root.
 type artifactSweep struct {
 	root    string
-	cutoff  time.Time
 	dryRun  bool
-	live    liveSets
 	result  persis.ArtifactPruneResult
 	emptied map[string]struct{}
+}
+
+// artifactCandidate is an aged entry at an artifact layout position. It is
+// removed unless a surviving run claims its key.
+type artifactCandidate struct {
+	path string
+	// key is the run ID for a pre-date directory, and the run suffix for a
+	// partitioned directory or index record.
+	key    string
+	legacy bool
+	dir    bool
 }
 
 // liveSets keeps the two layouts' claim keys apart: pre-date directories are
@@ -109,143 +133,170 @@ type liveSets struct {
 	suffixes map[string]struct{}
 }
 
-func (s *artifactSweep) run(ctx context.Context) error {
-	if err := s.sweepDir(ctx, s.root); err != nil {
-		return err
+// claims reports whether a surviving run owns c.
+func (l liveSets) claims(c artifactCandidate) bool {
+	set := l.suffixes
+	if c.legacy {
+		set = l.ids
 	}
-	if s.dryRun {
-		return nil
-	}
-
-	// Drop directories that a removal emptied, deepest first so a parent is
-	// seen after its children. The root itself is never removed.
-	dirs := make([]string, 0, len(s.emptied))
-	for dir := range s.emptied {
-		dirs = append(dirs, dir)
-	}
-	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
-	for _, dir := range dirs {
-		// A directory that still holds entries fails to remove and stays.
-		_ = fileutil.Remove(dir)
-	}
-	return nil
+	_, ok := set[c.key]
+	return ok
 }
 
-func (s *artifactSweep) sweepDir(ctx context.Context, dir string) error {
-	entries, err := fileutil.ReadDir(dir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+// collectArtifactCandidates lists the entries at artifact layout positions
+// under root that predate cutoff.
+func collectArtifactCandidates(ctx context.Context, root string, cutoff time.Time) ([]artifactCandidate, error) {
+	tops, err := listDirsSorted(root, false, nil)
 	if err != nil {
-		if dir == s.root {
-			return fmt.Errorf("failed to read artifact root %s: %w", dir, err)
+		return nil, fmt.Errorf("failed to read artifact root %s: %w", root, err)
+	}
+
+	var out []artifactCandidate
+	for _, top := range tops {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-		// An unreadable directory is left alone; skipping it can only leave
-		// entries behind, never remove a live one.
-		logger.Error(ctx, "Failed to read artifact directory", tag.Error(err), tag.Dir(dir))
+		// A top-level name can be both a DAG and a year, so both layouts are
+		// checked.
+		topDir := filepath.Join(root, top)
+		out = append(out, legacyCandidates(ctx, topDir, cutoff)...)
+		if reYear.MatchString(top) {
+			found, err := partitionedCandidates(ctx, topDir, top, cutoff)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, found...)
+		}
+	}
+	return out, nil
+}
+
+// legacyCandidates lists the aged pre-date run directories in dagDir. The
+// name itself carries the timestamp and run ID.
+func legacyCandidates(ctx context.Context, dagDir string, cutoff time.Time) []artifactCandidate {
+	names, err := listDirsSorted(dagDir, false, reDAGRunDir)
+	if err != nil {
+		logSkippedArtifactDir(ctx, dagDir, err)
 		return nil
 	}
 
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		name := entry.Name()
-		path := filepath.Join(dir, name)
-
-		if entry.IsDir() {
-			if s.sweepRunDir(ctx, path, name) {
-				continue
-			}
-			if err := s.sweepDir(ctx, path); err != nil {
-				return err
-			}
+	var out []artifactCandidate
+	for _, name := range names {
+		matches := reDAGRunDir.FindStringSubmatch(name)
+		at, err := parseDAGRunTimestamp(matches[1])
+		if err != nil || !at.Before(cutoff) {
 			continue
 		}
+		out = append(out, artifactCandidate{
+			path:   filepath.Join(dagDir, name),
+			key:    matches[2],
+			legacy: true,
+			dir:    true,
+		})
+	}
+	return out
+}
 
-		// An index record lives beside the run directory it describes, so a
-		// .meta name is a removal candidate under the same rule.
-		if artifactpath.IsMetaName(name) {
-			s.sweepRecord(ctx, path, artifactpath.TrimMetaSuffix(name))
+// partitionedCandidates lists the aged entries in the day partitions of one
+// year directory.
+func partitionedCandidates(ctx context.Context, yearDir, year string, cutoff time.Time) ([]artifactCandidate, error) {
+	months, err := listDirsSorted(yearDir, false, reMonth)
+	if err != nil {
+		logSkippedArtifactDir(ctx, yearDir, err)
+		return nil, nil
+	}
+
+	var out []artifactCandidate
+	for _, month := range months {
+		monthDir := filepath.Join(yearDir, month)
+		days, err := listDirsSorted(monthDir, false, reDay)
+		if err != nil {
+			logSkippedArtifactDir(ctx, monthDir, err)
+			continue
+		}
+		for _, day := range days {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			out = append(out, dayCandidates(ctx, filepath.Join(monthDir, day), year+"/"+month+"/"+day, cutoff)...)
 		}
 	}
-	return nil
+	return out, nil
 }
 
-// sweepRunDir evaluates a subdirectory and reports whether the walk must not
-// descend into it. Both layouts are terminal: what sits beneath a run
-// directory is run content, not entries the sweep manages.
-func (s *artifactSweep) sweepRunDir(ctx context.Context, path, name string) bool {
-	// The pre-date layout kept run directories as dag-run_<ts>_<id> under a
-	// per-DAG directory; the name itself carries the timestamp and run ID.
-	if matches := reDAGRunDir.FindStringSubmatch(name); len(matches) == 3 {
-		at, err := parseDAGRunTimestamp(matches[1])
-		if err == nil {
-			s.maybeRemove(ctx, path, matches[2], at, true, s.live.ids)
+// dayCandidates lists the aged run directories and index records in one day
+// partition. A record names the run directory it describes, which may live
+// outside the root when artifacts.dir relocated it.
+func dayCandidates(ctx context.Context, dayDir, day string, cutoff time.Time) []artifactCandidate {
+	entries, err := fileutil.ReadDir(dayDir)
+	if err != nil {
+		logSkippedArtifactDir(ctx, dayDir, err)
+		return nil
+	}
+
+	var out []artifactCandidate
+	for _, entry := range entries {
+		name := entry.Name()
+		isDir := entry.IsDir()
+		if !isDir {
+			if !artifactpath.IsMetaName(name) {
+				continue
+			}
+			name = artifactpath.TrimMetaSuffix(name)
 		}
-		return true
+		parsed, ok := artifactpath.ParseRunDirName(name)
+		if !ok {
+			continue
+		}
+		at := runDirTimestamp(day, parsed.TimeOfDay)
+		if at.IsZero() || !at.Before(cutoff) {
+			continue
+		}
+		out = append(out, artifactCandidate{
+			path: filepath.Join(dayDir, entry.Name()),
+			key:  parsed.Suffix,
+			dir:  isDir,
+		})
 	}
-
-	parsed, ok := artifactpath.ParseRunDirName(name)
-	if !ok {
-		return false
-	}
-	day, ok := runDirDay(s.root, path)
-	if !ok {
-		return true
-	}
-	s.maybeRemove(ctx, path, parsed.Suffix, runDirTimestamp(day, parsed.TimeOfDay), true, s.live.suffixes)
-	return true
+	return out
 }
 
-// sweepRecord evaluates an index sidecar by the name of the run directory it
-// describes. A record whose directory lives outside the sweep root — because
-// artifacts.dir relocated it — still lands in the tree and is reclaimed by
-// the same rule.
-func (s *artifactSweep) sweepRecord(ctx context.Context, path, name string) {
-	parsed, ok := artifactpath.ParseRunDirName(name)
-	if !ok {
+// logSkippedArtifactDir reports a directory the walk could not read. Skipping
+// it can only leave entries behind, never remove a live one.
+func logSkippedArtifactDir(ctx context.Context, dir string, err error) {
+	if errors.Is(err, os.ErrNotExist) {
 		return
 	}
-	day, ok := runDirDay(s.root, path)
-	if !ok {
-		return
-	}
-	s.maybeRemove(ctx, path, parsed.Suffix, runDirTimestamp(day, parsed.TimeOfDay), false, s.live.suffixes)
+	logger.Error(ctx, "Failed to read artifact directory", tag.Error(err), tag.Dir(dir))
 }
 
-// maybeRemove removes path when its key is claimed by no surviving run and
-// its timestamp predates the cutoff. live is the set for the layout the key
-// belongs to.
-func (s *artifactSweep) maybeRemove(ctx context.Context, path, key string, at time.Time, dir bool, live map[string]struct{}) {
-	if _, ok := live[key]; ok || at.IsZero() || !at.Before(s.cutoff) {
-		return
-	}
+// remove deletes c, or only reports it in a dry run.
+func (s *artifactSweep) remove(ctx context.Context, c artifactCandidate) {
 	if s.dryRun {
-		s.report(path, dir)
+		s.report(c)
 		return
 	}
 	var err error
-	if dir {
-		err = fileutil.RemoveAll(path)
+	if c.dir {
+		err = fileutil.RemoveAll(c.path)
 	} else {
-		err = fileutil.Remove(path)
+		err = fileutil.Remove(c.path)
 	}
 	if err != nil {
 		logger.Error(ctx, "Failed to remove orphaned artifact entry",
-			tag.Error(err), tag.Dir(path))
+			tag.Error(err), tag.Dir(c.path))
 		return
 	}
-	s.report(path, dir)
-	s.markAncestors(path)
+	s.report(c)
+	s.markAncestors(c.path)
 }
 
-func (s *artifactSweep) report(path string, dir bool) {
-	if dir {
-		s.result.Dirs = append(s.result.Dirs, path)
+func (s *artifactSweep) report(c artifactCandidate) {
+	if c.dir {
+		s.result.Dirs = append(s.result.Dirs, c.path)
 		return
 	}
-	s.result.Records = append(s.result.Records, path)
+	s.result.Records = append(s.result.Records, c.path)
 }
 
 // markAncestors records the directories between path and the root so that
@@ -256,24 +307,18 @@ func (s *artifactSweep) markAncestors(path string) {
 	}
 }
 
-// runDirDay returns the "YYYY/MM/DD" key a path sits under, or false when its
-// ancestors are not a date partition. The ancestors are taken from the path
-// rather than assumed, so a relocated tree nested inside the root still
-// resolves.
-func runDirDay(root, path string) (string, bool) {
-	rel, err := filepath.Rel(root, filepath.Dir(path))
-	if err != nil {
-		return "", false
+// pruneEmptied drops directories that a removal emptied, deepest first so a
+// parent is seen after its children. The root itself is never removed.
+func (s *artifactSweep) pruneEmptied() {
+	dirs := make([]string, 0, len(s.emptied))
+	for dir := range s.emptied {
+		dirs = append(dirs, dir)
 	}
-	parts := strings.Split(filepath.ToSlash(rel), "/")
-	if len(parts) < 3 {
-		return "", false
+	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
+	for _, dir := range dirs {
+		// A directory that still holds entries fails to remove and stays.
+		_ = fileutil.Remove(dir)
 	}
-	year, month, day := parts[len(parts)-3], parts[len(parts)-2], parts[len(parts)-1]
-	if !reYear.MatchString(year) || !reMonth.MatchString(month) || !reDay.MatchString(day) {
-		return "", false
-	}
-	return year + "/" + month + "/" + day, true
 }
 
 // runDirTimestamp rebuilds when a partitioned run directory was created from
