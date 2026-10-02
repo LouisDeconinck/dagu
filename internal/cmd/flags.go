@@ -419,7 +419,7 @@ var (
 
 	pruneArtifactsRootFlag = commandLineFlag{
 		name:  "root",
-		usage: "Artifact root to prune (default: configured paths.artifact_dir). Entries a surviving run references are kept either way",
+		usage: "Artifact root to prune (default: configured paths.artifact_dir), such as a previous <data_dir>/artifacts or a DAG's artifacts.dir. Roots holding run history or logs are refused",
 	}
 
 	psDAGFlag = commandLineFlag{
