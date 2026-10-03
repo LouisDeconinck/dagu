@@ -152,11 +152,13 @@ func TestPruneArtifactsCommand(t *testing.T) {
 
 		th := test.SetupCommand(t)
 
-		err := th.RunCommandWithError(t, cmd.PruneArtifacts(), test.CmdTest{
-			Args: []string{"prune-artifacts", "--older-than", "abc", "--yes"},
-		})
+		for _, value := range []string{"abc", "0h"} {
+			err := th.RunCommandWithError(t, cmd.PruneArtifacts(), test.CmdTest{
+				Args: []string{"prune-artifacts", "--older-than", value, "--yes"},
+			})
 
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid --older-than")
+			require.Error(t, err, value)
+			assert.Contains(t, err.Error(), "invalid --older-than", value)
+		}
 	})
 }

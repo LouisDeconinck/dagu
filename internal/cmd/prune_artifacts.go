@@ -73,6 +73,9 @@ func runPruneArtifacts(ctx *Context, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --older-than value %q: %w. Valid formats: 7d, 24h, 1w", olderThan, err)
 	}
+	if dur <= 0 {
+		return fmt.Errorf("invalid --older-than value %q: must be greater than zero", olderThan)
+	}
 
 	root, err := ctx.StringParam("root")
 	if err != nil {
@@ -103,11 +106,11 @@ func runPruneArtifacts(ctx *Context, _ []string) error {
 			return fmt.Errorf("failed to prune artifacts: %w", err)
 		}
 		if len(found.Dirs)+len(found.Records) == 0 {
-			fmt.Printf("No orphaned artifacts older than %s under %s\n", dur, displayRoot)
+			fmt.Printf("No orphaned artifacts older than %s under %s\n", olderThan, displayRoot)
 			return nil
 		}
 		fmt.Printf("Found %d orphaned artifact director(ies) and %d index record(s) older than %s under %s.\n",
-			len(found.Dirs), len(found.Records), dur, displayRoot)
+			len(found.Dirs), len(found.Records), olderThan, displayRoot)
 		fmt.Println("Run with --dry-run to list them.")
 		if !confirmAction("Delete them?") {
 			fmt.Println("Cancelled.")
