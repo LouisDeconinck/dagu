@@ -93,7 +93,7 @@ func runPruneArtifacts(ctx *Context, _ []string) error {
 	}
 	repo := ctx.Persistence.DAGRunRepository
 
-	if !dryRun && !skipConfirm && !ctx.Quiet {
+	if !dryRun && !skipConfirm {
 		// The preview only informs the prompt; the sweep below re-evaluates
 		// every entry and reports what it actually removed.
 		preview := req

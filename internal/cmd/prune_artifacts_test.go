@@ -86,6 +86,31 @@ func TestPruneArtifactsCommand(t *testing.T) {
 		assert.DirExists(t, dir)
 	})
 
+	// Not parallel: the subtest replaces the process-global os.Stdin to answer
+	// the confirmation prompt.
+	t.Run("QuietStillRequiresConfirmation", func(t *testing.T) {
+		th := test.SetupCommand(t)
+		dir := pruneArtifactRunDir(t, th.Config.Paths.ArtifactDir, "gone-dag", "gone-run")
+
+		stdin, input, err := os.Pipe()
+		require.NoError(t, err)
+		originalStdin := os.Stdin
+		os.Stdin = stdin
+		t.Cleanup(func() {
+			os.Stdin = originalStdin
+			require.NoError(t, stdin.Close())
+		})
+		_, err = input.WriteString("n\n")
+		require.NoError(t, err)
+		require.NoError(t, input.Close())
+
+		th.RunCommand(t, cmd.PruneArtifacts(), test.CmdTest{
+			Args: []string{"prune-artifacts", "--quiet"},
+		})
+
+		assert.DirExists(t, dir)
+	})
+
 	// --root reclaims a tree left at a previous data directory, which is the
 	// orphan case the configured root can never reach.
 	t.Run("PrunesExternalRoot", func(t *testing.T) {
