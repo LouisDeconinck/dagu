@@ -41,8 +41,8 @@ var (
 	bundleHash     string
 )
 
-// formatAssetVersion returns the version suffixed with the bundle hash, or the
-// bare version when the bundle hash is unavailable.
+// formatAssetVersion returns version and hash joined by a hyphen, or
+// whichever one is non-empty when the other is empty.
 func formatAssetVersion(version, hash string) string {
 	if version == "" {
 		return hash
@@ -53,14 +53,18 @@ func formatAssetVersion(version, hash string) string {
 	return version + "-" + hash
 }
 
+func hashBundle(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:8])
+}
+
 func currentBundleHash() string {
 	bundleHashOnce.Do(func() {
 		data, err := assetsFS.ReadFile("assets/bundle.js")
 		if err != nil {
 			return
 		}
-		sum := sha256.Sum256(data)
-		bundleHash = hex.EncodeToString(sum[:8])
+		bundleHash = hashBundle(data)
 	})
 	return bundleHash
 }

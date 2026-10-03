@@ -6,10 +6,7 @@ package frontend
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
-	"sync"
 	"testing"
 	"text/template"
 	"time"
@@ -51,26 +48,14 @@ func (s stubWorkspaceStore) Delete(context.Context, string) error {
 	return nil
 }
 
-func resetAssetVersionCache() {
-	bundleHash = ""
-	bundleHashOnce = sync.Once{}
-}
+const testBundleHash = "0123456789abcdef"
 
 func TestFormatAssetVersionUsesBundleHashForDevBuilds(t *testing.T) {
-	bundle := []byte("bundle")
-	sum := sha256.Sum256(bundle)
-	hash := hex.EncodeToString(sum[:8])
-	want := "0.0.0-" + hash
-
-	assert.Equal(t, want, formatAssetVersion("0.0.0", hash))
+	assert.Equal(t, "0.0.0-"+testBundleHash, formatAssetVersion("0.0.0", testBundleHash))
 }
 
 func TestFormatAssetVersionSupportsEmptyVersion(t *testing.T) {
-	bundle := []byte("bundle")
-	sum := sha256.Sum256(bundle)
-	hash := hex.EncodeToString(sum[:8])
-
-	assert.Equal(t, hash, formatAssetVersion("", hash))
+	assert.Equal(t, testBundleHash, formatAssetVersion("", testBundleHash))
 }
 
 func TestFormatAssetVersionFallsBackToVersionWithoutBundleHash(t *testing.T) {
@@ -79,13 +64,9 @@ func TestFormatAssetVersionFallsBackToVersionWithoutBundleHash(t *testing.T) {
 
 func TestCurrentAssetVersionUsesReleaseVersionAndBundleHashWhenSet(t *testing.T) {
 	originalVersion := config.Version
-	t.Cleanup(func() {
-		config.Version = originalVersion
-		resetAssetVersionCache()
-	})
+	t.Cleanup(func() { config.Version = originalVersion })
 
 	config.Version = "1.2.3"
-	resetAssetVersionCache()
 
 	data, err := assetsFS.ReadFile("assets/bundle.js")
 	if err != nil {
@@ -93,8 +74,7 @@ func TestCurrentAssetVersionUsesReleaseVersionAndBundleHashWhenSet(t *testing.T)
 		return
 	}
 
-	sum := sha256.Sum256(data)
-	assert.Equal(t, formatAssetVersion("1.2.3", hex.EncodeToString(sum[:8])), currentAssetVersion())
+	assert.Equal(t, formatAssetVersion("1.2.3", hashBundle(data)), currentAssetVersion())
 }
 
 func TestDefaultFunctionsExposeInitialWorkspacesJSON(t *testing.T) {
