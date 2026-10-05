@@ -409,6 +409,55 @@ func TestNewContext_DAGEnvUsesRuntimeParamsOption(t *testing.T) {
 	assert.Equal(t, "runtime", result["TARGET"])
 }
 
+// Loading already resolved the DAG's own root env entries, so run setup only
+// completes references that need the run, and inserted text stays as loading
+// left it. Base-config entries before the span and run-time entries after it
+// keep the full runtime pass.
+func TestNewContext_RootEnvCompletion(t *testing.T) {
+	t.Parallel()
+
+	dag := &ir.DAG{
+		Name:      "test-dag",
+		Params:    []string{"variable=$INSERTED/data"},
+		ParamDefs: []ir.ParamDef{{Name: "variable", Type: ir.ParamDefTypeString}},
+		Env: []string{
+			"BASE=${context.run.id}/base",
+			"INSERTED=expanded",
+			"COPY=$INSERTED/data",
+			`ESC=p\$INSERTED`,
+			"REF=${env.INSERTED}",
+			"PARAM=${params.variable}",
+			"RUN=$INSERTED/data-${context.run.id}",
+			"MANAGED=$DAG_RUN_ID",
+			"PROFILE=$PROFILE_DEFAULT",
+			"FROM_BASE=$BASE",
+			"DOTENV=${INSERTED}-${params.variable}",
+		},
+		RootEnvSpan: ir.EnvSpan{Start: 1, End: 10},
+	}
+
+	ctx := runctx.NewContext(context.Background(), dag, "run-1", "test.log",
+		runctx.WithParams(dag.Params),
+		runctx.WithRuntimeProfileValues([]string{"PROFILE_DEFAULT=profile"}, nil, nil, nil),
+	)
+
+	result := runctx.GetContext(ctx).UserEnvsMap()
+	for key, want := range map[string]string{
+		"BASE":      "run-1/base",
+		"COPY":      "$INSERTED/data",
+		"ESC":       `p\$INSERTED`,
+		"REF":       "${env.INSERTED}",
+		"PARAM":     "${params.variable}",
+		"RUN":       "$INSERTED/data-run-1",
+		"MANAGED":   "run-1",
+		"PROFILE":   "profile",
+		"FROM_BASE": "run-1/base",
+		"DOTENV":    "expanded-$INSERTED/data",
+	} {
+		assert.Equal(t, want, result[key], key)
+	}
+}
+
 func TestNewContext_DAGEnvOverridesParamsCaseInsensitiveOnWindows(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows environment variables are case-insensitive")

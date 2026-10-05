@@ -411,16 +411,20 @@ func NewContext(
 	profileSelected := stringutil.KeyValuesToMap(options.profileSelected)
 	profileSelectedSecrets := stringutil.KeyValuesToMap(options.profileSelectedSec)
 
-	baseForDAGEnv := make(map[string]string)
-	maps.Copy(baseForDAGEnv, profileDefaults)
-	maps.Copy(baseForDAGEnv, profileDefaultSecrets)
-	maps.Copy(baseForDAGEnv, defaultEnvs)
-	maps.Copy(baseForDAGEnv, defaultSecretEnvs)
+	// Run-scoped values exist only once the run is set up, so loading never saw them.
+	runScoped := make(map[string]string)
+	maps.Copy(runScoped, profileDefaults)
+	maps.Copy(runScoped, profileDefaultSecrets)
+	maps.Copy(runScoped, defaultEnvs)
+	maps.Copy(runScoped, defaultSecretEnvs)
+	maps.Copy(runScoped, managedEnvs)
+
+	baseForDAGEnv := maps.Clone(runScoped)
 	maps.Copy(baseForDAGEnv, params)
 	maps.Copy(baseForDAGEnv, managedEnvs)
 
 	runBuiltinContext := buildDAGRunBuiltinContext(dag, dagRunID, managedEnvs, options)
-	evaluatedDAGEnvs := evaluateDAGEnvRuntime(ctx, dag, params, baseForDAGEnv, managedEnvs, runBuiltinContext)
+	evaluatedDAGEnvs := evaluateDAGEnvRuntime(ctx, dag, params, baseForDAGEnv, runScoped, managedEnvs, runBuiltinContext)
 
 	secretEnvs := stringutil.KeyValuesToMap(options.secretEnvs)
 
@@ -473,6 +477,7 @@ func evaluateDAGEnvRuntime(
 	dag *ir.DAG,
 	runtimeParams map[string]string,
 	base map[string]string,
+	runScoped map[string]string,
 	protected map[string]string,
 	runBuiltinContext cmnvalue.BuiltinContext,
 ) map[string]string {
@@ -496,16 +501,23 @@ func evaluateDAGEnvRuntime(
 		return nil
 	}
 
-	// DAG env is primarily evaluated during DAG loading. This runtime pass only
-	// resolves values that depend on run-scoped variables unavailable at load time.
+	// Loading already resolved the DAG's own root env entries, so they only
+	// complete references to run-scoped values; their inserted text stays literal.
+	// Base-config entries before them and entries added for the run after them
+	// get the full runtime pass.
+	span := dag.RootEnvSpan
+	if span.Start < 0 || span.End > len(envList) || span.Start > span.End {
+		span = ir.EnvSpan{}
+	}
 	result := make(map[string]string, len(envList))
 	scope := cmnvalue.NewEnvScope(nil, false)
 	if baseEnv := config.GetBaseEnv(ctx); baseEnv != nil {
 		scope = scope.WithEntries(stringutil.KeyValuesToMap(baseEnv.AsSlice()), cmnvalue.EnvSourceOS)
 	}
 	scope = scope.WithEntries(base, cmnvalue.EnvSourceDAGEnv)
+	completionScope := cmnvalue.NewEnvScope(nil, false).WithEntries(runScoped, cmnvalue.EnvSourceDAGEnv)
 
-	for _, entry := range envList {
+	for i, entry := range envList {
 		key, value, found := strings.Cut(entry, "=")
 		if !found {
 			continue
@@ -514,13 +526,28 @@ func evaluateDAGEnvRuntime(
 			continue
 		}
 
-		resolver := cmnvalue.NewResolver(
-			cmnvalue.StaticScope{Params: paramDeclarations},
-			cmnvalue.RuntimeScope{Params: params, ParamsJSON: paramsJSON, Env: scope, BuiltinContext: runBuiltinContext},
-		)
-		evaluated, err := resolver.String(ctx, value, cmnvalue.RuntimeDAGEnvField("env."+key))
+		var resolver cmnvalue.Resolver
+		var field cmnvalue.Field
+		if i >= span.Start && i < span.End {
+			resolver = cmnvalue.NewResolver(
+				cmnvalue.StaticScope{},
+				cmnvalue.RuntimeScope{Env: completionScope, BuiltinContext: runBuiltinContext},
+			)
+			field = cmnvalue.DAGEnvCompletionField("env." + key)
+		} else {
+			resolver = cmnvalue.NewResolver(
+				cmnvalue.StaticScope{Params: paramDeclarations},
+				cmnvalue.RuntimeScope{Params: params, ParamsJSON: paramsJSON, Env: scope, BuiltinContext: runBuiltinContext},
+			)
+			field = cmnvalue.RuntimeDAGEnvField("env." + key)
+		}
+		evaluated, err := resolver.String(ctx, value, field)
 		if err != nil {
 			evaluated = value
+		}
+		// Loading did not see base-config entries, so the DAG's own entries may still refer to them.
+		if i < span.Start {
+			completionScope = completionScope.WithEntry(key, evaluated, cmnvalue.EnvSourceDAGEnv)
 		}
 		result[key] = evaluated
 		scope = scope.WithEntry(key, evaluated, cmnvalue.EnvSourceDAGEnv)

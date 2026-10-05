@@ -369,6 +369,45 @@ func TestResumePendingUntilUnblockedStepRuns(t *testing.T) {
 	assert.Equal(t, ErrorConflict, KindOf(err))
 }
 
+// Approving a step resumes the branches it unblocks even while another manual
+// step keeps waiting, unless the resume would re-run a retryable step.
+func TestUnblockedNodeReady(t *testing.T) {
+	tests := []struct {
+		name  string
+		nodes []*ir.Node
+		want  bool
+	}{
+		{name: "approved gate unblocks dependent", want: true, nodes: []*ir.Node{
+			{Step: ir.Step{ID: "gate", Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeSucceeded},
+			waitingApprovalNode(),
+			stepNode("after", ir.NodeNotStarted, "gate"),
+		}},
+		{name: "dependent still blocked", want: false, nodes: []*ir.Node{
+			{Step: ir.Step{ID: "gate", Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeSucceeded},
+			waitingApprovalNode(),
+			stepNode("after", ir.NodeNotStarted, "Approval"),
+		}},
+		{name: "nothing to run", want: false, nodes: []*ir.Node{
+			{Step: ir.Step{ID: "gate", Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeSucceeded},
+			waitingApprovalNode(),
+		}},
+		// Every resume re-runs failed steps, so they run once after the last
+		// manual step resolves instead of once per approval.
+		{name: "failed step elsewhere", want: false, nodes: []*ir.Node{
+			{Step: ir.Step{ID: "gate", Name: "gate", Approval: &ir.ApprovalConfig{}}, Status: ir.NodeSucceeded},
+			waitingApprovalNode(),
+			stepNode("lint", ir.NodeFailed),
+			stepNode("after", ir.NodeNotStarted, "gate"),
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, UnblockedNodeReady(&ir.DAGRunStatus{Status: ir.Waiting, Nodes: tt.nodes}))
+		})
+	}
+	assert.False(t, UnblockedNodeReady(nil))
+}
+
 func TestCompleteEnqueuesRemoteResume(t *testing.T) {
 	fixture := newServiceFixture(t, nil)
 	fixture.status.WorkerID = "worker-a"

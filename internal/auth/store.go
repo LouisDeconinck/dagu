@@ -205,9 +205,14 @@ type WebhookStore interface {
 	// List returns all webhooks in the store.
 	List(ctx context.Context) ([]*Webhook, error)
 
-	// Update modifies an existing webhook.
-	// Returns ErrWebhookNotFound if the webhook does not exist.
-	Update(ctx context.Context, webhook *Webhook) error
+	// UpdateByDAGName applies mutate to the current webhook for a DAG and
+	// stores the result atomically with respect to other writes, including
+	// writes from other processes sharing the store, so concurrent updates
+	// never overwrite each other. mutate may run more than once when a
+	// concurrent write intervenes, so it must only modify the webhook it is
+	// given. An error from mutate aborts the update and is returned unchanged.
+	// Returns ErrWebhookNotFound if no webhook exists for the DAG.
+	UpdateByDAGName(ctx context.Context, dagName string, mutate func(*Webhook) error) (*Webhook, error)
 
 	// Delete removes a webhook by its ID.
 	// Returns ErrWebhookNotFound if the webhook does not exist.
@@ -217,7 +222,8 @@ type WebhookStore interface {
 	// Returns ErrWebhookNotFound if no webhook exists for the DAG.
 	DeleteByDAGName(ctx context.Context, dagName string) error
 
-	// UpdateLastUsed updates the LastUsedAt timestamp for a webhook.
-	// This is called when the webhook is triggered.
-	UpdateLastUsed(ctx context.Context, id string) error
+	// UpdateLastUsed records recent use of a webhook and, when profileTokenID
+	// is not empty, of that profile token, persisting each timestamp at most
+	// once per minute. This is called when the webhook is triggered.
+	UpdateLastUsed(ctx context.Context, id, profileTokenID string) error
 }

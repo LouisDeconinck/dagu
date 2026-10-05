@@ -41,6 +41,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
 	"github.com/dagucloud/dagu/v2/internal/eventstore"
 	"github.com/dagucloud/dagu/v2/internal/gitsync"
+	"github.com/dagucloud/dagu/v2/internal/launcher"
 	"github.com/dagucloud/dagu/v2/internal/license"
 	_ "github.com/dagucloud/dagu/v2/internal/llm/allproviders" // Register LLM providers
 	"github.com/dagucloud/dagu/v2/internal/persis"
@@ -1661,21 +1662,28 @@ func runShutdownSequence(shutdownCtx context.Context, actions shutdownActions) e
 }
 
 func (srv *Server) setupGracefulShutdown(ctx context.Context) {
+	var received os.Signal
 	if signalctx.OSSignalsDisabled(ctx) {
 		<-ctx.Done()
 		logger.Info(ctx, "Context done, shutting down server")
 	} else {
 		quit := make(chan os.Signal, 1)
 		signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-		defer signal.Stop(quit)
 
 		select {
 		case <-ctx.Done():
 			logger.Info(ctx, "Context done, shutting down server")
 		case sig := <-quit:
+			received = sig
 			logger.Info(ctx, "Received shutdown signal", slog.String("signal", sig.String()))
 		}
+		signal.Stop(quit)
 	}
+
+	if received == nil {
+		_ = errors.As(context.Cause(ctx), &received)
+	}
+	runsDone := launcher.PropagateSignal(ctx, received)
 
 	shutdownCtx, cancel := newGracefulShutdownContext(ctx)
 	defer cancel()
@@ -1683,4 +1691,6 @@ func (srv *Server) setupGracefulShutdown(ctx context.Context) {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		logger.Error(ctx, "Failed to shutdown server gracefully", tag.Error(err))
 	}
+	// Runner cleanup has its own DAG budget, independent of HTTP shutdown.
+	<-runsDone
 }

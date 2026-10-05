@@ -930,6 +930,36 @@ steps:
 	})
 }
 
+func TestDAGQuotedEquals(t *testing.T) {
+	server := test.SetupServer(t)
+	const dagName = "quoted_equals"
+	server.CreateDAGFile(t, server.Config.Paths.DAGsDir, dagName, []byte(`params: default
+steps:
+  - id: print
+    run: echo ok
+`))
+
+	for _, endpoint := range []string{"start", "enqueue"} {
+		t.Run(endpoint, func(t *testing.T) {
+			params := `"a=b bare c=\"x y\""`
+			runID := "quoted-equals-" + endpoint
+			var body any = api.ExecuteDAGJSONRequestBody{Params: &params, DagRunId: &runID}
+			if endpoint == "enqueue" {
+				body = api.EnqueueDAGDAGRunJSONRequestBody{Params: &params, DagRunId: &runID}
+			}
+			server.Client().Post("/api/v1/dags/"+dagName+"/"+endpoint, body).
+				ExpectStatus(http.StatusOK).Send(t)
+
+			var details api.GetDAGRunDetails200JSONResponse
+			require.Eventually(t, func() bool {
+				return getJSONWhenAvailable(t, server, "/api/v1/dag-runs/"+dagName+"/"+runID, &details) &&
+					details.DagRunDetails.Params != nil
+			}, dagRunEventuallyTimeout(5*time.Second), 100*time.Millisecond)
+			require.Equal(t, `1=a=b bare c="x y"`, *details.DagRunDetails.Params)
+		})
+	}
+}
+
 func TestListDAGsMatchesFileNameWhenDagNameDiffers(t *testing.T) {
 	server := test.SetupServer(t)
 

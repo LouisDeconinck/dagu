@@ -88,12 +88,15 @@ func (c *remoteClient) getCurrentUser(ctx context.Context) (*api.UserResponse, e
 }
 
 func (c *remoteClient) getDAGByFileName(ctx context.Context, fileName string) (*api.DAGFile, error) {
-	var out api.DAGFile
+	var out api.GetDAGDetails200JSONResponse
 	err := c.do(ctx, http.MethodGet, "/dags/"+url.PathEscape(fileName), nil, &out, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &out, nil
+	if out.Dag == nil || out.Dag.Name == "" {
+		return nil, fmt.Errorf("remote DAG %q response is missing DAG identity", fileName)
+	}
+	return &api.DAGFile{FileName: fileName, Dag: api.DAG{Name: out.Dag.Name}}, nil
 }
 
 func (c *remoteClient) listDAGs(ctx context.Context, params map[string]string) ([]api.DAGFile, error) {

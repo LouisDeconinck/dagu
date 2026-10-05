@@ -75,11 +75,13 @@ type Runner struct {
 	canceled      int32
 	failed        int32
 	mu            sync.RWMutex
-	pause         time.Duration
 	lastError     error
 	preconditions []ir.ConditionResult
 	// preconditionCancel interrupts the running DAG-level precondition check.
 	preconditionCancel context.CancelFunc
+	forceCancel        context.CancelFunc
+	forcedStop         bool
+	stepsDone          chan struct{}
 
 	handlerMu sync.RWMutex
 	handlers  map[ir.HandlerType]*Node
@@ -110,7 +112,6 @@ func New(cfg *Config) *Runner {
 		dagRunID:             cfg.DAGRunID,
 		messagesHandler:      cfg.MessagesHandler,
 		stepExecutor:         NewStepExecutor(),
-		pause:                time.Millisecond * 100,
 		onWait:               cfg.OnWait,
 		forcedStatus:         cfg.ForcedStatus,
 		materializations:     cfg.MaterializationStore,
@@ -165,6 +166,22 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUp
 	}
 	defer cancel()
 	defer plan.Finish()
+	// Forced step cleanup must not cancel lifecycle handler execution.
+	executionCtx, forceCancel := context.WithCancel(ctx)
+	r.mu.Lock()
+	r.forceCancel = forceCancel
+	r.stepsDone = nil
+	if r.forcedStop {
+		forceCancel()
+	}
+	r.mu.Unlock()
+	defer func() {
+		forceCancel()
+		r.mu.Lock()
+		r.forceCancel = nil
+		r.stepsDone = nil
+		r.mu.Unlock()
+	}()
 
 	// Initialize node count metrics
 	nodes := plan.Nodes()
@@ -181,7 +198,7 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUp
 			r.setFailed()
 			r.Cancel(plan)
 		} else {
-			checkCtx, stopCheck := r.watchPreconditionStop(ctx)
+			checkCtx, stopCheck := r.watchPreconditionStop(executionCtx)
 			results, conditionErr := EvaluateConditions(checkCtx, shell, rCtx.DAG.Preconditions)
 			stopCheck()
 			r.setPreconditionResults(results)
@@ -212,11 +229,18 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUp
 		}
 	}
 
-	if rCtx.DAG.IsAgent() {
-		r.runAgentLoop(ctx, plan, progressCh)
-	} else {
-		r.runGraphLoop(ctx, plan, nodes, progressCh)
-	}
+	stepsDone := make(chan struct{})
+	r.mu.Lock()
+	r.stepsDone = stepsDone
+	r.mu.Unlock()
+	func() {
+		defer close(stepsDone)
+		if rCtx.DAG.IsAgent() {
+			r.runAgentLoop(executionCtx, plan, progressCh)
+		} else {
+			r.runGraphLoop(executionCtx, plan, nodes, progressCh)
+		}
+	}()
 
 	// Collect final metrics
 	r.metrics.totalExecutionTime = time.Since(r.metrics.startTime)
@@ -446,7 +470,7 @@ func (r *Runner) runGraphLoop(ctx context.Context, plan *Plan, nodes []*Node, pr
 			}(node)
 
 			if r.delay > 0 {
-				time.Sleep(r.delay)
+				waitForExecution(ctx, r.delay)
 			}
 
 		case node := <-doneCh:
@@ -602,6 +626,9 @@ func (r *Runner) runNodeExecution(ctx context.Context, plan *Plan, node *Node, p
 	r.setupChatMessages(ctx, node)
 	r.setupPushBackConversation(ctx, node)
 	declaredStep := node.Step()
+	// A graceful stop does not signal repeating steps, so an attempt that is
+	// running when the stop arrives completes with its own outcome.
+	stoppedDuringAttempt := false
 
 ExecRepeat: // repeat execution
 	for !r.isCanceled() {
@@ -615,6 +642,7 @@ ExecRepeat: // repeat execution
 			return
 		}
 		execErr := r.execNode(attemptCtx, node, progressCh)
+		stoppedDuringAttempt = r.isCanceled()
 		if execErr == nil {
 			committed, commitErr := commitBuildAttempt(attemptCtx, node, buildSession, stagingPath)
 			if committed {
@@ -657,11 +685,20 @@ ExecRepeat: // repeat execution
 		break ExecRepeat
 	}
 
+	// A stop after a repeating step's attempt finished aborts its pending
+	// repetition, even when the executor already reported the attempt's
+	// success. An attempt that was running when the stop arrived keeps its
+	// outcome.
+	isRepetitive := node.Step().RepeatPolicy.RepeatMode != ""
+	if isRepetitive && r.isCanceled() && !stoppedDuringAttempt {
+		status := node.State().Status
+		if status == ir.NodeRunning || status == ir.NodeSucceeded || status == ir.NodePartiallySucceeded {
+			node.SetStatus(ir.NodeAborted)
+		}
+	}
+
 	// Determine final status for nodes still in running state.
-	// Repetitive tasks complete naturally (signal not sent - see runner.Signal).
-	// Only mark as aborted if: not a repetitive task AND runner was canceled.
 	if node.State().Status == ir.NodeRunning {
-		isRepetitive := node.Step().RepeatPolicy.RepeatMode != ""
 		if !isRepetitive && r.isCanceled() {
 			node.SetStatus(ir.NodeAborted)
 		} else if node.Step().Approval != nil {
@@ -1108,6 +1145,7 @@ func disableDeclaredStepOutputs(env *Env) {
 
 func (r *Runner) execNode(ctx context.Context, node *Node, progressCh chan ProgressUpdate) error {
 	if r.dry {
+		warnDryRunStep(ctx, node)
 		return nil
 	}
 	report := func() {
@@ -1130,7 +1168,8 @@ func (r *Runner) Signal(
 	r.Stop(ctx, plan, cmdutil.TerminationFromSignal(sig), done, allowOverride)
 }
 
-// Stop requests that all active nodes stop according to lifecycle intent.
+// Stop requests workflow steps to stop according to lifecycle intent.
+// Completion excludes lifecycle handlers, which retain their own timeouts.
 func (r *Runner) Stop(
 	ctx context.Context, plan *Plan, intent cmdutil.TerminationIntent, done chan bool, allowOverride bool,
 ) {
@@ -1151,10 +1190,20 @@ func (r *Runner) Stop(
 		}
 	}
 
-	for _, node := range plan.Nodes() {
+	nodes := plan.Nodes()
+	if intent.IsForce() {
+		r.mu.Lock()
+		r.forcedStop = true
+		cancel := r.forceCancel
+		r.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	}
+	for _, node := range nodes {
 		// for a repetitive task, we'll wait for the job to finish
 		// until time reaches max wait time
-		if node.Step().RepeatPolicy.RepeatMode != "" {
+		if node.Step().RepeatPolicy.RepeatMode != "" && !intent.IsForce() {
 			logger.Info(ctx, "Waiting for repeat node to finish",
 				tag.Step(node.Step().Name),
 			)
@@ -1164,12 +1213,13 @@ func (r *Runner) Stop(
 	}
 
 	if done != nil && isTermination {
-		defer func() {
-			for plan.HasActiveNodes() {
-				time.Sleep(r.pause)
-			}
-			done <- true
-		}()
+		r.mu.RLock()
+		stepsDone := r.stepsDone
+		r.mu.RUnlock()
+		if stepsDone != nil {
+			<-stepsDone
+		}
+		done <- true
 	}
 }
 
@@ -1373,16 +1423,17 @@ func isReady(ctx context.Context, plan *Plan, node *Node) bool {
 func (r *Runner) runEventHandler(ctx context.Context, plan *Plan, node *Node, extraEnvs map[string]string) error {
 	defer node.Finish()
 
-	if r.dry {
-		node.SetStatus(ir.NodeSucceeded)
-		return nil
-	}
-
 	var err error
 	ctx, err = r.setupEnvironEventHandler(ctx, plan, node, extraEnvs)
 	if err != nil {
 		node.SetStatus(ir.NodeFailed)
 		return err
+	}
+
+	if r.dry {
+		warnDryRunStep(logger.WithValues(ctx, tag.Step(node.Name())), node)
+		node.SetStatus(ir.NodeSucceeded)
+		return nil
 	}
 
 	if err := node.Prepare(ctx, r.logDir, r.dagRunID); err != nil {
@@ -1485,6 +1536,8 @@ func (r *Runner) resetRunState(plan *Plan) {
 	r.canceled = 0
 	if plan.isCancelRequested() {
 		r.canceled = 1
+	} else {
+		r.forcedStop = false
 	}
 	r.failed = 0
 	r.lastError = nil
@@ -1631,7 +1684,11 @@ func (r *Runner) shouldRetryNode(ctx context.Context, node *Node, execErr error)
 		node.Step().RetryPolicy.MaxInterval,
 		node.GetRetryCount()-1, // -1 because we just incremented
 	)
-	time.Sleep(interval)
+	if !waitForExecution(ctx, interval) || r.isCanceled() {
+		node.SetStatus(ir.NodeAborted)
+		r.setLastError(execErr)
+		return false
+	}
 	node.SetRetriedAt(time.Now())
 	node.SetStatus(ir.NodeRunning)
 	return true
@@ -1928,11 +1985,25 @@ func (r *Runner) prepareNodeForRepeat(ctx context.Context, node *Node, progressC
 		step.RepeatPolicy.MaxInterval,
 		node.State().DoneCount,
 	)
-	time.Sleep(interval)
+	if !waitForExecution(ctx, interval) {
+		node.SetStatus(ir.NodeAborted)
+		return
+	}
 	node.SetRepeated(true) // mark as repeated
 	logger.Info(ctx, "Repeating step")
 
 	r.report(ctx, progressCh, node)
+}
+
+func waitForExecution(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return ctx.Err() == nil
+	}
 }
 
 func NewPlanEnv(ctx context.Context, step ir.Step, plan *Plan) Env {

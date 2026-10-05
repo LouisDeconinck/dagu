@@ -54,6 +54,7 @@ func init() {
 	rootCmd.AddCommand(cmd.Retry())
 	rootCmd.AddCommand(cmd.StartAll())
 	rootCmd.AddCommand(cmd.Cleanup())
+	rootCmd.AddCommand(cmd.PruneArtifacts())
 	rootCmd.AddCommand(cmd.Sync())
 	rootCmd.AddCommand(cmd.Upgrade())
 	rootCmd.AddCommand(cmd.License())
@@ -66,6 +67,7 @@ func init() {
 	rootCmd.AddCommand(cmd.Secret())
 	rootCmd.AddCommand(cmd.Browser())
 	rootCmd.AddCommand(cmd.Computer())
+	rootCmd.AddCommand(cmd.Xlsx())
 
 	config.Version = version
 }

@@ -7,6 +7,7 @@ package spec039_wait_test
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -189,18 +190,13 @@ func TestWaitFileBadState(t *testing.T) {
 	result.ExpectStderrContains("state")
 }
 
-// waitHTTPTestPort is fixed rather than dynamically allocated: with.url is a
-// plain string field, resolved only at execution time, so DAG-build-time
-// config-schema validation sees it unresolved -- a $VAR or ${VAR} reference
-// in with.url fails URL-format validation before the DAG ever runs. A
-// static fixture therefore needs a literal, fixed port.
-const waitHTTPTestPort = "18923"
-
 // TestWaitHTTPPolls proves wait.http genuinely polls: the
 // test server returns a non-matching status for the first two requests and
 // only starts returning the expected 200 afterward, so the step succeeding
 // proves it retried rather than checking once.
 func TestWaitHTTPPolls(t *testing.T) {
+	t.Parallel()
+
 	var requests atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -211,10 +207,8 @@ func TestWaitHTTPPolls(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	listener, err := net.Listen("tcp", "127.0.0.1:"+waitHTTPTestPort)
-	if err != nil {
-		t.Skipf("Skipping: could not bind fixed test port %s: %v", waitHTTPTestPort, err)
-	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
 	server := &http.Server{Handler: mux}
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() {
@@ -223,7 +217,18 @@ func TestWaitHTTPPolls(t *testing.T) {
 		_ = server.Shutdown(ctx)
 	})
 
+	// with.url must be a literal, already-valid absolute URL: config-schema
+	// validation sees it before with-values resolve, so the fixture is
+	// generated with the test server's ephemeral port rather than kept as
+	// static testdata with a fixed port.
 	dagu := harness.NewRunner(t)
+	dagu.WriteFile("http_wait_ready.yaml", fmt.Sprintf(`steps:
+  - action: wait.http
+    with:
+      url: http://127.0.0.1:%d/
+      poll_interval: 100ms
+`, listener.Addr().(*net.TCPAddr).Port))
+
 	result := dagu.Run("start", "http_wait_ready.yaml")
 	result.ExpectExitCode(0)
 	require.GreaterOrEqualf(t, requests.Load(), int32(3),

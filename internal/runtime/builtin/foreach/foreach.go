@@ -25,9 +25,10 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/runtime/executor"
 )
 
-var errForeachItemFailed = errors.New("one or more foreach item bodies failed")
-
-var _ executor.StatusDetailsProvider = (*foreachExecutor)(nil)
+var (
+	_ executor.StatusDetailsProvider = (*foreachExecutor)(nil)
+	_ executor.NodeStatusDeterminer  = (*foreachExecutor)(nil)
+)
 
 type foreachExecutor struct {
 	step          ir.Step
@@ -35,6 +36,17 @@ type foreachExecutor struct {
 	stderr        io.Writer
 	cancel        context.CancelFunc
 	statusDetails []ir.NodeStatusDetail
+	// outcome is what the last Run saw, for DetermineNodeStatus.
+	outcome runOutcome
+}
+
+// runOutcome counts the item bodies of one run and keeps the error a run
+// that failed as a whole reports.
+type runOutcome struct {
+	total     int
+	failed    int
+	cancelled bool
+	err       error
 }
 
 type expandedItem struct {
@@ -89,17 +101,69 @@ func (e *foreachExecutor) Run(ctx context.Context) error {
 	e.cancel = cancel
 	defer cancel()
 
+	e.outcome = runOutcome{}
 	items, err := e.expandItems(ctx)
 	if err != nil {
+		e.outcome.err = err
 		return err
 	}
 
-	results, runErr := e.runItems(ctx, items)
+	results, dispatchErr := e.runItems(ctx, items)
 	e.statusDetails = foreachStatusDetails(items, results, e.step.Foreach.Key != "")
+	e.outcome = summarize(results, dispatchErr)
 	if err := e.writeAggregate(results); err != nil {
+		e.outcome.err = err
 		return err
 	}
-	return runErr
+	return e.outcome.err
+}
+
+// summarize decides what a run reports. A run every item body failed, or
+// one cut short, is an error; a run some item bodies failed is not, since
+// the work of the others is done and published, and DetermineNodeStatus
+// reports it as partially succeeded.
+func summarize(results []itemResult, dispatchErr error) runOutcome {
+	outcome := runOutcome{total: len(results)}
+	var first string
+	for _, result := range results {
+		// An item a cancellation kept from starting neither succeeded nor
+		// failed; the cancellation itself decides the outcome.
+		if result.Status == ir.NodeSucceeded.String() || result.Status == ir.NodeNotStarted.String() {
+			continue
+		}
+		outcome.failed++
+		if first == "" {
+			first = result.Error
+			if first == "" {
+				first = result.Status
+			}
+		}
+	}
+	switch {
+	case dispatchErr != nil:
+		// A cancelled run is aborted; a run that hit its deadline failed.
+		outcome.cancelled = errors.Is(dispatchErr, context.Canceled)
+		outcome.err = dispatchErr
+	case outcome.total > 0 && outcome.failed == outcome.total:
+		outcome.err = fmt.Errorf("all %d item bodies failed; first error: %s", outcome.total, first)
+	}
+	return outcome
+}
+
+// DetermineNodeStatus implements NodeStatusDeterminer: a run some item
+// bodies failed is partially succeeded, so the steps after the loop run
+// and the aggregate tells them which items failed.
+func (e *foreachExecutor) DetermineNodeStatus() (ir.NodeStatus, error) {
+	switch {
+	case e.outcome.cancelled:
+		return ir.NodeAborted, nil
+	case e.outcome.err != nil:
+		return ir.NodeFailed, e.outcome.err
+	case e.outcome.failed > 0:
+		return ir.NodePartiallySucceeded, nil
+	default:
+		return ir.NodeSucceeded, nil
+	}
 }
 
 func (e *foreachExecutor) GetStatusDetails() []ir.NodeStatusDetail {
@@ -261,21 +325,12 @@ dispatch:
 		}(item)
 	}
 	wg.Wait()
-	if dispatchErr != nil {
-		return results, dispatchErr
+	if dispatchErr == nil {
+		// A cancellation that arrived while the last items ran is reported
+		// as such, not as those items' failure.
+		dispatchErr = ctx.Err()
 	}
-
-	var failed bool
-	for _, result := range results {
-		if result.Status != ir.NodeSucceeded.String() {
-			failed = true
-			break
-		}
-	}
-	if failed {
-		return results, errForeachItemFailed
-	}
-	return results, nil
+	return results, dispatchErr
 }
 
 func (e *foreachExecutor) runItem(ctx context.Context, item expandedItem) itemResult {
@@ -400,16 +455,20 @@ func (e *foreachExecutor) writeAggregate(results []itemResult) error {
 	}
 	output.Summary.Total = len(results)
 	for _, result := range results {
-		if result.Status == ir.NodeSucceeded.String() {
+		switch result.Status {
+		case ir.NodeSucceeded.String():
 			output.Summary.Succeeded++
 			if result.Outputs == nil {
 				output.Outputs = append(output.Outputs, map[string]string{})
 			} else {
 				output.Outputs = append(output.Outputs, result.Outputs)
 			}
-			continue
+		case ir.NodeNotStarted.String():
+			// An item a cancellation kept from starting is listed, not
+			// counted as a body that failed.
+		default:
+			output.Summary.Failed++
 		}
-		output.Summary.Failed++
 	}
 
 	w := e.stdout

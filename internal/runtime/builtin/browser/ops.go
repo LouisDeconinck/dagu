@@ -135,9 +135,7 @@ func newRun(ctx context.Context, e *browserExecutor) (*run, error) {
 		r.variables = map[string]string{}
 	}
 	if e.cfg.cacheEnabled() {
-		if r.cache, err = openReplayCache(browserDir, dagName, stepKey); err != nil {
-			return nil, err
-		}
+		r.cache = openReplayCache(browserDir, dagName, stepKey)
 	}
 	r.timeline = &agentstep.Timeline{Log: e.stderr, Masker: masker, Total: len(e.cfg.Do), Update: e.updateSession, Provider: providerName}
 	return r, nil
@@ -474,6 +472,11 @@ func (r *run) act(ctx context.Context, index int, spec actSpec, timeout time.Dur
 			return nil
 		}
 		status = agentstep.StatusHealed
+		// The recording is dropped unless the act that heals it records what
+		// it did.
+		r.cache.Drop(key)
+		// A recorded action before the miss may have loaded a new document.
+		document, _ = r.eng.DocumentID(ctx)
 	}
 	outcome, err := r.performAct(ctx, index, spec.Instruction, document, timeout)
 	if err != nil {

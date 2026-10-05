@@ -1264,6 +1264,26 @@ export interface paths {
         patch: operations["updateDAGRunStepStatus"];
         trace?: never;
     };
+    "/dag-runs/{name}/{dagRunId}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume work after a saved approval
+         * @description Retries resume admission for a root run without changing its approvals or inputs. Already queued or running resumes are not dispatched again.
+         */
+        post: operations["resumeDAGRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dag-runs/{name}/{dagRunId}/steps/{stepName}/approve": {
         parameters: {
             query?: never;
@@ -1275,7 +1295,7 @@ export interface paths {
         put?: never;
         /**
          * Approve a waiting step
-         * @description Approves a step that is in Waiting status, optionally providing input parameters that will be available as environment variables in subsequent steps
+         * @description Approves a waiting step and requests resume when work is ready. Approval and inputs remain saved if resume admission fails; use the run resume endpoint to retry without approving again.
          */
         post: operations["approveDAGRunStep"];
         delete?: never;
@@ -2327,6 +2347,52 @@ export interface paths {
         put: operations["configureDAGWebhookProfileSelection"];
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dags/{fileName}/webhook/profile-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create webhook profile token
+         * @description Creates an additional webhook token bound to one runtime profile.
+         *     Requests authenticated with it always run with that profile.
+         *     Returns the new token, which is only shown once. Not available when
+         *     the webhook auth mode is `hmac_only`. Admin only.
+         *
+         */
+        post: operations["createDAGWebhookProfileToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dags/{fileName}/webhook/profile-tokens/{tokenId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke webhook profile token
+         * @description Revokes a webhook profile token. The token becomes invalid
+         *     immediately. Admin only.
+         *
+         */
+        delete: operations["revokeDAGWebhookProfileToken"];
         options?: never;
         head?: never;
         patch?: never;
@@ -3821,7 +3887,7 @@ export interface components {
             dagRunId: string;
             /** @description The approved step name */
             stepName: string;
-            /** @description Whether the DAG run was re-enqueued for execution */
+            /** @description Whether resume execution was accepted, directly or through a queue */
             resumed: boolean;
         };
         /** @description A single chat message in an LLM session */
@@ -4080,6 +4146,8 @@ export interface components {
             authMode: components["schemas"]["WebhookAuthMode"];
             hmac: components["schemas"]["WebhookHMACDetails"];
             profileSelection: components["schemas"]["WebhookProfileSelectionDetails"];
+            /** @description Additional tokens, each bound to one runtime profile. Remote nodes running versions without profile tokens omit the field. */
+            profileTokens?: components["schemas"]["WebhookProfileToken"][];
             /**
              * Format: date-time
              * @description When the webhook was created
@@ -4117,6 +4185,34 @@ export interface components {
         WebhookProfileSelectionDetails: {
             /** @description Runtime profile names accepted through X-Dagu-Profile. An empty list disables caller selection. */
             allowedProfiles: components["schemas"]["RuntimeProfileName"][];
+        };
+        /** @description Webhook token bound to one runtime profile (token not included) */
+        WebhookProfileToken: {
+            /** @description Unique identifier for the profile token */
+            id: string;
+            /** @description Label identifying the caller that holds the token */
+            name: string;
+            /** @description Leading characters of the token for identification */
+            tokenPrefix: string;
+            profile: components["schemas"]["RuntimeProfileName"];
+            /**
+             * Format: date-time
+             * @description When the profile token was created
+             */
+            createdAt: string;
+            /** @description User ID who created the profile token */
+            createdBy?: string;
+            /**
+             * Format: date-time
+             * @description When the profile token last authorized a request
+             */
+            lastUsedAt?: string;
+        };
+        /** @description Request to create a webhook profile token */
+        WebhookProfileTokenCreateRequest: {
+            /** @description Label identifying the caller that will hold the token */
+            name: string;
+            profile: components["schemas"]["RuntimeProfileName"];
         };
         /** @description Replacement runtime-profile allowlist for a webhook */
         WebhookProfileSelectionRequest: {
@@ -5300,6 +5396,8 @@ export interface components {
             onWait?: components["schemas"]["Node"];
             /** @description List of preconditions that must be met before the DAG-run can start */
             preconditions?: components["schemas"]["Condition"][];
+            /** @description Top-level error recorded for the DAG-run, such as a definition build failure that prevented the run from starting */
+            error?: string;
             /** @description Goal progress of an agent DAG-run. Absent for other DAG types. */
             agentTasks?: components["schemas"]["AgentTask"][];
             /** @description Ordered decision timeline of an agent DAG-run: what the agent ran, in what order, and when each task was satisfied. Absent for other DAG types. */
@@ -5310,6 +5408,8 @@ export interface components {
             sourceFileName?: components["schemas"]["DAGFileName"];
             /** @description Whether completed human-task input is durable but the same DAG-run still needs its retry queued */
             humanTaskResumePending?: boolean;
+            /** @description Whether a root run has a saved approval and ready work whose resume still needs to be accepted */
+            approvalResumePending?: boolean;
         };
         /** @description One file within a DAG-run's artifact directory */
         ArtifactListFile: {
@@ -5982,12 +6082,14 @@ export interface components {
         };
         /** @description Precondition that must be satisfied before running a step or DAG-run */
         Condition: {
-            /** @description Value or command text to evaluate. When `expected` is omitted, this runs as a command check. When `expected` is set, this is value-resolved and compared as data. */
+            /** @description Value or command text to evaluate. When `expected` and `expectedAny` are omitted, this runs as a command check. When either is set, this is value-resolved and compared as data. */
             condition?: string;
             /** @description Dynamic value expression to evaluate and compare with `expected`. Valid only when `expected` is set and `condition` is omitted. */
             eval?: string;
             /** @description Expected result for a value-match precondition. When set, Dagu compares the actual value from `condition` or `eval` instead of using command exit status. */
             expected?: string;
+            /** @description Alternative expected results for a value-match precondition, set instead of `expected`. The condition is met when any of them matches. Set on a step that a router lists under several routes. */
+            expectedAny?: string[];
             /** @description If true, inverts the condition result (run when condition does NOT match) */
             negate?: boolean;
             /** @description Error message if the condition is not met */
@@ -6986,6 +7088,8 @@ export interface components {
         UserId: string;
         /** @description unique identifier of the API key */
         APIKeyId: string;
+        /** @description unique identifier of the webhook profile token */
+        WebhookProfileTokenId: string;
         /** @description number of items per page (default is 30, max is 100) */
         PerPage: number;
         /** @description Number of Wiki page entries per page (default 50, max 200) */
@@ -11066,6 +11170,74 @@ export interface operations {
             };
         };
     };
+    resumeDAGRun: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run or 'latest' to get the most recent DAG-run */
+                dagRunId: components["parameters"]["DAGRunId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Resume accepted or already in progress */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        dagRunId: components["schemas"]["DAGRunId"];
+                        /** @description Whether execution has been accepted */
+                        resumed: boolean;
+                    };
+                };
+            };
+            /** @description DAG-run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Run has no approved work ready to resume or its state changed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Approval remains saved but resume admission failed; retry this endpoint */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     approveDAGRunStep: {
         parameters: {
             query?: {
@@ -11109,6 +11281,24 @@ export interface operations {
             };
             /** @description DAG-run or step not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Run state changed before resume admission */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Approval was saved but resume admission failed; use the run resume endpoint */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -12768,7 +12958,7 @@ export interface operations {
                 remoteNode?: components["parameters"]["RemoteNode"];
             };
             header?: {
-                /** @description Bearer token for webhook authentication (e.g., 'Bearer dagu_wh_...'). Required only when the webhook auth mode includes token authentication. */
+                /** @description Bearer token for webhook authentication (e.g., 'Bearer dagu_wh_...'). Accepts the webhook's default token or one of its profile tokens. Required only when the webhook auth mode includes token authentication. */
                 Authorization?: string;
                 /** @description HMAC webhook signature in the format `sha256=<hex>`. Required only
                  *     when the webhook auth mode includes HMAC authentication with strict
@@ -12777,7 +12967,7 @@ export interface operations {
                  *     `x-dagu-profile:<profile>\n<raw-request-body>`.
                  *      */
                 "X-Dagu-Signature"?: string;
-                /** @description Runtime profile selected for this DAG run. The profile must be allowed by the webhook profile-selection policy. Omit the header to use the DAG's default profile resolution. */
+                /** @description Runtime profile selected for this DAG run. With the default token, the profile must be allowed by the webhook profile-selection policy; omit the header to use the DAG's default profile resolution. With a profile token, the run always uses the token's profile; the header may be omitted or must name that profile. */
                 "X-Dagu-Profile"?: components["schemas"]["RuntimeProfileName"];
             };
             path: {
@@ -12819,7 +13009,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description Forbidden - webhook disabled or not configured */
+            /** @description Forbidden - webhook disabled or not configured, or the requested runtime profile is not allowed for the token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -14348,6 +14538,127 @@ export interface operations {
                 };
             };
             /** @description No webhook or runtime profile found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    createDAGWebhookProfileToken: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description the name of the DAG file */
+                fileName: components["parameters"]["DAGFileName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebhookProfileTokenCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Profile token created successfully */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookCreateResponse"];
+                };
+            };
+            /** @description Invalid name, unavailable runtime profile, unsupported auth mode, or token limit reached */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description No webhook or runtime profile found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    revokeDAGWebhookProfileToken: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description the name of the DAG file */
+                fileName: components["parameters"]["DAGFileName"];
+                /** @description unique identifier of the webhook profile token */
+                tokenId: components["parameters"]["WebhookProfileTokenId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Profile token revoked successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookDetails"];
+                };
+            };
+            /** @description Insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description No webhook or profile token found */
             404: {
                 headers: {
                     [name: string]: unknown;

@@ -97,6 +97,12 @@ var (
 		usage:     "Parameters to pass to the dag-run (overrides DAG defaults; supports positional values and key=value pairs, e.g., P1=foo P2=bar)",
 	}
 
+	paramsStdinFlag = commandLineFlag{
+		name:   "params-stdin",
+		usage:  "Read run parameters from piped or redirected stdin (up to 1 MiB; -- and --params take precedence)",
+		isBool: true,
+	}
+
 	nameFlag = commandLineFlag{
 		name:      "name",
 		shorthand: "N",
@@ -414,6 +420,18 @@ var (
 		shorthand: "f",
 		usage:     "Skip confirmation prompt",
 		isBool:    true,
+	}
+
+	pruneArtifactsOlderThanFlag = commandLineFlag{
+		name:         "older-than",
+		shorthand:    "t",
+		defaultValue: "24h",
+		usage:        "Only remove artifact entries older than duration (e.g. 10d, 24h, 1w). A minimum of 1h is enforced",
+	}
+
+	pruneArtifactsRootFlag = commandLineFlag{
+		name:  "root",
+		usage: "Artifact root to prune (default: configured paths.artifact_dir), such as a previous <data_dir>/artifacts or a DAG's artifacts.dir. Roots holding run history or logs are refused",
 	}
 
 	psDAGFlag = commandLineFlag{
