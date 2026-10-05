@@ -1,7 +1,8 @@
 // Copyright (C) 2026 Yota Hamada
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Package mailbox reads and organizes email in an IMAP mailbox.
+// Package mailbox reads and organizes email in an IMAP mailbox or, through the
+// Gmail API, in a Gmail mailbox.
 package mailbox
 
 import (
@@ -32,8 +33,11 @@ const (
 
 // Account is a mail account whose values are already resolved.
 type Account struct {
-	Server   Server
-	Username string
+	Server Server
+	// GmailEndpoint is the Gmail API endpoint DialGmail uses; empty for
+	// Google's.
+	GmailEndpoint string
+	Username      string
 	// Password authenticates with LOGIN. Token is used when Password is empty.
 	Password string
 	Token    func(context.Context) (*oauth2.Token, error)

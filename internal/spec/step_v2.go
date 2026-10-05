@@ -109,6 +109,17 @@ var builtinActionNormalizers = map[string]actionNormalizer{
 	"wait.file":           operationAction("wait", "file"),
 	"wait.http":           operationAction("wait", "http"),
 	"wait.until":          operationAction("wait", "until"),
+	"xlsx.append":         xlsxAction("append", true),
+	"xlsx.convert":        xlsxAction("convert", true),
+	"xlsx.extract":        xlsxExtractAction(),
+	"xlsx.info":           xlsxAction("info", true),
+	"xlsx.list_sheets":    xlsxAction("list_sheets", true),
+	"xlsx.read":           xlsxAction("read", true),
+	"xlsx.sheet":          xlsxAction("sheet", true),
+	"xlsx.update_rows":    xlsxAction("update_rows", true),
+	"xlsx.validate":       xlsxAction("validate", true),
+	"xlsx.write":          xlsxAction("write", true),
+	"xlsx.write_cells":    xlsxAction("write_cells", true),
 }
 
 func normalizeStepExecutionRaw(raw map[string]any, registry *customStepTypeRegistry) (map[string]any, error) {

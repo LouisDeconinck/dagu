@@ -402,6 +402,36 @@ steps:
 		})
 	})
 
+	t.Run("DAGLevelConfigResolvesParams", func(t *testing.T) {
+		th := test.Setup(t)
+
+		dagConfig := fmt.Sprintf(`params:
+  - name: ssh_host
+    default: 127.0.0.1
+  - name: ssh_port
+    default: "%s"
+ssh:
+  host: ${params.ssh_host}
+  port: ${params.ssh_port}
+  user: %s
+  key: "%s"
+  strict_host_key: false
+  shell: /bin/sh
+steps:
+  - name: params-ssh
+    action: ssh.run
+    with:
+      command: echo "connected via params"
+    output: PARAMS_SSH_OUT
+`, sshServer.hostPort, sshTestUser, sshServer.keyPath)
+		dag := th.DAG(t, dagConfig)
+		dag.Agent().RunSuccess(t)
+		dag.AssertLatestStatus(t, ir.Succeeded)
+		dag.AssertOutputs(t, map[string]any{
+			"PARAMS_SSH_OUT": "connected via params",
+		})
+	})
+
 	t.Run("OSEnvVarNotExpandedLocally", func(t *testing.T) {
 		th := test.Setup(t)
 

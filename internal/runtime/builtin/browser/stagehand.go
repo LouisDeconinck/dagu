@@ -27,6 +27,11 @@ const extractBatchSource = `async (batch, input) => (await batch.extract(input.i
 
 const telemetryPath = "/v1/traces"
 
+// actResponseFormat names the model answer that picks the element an act
+// instruction describes. The answer's twoStep field makes the runtime ask
+// the model for a second action and perform it too.
+const actResponseFormat = "Act"
+
 const (
 	// pageCallTimeout bounds a page read or screenshot, so a page that stops
 	// responding fails the step instead of hanging it.
@@ -36,10 +41,27 @@ const (
 	callTimeoutSlack = 5 * time.Second
 	// exitPollInterval spaces the checks for a closing browser's exit.
 	exitPollInterval = 100 * time.Millisecond
+	// unstartedCallTimeout bounds each request that ends a browser whose
+	// runtime failed to start, so a slow request cannot use up the next one's
+	// time.
+	unstartedCallTimeout = 5 * time.Second
 )
 
 // pageTextExpression reads the text a person sees on the page.
 const pageTextExpression = `document.body ? document.body.innerText : ""`
+
+// documentExpression reads the time the page's document began loading, which
+// differs for every document the page loads.
+const documentExpression = `String(performance.timeOrigin)`
+
+// sessionLostMarkers are the texts by which the browser runtime reports a
+// command whose page session was detached: the browser's answer to a command
+// sent after the detach, and the runtime's own rejection of a command still
+// in flight.
+var sessionLostMarkers = []string{
+	"Session with given id not found",
+	"target closed before CDP",
+}
 
 // selectorVisibleExpression reports whether the selector, a JSON string
 // literal substituted for %s, matches any rendered, visible element.
@@ -104,14 +126,15 @@ func (stagehandLauncher) Launch(ctx context.Context, opts launchOptions) (engine
 	if opts.Proxy != "" {
 		launch.Proxy = &stagehand.LocalProxyConfig{Server: opts.Proxy}
 	}
+	cdpURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	browser, err := stagehand.LaunchLocalBrowser(ctx, launch)
 	if err != nil {
-		return nil, fmt.Errorf("launch browser: %w%s", err, sandboxHint(opts.NoSandbox))
+		launchErr := fmt.Errorf("launch browser: %w%s", err, sandboxHint(opts.NoSandbox))
+		return nil, errors.Join(launchErr, endUnstartedBrowser(ctx, nil, cdpURL, opts.UserDataDir))
 	}
-	cdpURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 	eng, err := startEngine(ctx, browser, cdpURL, opts)
 	if err != nil {
-		return nil, errors.Join(err, browser.Close(context.WithoutCancel(ctx)))
+		return nil, errors.Join(err, endUnstartedBrowser(ctx, browser, cdpURL, opts.UserDataDir))
 	}
 	extension, err := browserhost.StagehandExtension(ctx, cdpURL)
 	if err != nil {
@@ -145,6 +168,37 @@ func (stagehandLauncher) Reattach(ctx context.Context, handle browserHandle, opt
 		return nil, errors.Join(err, eng.Close(context.WithoutCancel(ctx)))
 	}
 	return eng, nil
+}
+
+// endUnstartedBrowser ends the browser launched with profileDir at cdpURL
+// after its runtime failed to start. The SDK leaves a kept-alive browser
+// running then, and browser, when known, may no longer reach it, so the
+// browser is asked to exit over DevTools. The debugging port was only free
+// when chosen, so the browser is closed only when it uses profileDir.
+func endUnstartedBrowser(ctx context.Context, browser *stagehand.Browser, cdpURL, profileDir string) error {
+	ctx = context.WithoutCancel(ctx)
+	var err error
+	if profileDir != "" {
+		owned, ownErr := boundCall(ctx, unstartedCallTimeout, func(ctx context.Context) (bool, error) {
+			return browserhost.UsesProfile(ctx, cdpURL, profileDir)
+		})
+		switch {
+		case errors.Is(ownErr, browserhost.ErrUnreachable):
+		case ownErr != nil:
+			err = fmt.Errorf("identify browser: %w", ownErr)
+		case owned:
+			_, err = boundCall(ctx, unstartedCallTimeout, func(ctx context.Context) (struct{}, error) {
+				return struct{}{}, browserhost.CloseBrowser(ctx, cdpURL)
+			})
+		}
+	}
+	if browser != nil {
+		_, closeErr := boundCall(ctx, unstartedCallTimeout, func(ctx context.Context) (struct{}, error) {
+			return struct{}{}, browser.Close(ctx)
+		})
+		err = errors.Join(err, closeErr)
+	}
+	return err
 }
 
 func startEngine(ctx context.Context, browser *stagehand.Browser, cdpURL string, opts launchOptions) (*stagehandEngine, error) {
@@ -252,6 +306,9 @@ func (e *stagehandEngine) Act(ctx context.Context, instruction string, variables
 	result, err := boundCall(ctx, timeout+callTimeoutSlack, func(ctx context.Context) (stagehand.ActResult, error) {
 		return e.client.Act(ctx, stagehand.ActInstruction(instruction), actOptions(variables, timeout))
 	})
+	if lost := sessionLost(result, err); lost != nil {
+		return actOutcome{}, lost
+	}
 	if err != nil {
 		return actOutcome{}, err
 	}
@@ -270,30 +327,85 @@ func (e *stagehandEngine) Act(ctx context.Context, instruction string, variables
 	return outcome, nil
 }
 
-func (e *stagehandEngine) Replay(ctx context.Context, actions []recordedAction, variables map[string]string, timeout time.Duration) (bool, error) {
-	for _, recorded := range actions {
-		action := stagehand.Action{
-			Selector:    recorded.Selector,
-			Description: recorded.Description,
-			Arguments:   recorded.Arguments,
+func (e *stagehandEngine) Replay(ctx context.Context, recorded recordedAction, variables map[string]string, timeout time.Duration) (bool, error) {
+	// The runtime types into or fills a hidden element without failing, so
+	// a recorded element that is now hidden, such as a field in a closed
+	// dialog, counts as a miss.
+	if !e.targetVisible(ctx, recorded.Selector) {
+		return false, ctx.Err()
+	}
+	action := stagehand.Action{
+		Selector:    recorded.Selector,
+		Description: recorded.Description,
+		Arguments:   recorded.Arguments,
+	}
+	if recorded.Method != "" {
+		action.Method = new(recorded.Method)
+	}
+	result, err := boundCall(ctx, timeout+callTimeoutSlack, func(ctx context.Context) (stagehand.ActResult, error) {
+		return e.client.Act(ctx, stagehand.ObservedAction(action), actOptions(variables, timeout))
+	})
+	if lost := sessionLost(result, err); lost != nil {
+		return false, lost
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
 		}
-		if recorded.Method != "" {
-			action.Method = new(recorded.Method)
-		}
-		result, err := boundCall(ctx, timeout+callTimeoutSlack, func(ctx context.Context) (stagehand.ActResult, error) {
-			return e.client.Act(ctx, stagehand.ObservedAction(action), actOptions(variables, timeout))
-		})
+		return false, nil
+	}
+	return result.Data.Success, nil
+}
+
+// targetVisible reports whether selector, resolved as a replayed action
+// resolves it, matches a visible element. It reports false when the page
+// cannot tell, including when the page was lost: no action has run yet, so
+// a lost page is a miss, never an action that may have taken effect.
+func (e *stagehandEngine) targetVisible(ctx context.Context, selector string) bool {
+	visible, err := boundCall(ctx, e.pageCallTimeout, func(ctx context.Context) (bool, error) {
+		page, err := e.page(ctx)
 		if err != nil {
-			if ctx.Err() != nil {
-				return false, ctx.Err()
-			}
-			return false, nil
+			return false, err
 		}
-		if !result.Data.Success {
-			return false, nil
+		return page.Locator(selector).IsVisible(ctx)
+	})
+	return err == nil && visible
+}
+
+// sessionLost returns an error wrapping errPageSessionLost when an act call
+// that returned result and err failed because the page's session was
+// detached, or nil. The runtime reports that detach in a failed result when
+// the action itself failed, and as an RPC error when the work around the
+// action did.
+func sessionLost(result stagehand.ActResult, err error) error {
+	message := result.Data.Message
+	var rpcErr *stagehand.RPCError
+	switch {
+	case errors.As(err, &rpcErr):
+		message = rpcErr.Message
+	case err != nil || result.Data.Success:
+		return nil
+	}
+	for _, marker := range sessionLostMarkers {
+		if strings.Contains(message, marker) {
+			return fmt.Errorf("%w: %s", errPageSessionLost, message)
 		}
 	}
-	return true, nil
+	return nil
+}
+
+func (e *stagehandEngine) DocumentID(ctx context.Context) (string, error) {
+	return boundCall(ctx, e.pageCallTimeout, func(ctx context.Context) (string, error) {
+		page, err := e.page(ctx)
+		if err != nil {
+			return "", err
+		}
+		origin, err := page.Evaluate(ctx, documentExpression)
+		if err != nil {
+			return "", err
+		}
+		return page.PageID() + ":" + string(origin), nil
+	})
 }
 
 func (e *stagehandEngine) Extract(ctx context.Context, instruction string, schema json.RawMessage, timeout time.Duration) (json.RawMessage, error) {
@@ -546,12 +658,18 @@ func stagehandGenerate(generate generateFunc) stagehand.LLMGenerateFunc {
 		if err != nil {
 			return stagehand.LLMGenerateResult{}, err
 		}
+		answer := resp.JSON
+		if req.SchemaName == actResponseFormat {
+			if answer, err = singleStep(answer); err != nil {
+				return stagehand.LLMGenerateResult{}, err
+			}
+		}
 		return stagehand.StructuredGenerateResult(stagehand.LLMStructuredGenerateResult{
 			Role: stagehand.LLMRoleAssistant,
 			Content: stagehand.LLMMessageContent{
-				stagehand.TextContentBlock(stagehand.LLMTextContent{Type: "text", Text: string(resp.JSON)}),
+				stagehand.TextContentBlock(stagehand.LLMTextContent{Type: "text", Text: string(answer)}),
 			},
-			StructuredContent: resp.JSON,
+			StructuredContent: answer,
 			Usage: &stagehand.LLMUsage{
 				InputTokens:  resp.Usage.Input,
 				OutputTokens: resp.Usage.Output,
@@ -559,6 +677,25 @@ func stagehandGenerate(generate generateFunc) stagehand.LLMGenerateFunc {
 			},
 		}), nil
 	}
+}
+
+// singleStep turns off the second action an act answer asks for, so an act
+// performs only the one action its instruction describes. An answer that is
+// not an object is returned unchanged for the runtime to reject.
+func singleStep(answer json.RawMessage) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(answer, &fields); err != nil {
+		return answer, nil
+	}
+	if _, ok := fields["twoStep"]; !ok {
+		return answer, nil
+	}
+	fields["twoStep"] = json.RawMessage("false")
+	single, err := json.Marshal(fields)
+	if err != nil {
+		return nil, fmt.Errorf("encode act answer: %w", err)
+	}
+	return single, nil
 }
 
 func messageText(content stagehand.LLMMessageContent) (string, error) {

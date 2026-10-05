@@ -387,6 +387,9 @@ func (e *harnessExecutor) invocationCommand(ctx context.Context, cfg providerCon
 	}
 
 	cmd := exec.CommandContext(ctx, binaryPath, args...)
+	// The managed process owns cancellation so the entire process group stops
+	// before the cancellation result is reported.
+	cmd.Cancel = nil
 	if len(cmd.Args) > 0 {
 		cmd.Args[0] = cfg.binaryName()
 	}

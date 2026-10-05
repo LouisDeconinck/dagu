@@ -135,9 +135,7 @@ func newRun(ctx context.Context, e *browserExecutor) (*run, error) {
 		r.variables = map[string]string{}
 	}
 	if e.cfg.cacheEnabled() {
-		if r.cache, err = openReplayCache(browserDir, dagName, stepKey); err != nil {
-			return nil, err
-		}
+		r.cache = openReplayCache(browserDir, dagName, stepKey)
 	}
 	r.timeline = &agentstep.Timeline{Log: e.stderr, Masker: masker, Total: len(e.cfg.Do), Update: e.updateSession, Provider: providerName}
 	return r, nil
@@ -448,6 +446,9 @@ func (r *run) act(ctx context.Context, index int, spec actSpec, timeout time.Dur
 		}
 	}
 	began, before := time.Now(), r.bridge.totals()
+	// The document the page shows before the act tells whether an act that
+	// lost the page took effect. It stays empty when the page cannot be read.
+	document, _ := r.eng.DocumentID(ctx)
 	useCache := r.cache != nil && (spec.Cache == nil || *spec.Cache)
 	key := ""
 	if useCache {
@@ -459,7 +460,7 @@ func (r *run) act(ctx context.Context, index int, spec actSpec, timeout time.Dur
 	}
 	status := agentstep.StatusCompleted
 	if actions, ok := r.lookupCache(key); ok {
-		replayed, err := r.eng.Replay(ctx, actions, r.variables, timeout)
+		replayed, err := r.replay(ctx, actions, document, timeout)
 		if err != nil {
 			return err
 		}
@@ -471,8 +472,13 @@ func (r *run) act(ctx context.Context, index int, spec actSpec, timeout time.Dur
 			return nil
 		}
 		status = agentstep.StatusHealed
+		// The recording is dropped unless the act that heals it records what
+		// it did.
+		r.cache.Drop(key)
+		// A recorded action before the miss may have loaded a new document.
+		document, _ = r.eng.DocumentID(ctx)
 	}
-	outcome, err := r.eng.Act(ctx, spec.Instruction, r.variables, timeout)
+	outcome, err := r.performAct(ctx, index, spec.Instruction, document, timeout)
 	if err != nil {
 		return err
 	}
@@ -487,12 +493,77 @@ func (r *run) act(ctx context.Context, index int, spec actSpec, timeout time.Dur
 	if useCache && len(outcome.Actions) > 0 {
 		r.cache.Stage(key, outcome.Actions)
 	}
+	detail := describeActions(outcome.Actions)
+	if len(outcome.Actions) == 0 {
+		// An act counted done because it loaded a new document says so.
+		detail = outcome.Message
+	}
 	r.report(ctx, agentstep.Report{
 		Index: index, Kind: opAct, Subject: spec.Instruction, Status: status,
-		Detail: describeActions(outcome.Actions), Tokens: r.bridge.totals().sub(before).total(),
+		Detail: detail, Tokens: r.bridge.totals().sub(before).total(),
 		Duration: time.Since(began),
 	})
 	return nil
+}
+
+// replay performs recorded actions in order and reports whether every one
+// succeeded. document identifies the page's document before the first. An
+// action that lost the page is judged by the document it started on: a new
+// document means it took effect, and the next action runs there; the same
+// document means it did not, and the replay ends so the model acts instead.
+func (r *run) replay(ctx context.Context, actions []recordedAction, document string, timeout time.Duration) (bool, error) {
+	for i, action := range actions {
+		if i > 0 {
+			document, _ = r.eng.DocumentID(ctx)
+		}
+		replayed, err := r.eng.Replay(ctx, action, r.variables, timeout)
+		if errors.Is(err, errPageSessionLost) {
+			replayed, err = r.loadedNewDocument(ctx, document, err)
+		}
+		if err != nil || !replayed {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// performAct runs an act and judges one that lost the page by the page's
+// document: a document other than document means the act took effect, and
+// the same document means it did not, so it runs once more. Acting again
+// without that check could submit a form twice.
+func (r *run) performAct(ctx context.Context, index int, instruction, document string, timeout time.Duration) (actOutcome, error) {
+	for retried := false; ; retried = true {
+		outcome, err := r.eng.Act(ctx, instruction, r.variables, timeout)
+		if !errors.Is(err, errPageSessionLost) {
+			return outcome, err
+		}
+		loaded, judgeErr := r.loadedNewDocument(ctx, document, err)
+		if loaded {
+			return actOutcome{Success: true, Message: "the page loaded a new document before the act reported back"}, nil
+		}
+		if judgeErr != nil {
+			return actOutcome{}, judgeErr
+		}
+		if retried {
+			return actOutcome{}, err
+		}
+		_, _ = fmt.Fprintf(r.timeline.Log, "warning: %s the browser lost its connection to the page before the act took effect; running it again\n",
+			r.timeline.Position(index))
+	}
+}
+
+// loadedNewDocument reports whether the page shows a document other than
+// document after lost, an error wrapping errPageSessionLost. It returns lost
+// when the documents cannot be compared.
+func (r *run) loadedNewDocument(ctx context.Context, document string, lost error) (bool, error) {
+	if document == "" {
+		return false, lost
+	}
+	current, err := r.eng.DocumentID(ctx)
+	if err != nil {
+		return false, errors.Join(lost, err)
+	}
+	return current != document, nil
 }
 
 func (r *run) lookupCache(key string) ([]recordedAction, bool) {
@@ -764,7 +835,7 @@ func (r *run) forgetReplays(ctx context.Context, index int, kind string, cause e
 		return
 	}
 	if index < 0 || ctx.Err() != nil || kind == opAsk || kind == kindDownload ||
-		errors.Is(cause, errBrowserUnresponsive) || r.bridge.failedRequest() {
+		errors.Is(cause, errBrowserUnresponsive) || errors.Is(cause, errPageSessionLost) || r.bridge.failedRequest() {
 		r.cache.Discard()
 		return
 	}

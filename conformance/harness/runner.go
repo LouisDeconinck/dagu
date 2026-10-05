@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -105,13 +106,20 @@ func (r *Runner) WithCommandTimeout(timeout time.Duration) *Runner {
 // Run executes the configured Dagu binary inside the isolated project.
 func (r *Runner) Run(args ...string) *Result {
 	r.t.Helper()
-	return r.run(nil, args...)
+	return r.run(nil, nil, args...)
 }
 
 // RunWithEnv executes the configured Dagu binary with extra environment entries.
 func (r *Runner) RunWithEnv(env []string, args ...string) *Result {
 	r.t.Helper()
-	return r.run(env, args...)
+	return r.run(env, nil, args...)
+}
+
+// RunWithStdin executes the configured Dagu binary with the supplied input and
+// extra environment entries. The caller retains ownership of stdin.
+func (r *Runner) RunWithStdin(env []string, stdin io.Reader, args ...string) *Result {
+	r.t.Helper()
+	return r.run(env, stdin, args...)
 }
 
 // StartWithEnv starts the configured Dagu binary and returns without waiting.
@@ -209,7 +217,7 @@ func (p *Process) FailureOutput() string {
 	}
 }
 
-func (r *Runner) run(extraEnv []string, args ...string) *Result {
+func (r *Runner) run(extraEnv []string, stdin io.Reader, args ...string) *Result {
 	r.t.Helper()
 
 	timeout := commandTimeout(r.t)
@@ -225,6 +233,7 @@ func (r *Runner) run(extraEnv []string, args ...string) *Result {
 	cmd := exec.CommandContext(ctx, daguBinary(r.t), args...) //nolint:gosec
 	cmd.Dir = r.dir
 	cmd.Env = appendEnv(append(isolatedEnv(r.t), "PWD="+r.dir), extraEnv...)
+	cmd.Stdin = stdin
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 

@@ -20,6 +20,7 @@ const (
 	fieldHostConfigObject
 	fieldDAGEnv
 	fieldRuntimeDAGEnv
+	fieldDAGEnvCompletion
 	fieldDynamicParamEval
 	fieldDotenvPath
 	fieldStepDir
@@ -84,6 +85,10 @@ func DAGEnvField(path string) Field { return newField(path, fieldDAGEnv) }
 
 // RuntimeDAGEnvField returns the policy for runtime DAG env entries.
 func RuntimeDAGEnvField(path string) Field { return newField(path, fieldRuntimeDAGEnv) }
+
+// DAGEnvCompletionField returns the policy for completing a DAG env entry that
+// loading already resolved. Escapes applied at load are not applied again.
+func DAGEnvCompletionField(path string) Field { return newField(path, fieldDAGEnvCompletion) }
 
 // DynamicParamEvalField returns the policy for dynamic param eval values.
 func DynamicParamEvalField(path string) Field { return newField(path, fieldDynamicParamEval) }

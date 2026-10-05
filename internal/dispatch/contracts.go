@@ -104,3 +104,17 @@ type Dispatcher interface {
 	GetDAGRunStatus(ctx context.Context, dagName, dagRunID string, rootRef *ir.DAGRunRef) (*DAGRunStatusResult, error)
 	RequestCancel(ctx context.Context, dagName, dagRunID string, rootRef *ir.DAGRunRef) error
 }
+
+// DefinitionError reports a dispatch rejected because its DAG definition
+// cannot be built. Dispatching the same definition again cannot succeed.
+type DefinitionError struct {
+	Err error
+}
+
+func (e *DefinitionError) Error() string {
+	return "invalid DAG definition: " + e.Err.Error()
+}
+
+func (e *DefinitionError) Unwrap() error {
+	return e.Err
+}

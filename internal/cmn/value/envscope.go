@@ -161,14 +161,32 @@ func (e *EnvScope) ToSlice() []string {
 
 // ToSliceWithoutOrigin returns variables except entries from one origin.
 func (e *EnvScope) ToSliceWithoutOrigin(origin string) []string {
+	entries := e.EntriesWithoutOrigin(origin)
+	result := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, entry.Key+"="+entry.Value)
+	}
+	return result
+}
+
+// EntriesWithoutOrigin returns the effective entries except those carrying the
+// given origin. Each entry keeps the source and origin metadata it holds in
+// this scope, so provenance survives transport into another run's scope.
+// When an excluded entry shadows a lower-precedence entry with the same name,
+// the shadowed entry is still collected. The result is sorted by key for a
+// stable representation.
+func (e *EnvScope) EntriesWithoutOrigin(origin string) []EnvEntry {
 	if e == nil {
 		return nil
 	}
-	all := e.collectAll(func(entry EnvEntry) bool { return entry.Origin != origin })
-	result := make([]string, 0, len(all))
-	for key, value := range all {
-		result = append(result, key+"="+value)
+	entries := make(map[string]EnvEntry)
+	keys := make(map[string]string)
+	e.collectEntries(entries, keys, func(entry EnvEntry) bool { return entry.Origin != origin })
+	result := make([]EnvEntry, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, entry)
 	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Key < result[j].Key })
 	return result
 }
 
@@ -209,6 +227,19 @@ func (e *EnvScope) WithEntriesOrigin(entries map[string]string, source EnvSource
 	newScope := &EnvScope{entries: make(map[string]EnvEntry, len(entries)), parent: e}
 	for key, value := range entries {
 		newScope.entries[key] = EnvEntry{Key: key, Value: value, Source: source, Origin: origin}
+	}
+	return newScope
+}
+
+// WithEnvEntries returns a new scope holding the given entries as one layer.
+// Each entry keeps the source and origin it already carries.
+func (e *EnvScope) WithEnvEntries(entries []EnvEntry) *EnvScope {
+	if len(entries) == 0 {
+		return e
+	}
+	newScope := &EnvScope{entries: make(map[string]EnvEntry, len(entries)), parent: e}
+	for _, entry := range entries {
+		newScope.entries[entry.Key] = entry
 	}
 	return newScope
 }
@@ -337,16 +368,25 @@ func (e *EnvScope) AllUserEnvs() map[string]string {
 // collectAllEntries gathers the effective entry for every name across the full
 // scope chain, so callers can decide on the entry that actually wins.
 func (e *EnvScope) collectAllEntries() map[string]EnvEntry {
+	return e.collectMatchingEntries(nil)
+}
+
+// collectMatchingEntries gathers the effective entry for every name matching
+// include across the full scope chain. A nil include collects everything. When
+// a winning entry is excluded, a shadowed entry it covered is collected
+// instead, so the result reflects the scope as if the excluded entries were
+// absent.
+func (e *EnvScope) collectMatchingEntries(include func(EnvEntry) bool) map[string]EnvEntry {
 	if e == nil {
 		return make(map[string]EnvEntry)
 	}
 	result := make(map[string]EnvEntry)
 	keys := make(map[string]string)
-	e.collectEntries(result, keys)
+	e.collectEntries(result, keys, include)
 	return result
 }
 
-func (e *EnvScope) collectEntries(result map[string]EnvEntry, keys map[string]string) {
+func (e *EnvScope) collectEntries(result map[string]EnvEntry, keys map[string]string, include func(EnvEntry) bool) {
 	if e == nil {
 		return
 	}
@@ -354,9 +394,12 @@ func (e *EnvScope) collectEntries(result map[string]EnvEntry, keys map[string]st
 	defer e.mu.RUnlock()
 
 	if e.parent != nil {
-		e.parent.collectEntries(result, keys)
+		e.parent.collectEntries(result, keys, include)
 	}
 	for k, entry := range e.entries {
+		if include != nil && !include(entry) {
+			continue
+		}
 		id := envScopeKeyID(k)
 		if previous, ok := keys[id]; ok && previous != k {
 			delete(result, previous)

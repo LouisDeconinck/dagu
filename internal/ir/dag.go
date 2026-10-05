@@ -124,6 +124,10 @@ type DAG struct {
 	Consts map[string]any `json:"consts,omitempty"`
 	// EnvEvaluated reports whether Env is safe to reuse as resolved build env.
 	EnvEvaluated bool `json:"-"`
+	// RootEnvSpan locates the DAG's own root env entries in Env when loading
+	// resolved them. Base-config entries come before it, and entries added for
+	// a run, such as dotenv values, come after it.
+	RootEnvSpan EnvSpan `json:"-"`
 	// RuntimeResolved reports whether dotenv resolution is complete for Env.
 	RuntimeResolved bool `json:"-"`
 	// PresolvedBuildEnv stores resolved DAG/base-config env entries needed to
@@ -265,6 +269,12 @@ type DAG struct {
 	Secrets []secretref.Ref `json:"secrets,omitempty"`
 	// Tools declares external CLI tools that must be installed before the DAG runs.
 	Tools *ToolConfig `json:"tools,omitempty"`
+}
+
+// EnvSpan is the half-open range [Start, End) of DAG.Env indexes.
+type EnvSpan struct {
+	Start int
+	End   int
 }
 
 const (

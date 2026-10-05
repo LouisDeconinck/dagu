@@ -89,7 +89,8 @@ func TestSearch(t *testing.T) {
 }
 
 // One loop item fails: the other email is marked read, and the failed one
-// stays unread so the next run takes it again.
+// stays unread so the next run takes it again. The loop is partially
+// succeeded (Spec 018), so the run reports that rather than a failure.
 func TestEachEmailMarkedAfterItsWork(t *testing.T) {
 	t.Parallel()
 
@@ -98,7 +99,9 @@ func TestEachEmailMarkedAfterItsWork(t *testing.T) {
 	broken := server.Append(t, "INBOX", email("Broken", "This one fails."))
 
 	dagu := harness.NewRunner(t)
-	dagu.RunWithEnv(accountEnv(server), "start", "each_mark_read.yaml").ExpectNonZeroExitCode()
+	result := dagu.RunWithEnv(accountEnv(server), "start", "each_mark_read.yaml")
+	result.ExpectExitCode(0)
+	require.Contains(t, result.Stdout(), "Partially Succeeded")
 
 	assert.True(t, server.HasFlag(t, "INBOX", good, imap.FlagSeen))
 	assert.False(t, server.HasFlag(t, "INBOX", broken, imap.FlagSeen))
@@ -194,6 +197,7 @@ func TestMailboxErrors(t *testing.T) {
 		{"not_configured.yaml", "start", `mail account "missing@example.com" is not configured`},
 		{"reply_without_mailbox.yaml", "start", "in_reply_to requires mailbox"},
 		{"scopes_on_google_refresh.yaml", "validate", `oauth.scopes is not valid for provider "google_refresh"`},
+		{"server_on_gmail_api_account.yaml", "validate", `mail account "user@example.com": imap is not used by a google account with oauth, which uses the Gmail API`},
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			t.Parallel()

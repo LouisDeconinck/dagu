@@ -25,6 +25,10 @@ const schemaHTTPTimeout = 30 * time.Second
 // documents, so a generous cap still prevents unbounded memory use.
 const schemaMaxResponseBytes = 10 << 20 // 10 MiB
 
+// errSchemaUnavailable marks a remote schema that could not be fetched, as
+// opposed to one that was fetched but is invalid.
+var errSchemaUnavailable = errors.New("schema source unavailable")
+
 // resolveSchemaFromParams extracts a schema declaration from params and resolves it.
 // Returns (nil, nil) if no schema is declared.
 func resolveSchemaFromParams(params any, workingDir, dagLocation string) (*jsonschema.Resolved, error) {
@@ -122,21 +126,21 @@ func loadSchemaFromURL(schemaURL string) (data []byte, err error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errSchemaUnavailable, err)
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil && err == nil {
-			err = closeErr
+			err = fmt.Errorf("%w: %w", errSchemaUnavailable, closeErr)
 		}
 	}()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+		return nil, fmt.Errorf("%w: HTTP %d: %s", errSchemaUnavailable, resp.StatusCode, resp.Status)
 	}
 
 	data, err = io.ReadAll(io.LimitReader(resp.Body, schemaMaxResponseBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errSchemaUnavailable, err)
 	}
 	if len(data) > schemaMaxResponseBytes {
 		return nil, fmt.Errorf("schema exceeds the %d MiB size limit", schemaMaxResponseBytes/(1<<20))

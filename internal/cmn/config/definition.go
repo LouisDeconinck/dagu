@@ -85,6 +85,9 @@ type Definition struct {
 	// Execution
 	DefaultExecutionMode string `mapstructure:"default_execution_mode"`
 
+	// Signal handling
+	SignalHandling *SignalHandlingDef `mapstructure:"signal_handling"`
+
 	// Features
 	Monitoring *MonitoringDef `mapstructure:"monitoring"`
 	Metrics    *string        `mapstructure:"metrics"` // "public" or "private"
@@ -422,6 +425,13 @@ type SchedulerDef struct {
 type QueueConfigDef struct {
 	Enabled bool       `mapstructure:"enabled"`
 	Config  []QueueDef `mapstructure:"config"`
+}
+
+// SignalHandlingDef configures how supervising Dagu processes handle OS signals.
+type SignalHandlingDef struct {
+	// EnablePropagation forwards shutdown signals received by a supervising
+	// process (server, scheduler, start-all) to running DAG-run subprocesses.
+	EnablePropagation *bool `mapstructure:"enable_propagation"`
 }
 
 // QueueDef configures an individual queue.

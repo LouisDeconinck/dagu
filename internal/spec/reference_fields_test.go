@@ -37,6 +37,24 @@ func TestReferenceFieldsEmitsValidationPathSet(t *testing.T) {
 			Command:    []string{"${consts.command}"},
 			Shell:      []string{"${consts.shell}"},
 		},
+		SSH: &ir.SSHConfig{
+			User:          "${consts.ssh_user}",
+			Host:          "${params.ssh_host}",
+			Port:          "${consts.ssh_port}",
+			Key:           "${consts.ssh_key}",
+			Password:      "${env.SSH_PASSWORD}",
+			KnownHostFile: "${consts.known_hosts}",
+			Shell:         "${consts.ssh_shell}",
+			ShellArgs:     []string{"${consts.ssh_shell_arg}"},
+			Timeout:       "30s",
+			Bastion: &ir.BastionConfig{
+				Host:     "${consts.bastion_host}",
+				Port:     "${consts.bastion_port}",
+				User:     "${consts.bastion_user}",
+				Key:      "${consts.bastion_key}",
+				Password: "${env.BASTION_PASSWORD}",
+			},
+		},
 		Steps: []ir.Step{
 			{
 				ID:     "build",
@@ -177,6 +195,19 @@ func TestReferenceFieldsEmitsValidationPathSet(t *testing.T) {
 		"container.env[0]",
 		"container.command[0]",
 		"container.shell[0]",
+		"ssh.user",
+		"ssh.host",
+		"ssh.port",
+		"ssh.key",
+		"ssh.password",
+		"ssh.known_host_file",
+		"ssh.shell",
+		"ssh.shell",
+		"ssh.bastion.host",
+		"ssh.bastion.port",
+		"ssh.bastion.user",
+		"ssh.bastion.key",
+		"ssh.bastion.password",
 		"steps[0].run",
 		"steps[0].run[0].command",
 		"steps[0].run[0].cmd_with_args",
@@ -270,6 +301,7 @@ func TestReferenceFieldsIncludesOnlyNumericExpected(t *testing.T) {
 					{Condition: "0.9", Expected: "num:>=${params.threshold}"},
 					{Condition: "x", Expected: "${params.literal}"},
 					{Condition: "y", Expected: "re:${params.pattern}"},
+					{Condition: "0.5", ExpectedAny: []string{"num:<${params.low}", "${params.literal}"}},
 				},
 			},
 		},
@@ -283,4 +315,6 @@ func TestReferenceFieldsIncludesOnlyNumericExpected(t *testing.T) {
 	assert.Equal(t, "num:>=${params.threshold}", paths["steps[0].preconditions[0].expected"])
 	assert.NotContains(t, paths, "steps[0].preconditions[1].expected")
 	assert.NotContains(t, paths, "steps[0].preconditions[2].expected")
+	assert.Equal(t, "num:<${params.low}", paths["steps[0].preconditions[3].expected_any[0]"])
+	assert.NotContains(t, paths, "steps[0].preconditions[3].expected_any[1]")
 }
