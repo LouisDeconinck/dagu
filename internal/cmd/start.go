@@ -51,6 +51,13 @@ A DAG definition is a blueprint that defines the DAG structure. This command cre
 instance with a unique DAG-run ID.
 
 Parameters after the "--" separator are passed as execution parameters (either positional or key=value pairs).
+With --params-stdin, piped or redirected stdin supplies the parameters
+(e.g. 'echo "P1=foo P2=bar" | dagu start --params-stdin my_dag'). Input is read
+until EOF, up to 1 MiB. Arguments after "--" and --params take precedence.
+Quote individual stdin values to preserve spaces; "" supplies an empty value.
+Empty or whitespace-only stdin uses DAG defaults.
+Without --params-stdin, stdin is left unread.
+--params-stdin cannot be combined with --from-run-id.
 Flags can override default settings such as DAG-run ID, DAG name, or suppress output.
 
 Use --only to run just the named steps (by name or ID) in a new DAG-run of the
@@ -60,6 +67,7 @@ steps, so the selected steps can reference them. Add --output to set an output
 of a skipped step directly; it takes precedence over --outputs-from.
 
 Examples:
+  echo '"hello world"' | dagu start --params-stdin my_dag
   dagu start my_dag -- P1=foo P2=bar
   dagu start --name my_custom_name my_dag.yaml -- P1=foo P2=bar
   dagu start --only build my_dag
@@ -74,7 +82,7 @@ This command parses the DAG definition, resolves parameters, and initiates the D
 }
 
 // Command line flags for the start command
-var startFlags = []commandLineFlag{paramsFlag, nameFlag, dagRunIDFlag, fromRunIDFlag, parentDAGRunFlag, rootDAGRunFlag, labelsFlag, tagsFlag, defaultWorkingDirFlag, profileFlag, startWorkerIDFlag, attemptIDFlag, triggerTypeFlag, triggerActorFlag, scheduleTimeFlag, sourceFileFlag, noReuseFlag, onlyFlag, outputsFromFlag, outputFlag}
+var startFlags = []commandLineFlag{paramsFlag, paramsStdinFlag, nameFlag, dagRunIDFlag, fromRunIDFlag, parentDAGRunFlag, rootDAGRunFlag, labelsFlag, tagsFlag, defaultWorkingDirFlag, profileFlag, startWorkerIDFlag, attemptIDFlag, triggerTypeFlag, triggerActorFlag, scheduleTimeFlag, sourceFileFlag, noReuseFlag, onlyFlag, outputsFromFlag, outputFlag}
 
 var fromRunIDFlag = commandLineFlag{
 	name:  "from-run-id",
@@ -188,7 +196,7 @@ func runStart(ctx *Context, args []string) error {
 		if len(args) == 0 {
 			return fmt.Errorf("DAG name or file must be provided when using --from-run-id")
 		}
-		if len(args) > 1 || ctx.Command.Flags().Changed("params") || ctx.Command.ArgsLenAtDash() != -1 {
+		if len(args) > 1 || ctx.Command.Flags().Changed("params") || ctx.Command.ArgsLenAtDash() != -1 || stdinParamsRequested(ctx) {
 			return fmt.Errorf("parameters cannot be provided when using --from-run-id")
 		}
 
@@ -243,7 +251,7 @@ func runStart(ctx *Context, args []string) error {
 			return err
 		}
 
-		if err := validateStartPositionalParamCount(ctx, args, dag); err != nil {
+		if err := validateStartPositionalParamCount(ctx, args, dag, params); err != nil {
 			return err
 		}
 	}
@@ -386,6 +394,8 @@ func getDAGRunInfo(ctx *Context) (dagRunID, rootDAGRun, parentDAGRun string, isS
 }
 
 // loadDAGWithParams loads the DAG and its parameters from command arguments.
+// Parameters come from args after "--", else the --params flag, else stdin
+// when --params-stdin is enabled.
 func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, string, error) {
 	dagPath := args[0]
 
@@ -430,6 +440,9 @@ func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, 
 	var params string
 
 	if ctx.Command.ArgsLenAtDash() != -1 && len(args) > 0 {
+		if stdinParamsRequested(ctx) {
+			logger.Warn(ctx, "Ignoring --params-stdin: params were provided after '--'")
+		}
 		dashArgs := args[ctx.Command.ArgsLenAtDash():]
 		loadOpts = append(loadOpts, spec.WithParams(quoteStartDashArgs(dashArgs)))
 		params = strings.Join(dashArgs, " ")
@@ -438,7 +451,28 @@ func loadDAGWithParams(ctx *Context, args []string, isSubDAGRun bool) (*ir.DAG, 
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to get parameters: %w", err)
 		}
-		loadOpts = append(loadOpts, spec.WithParams(stringutil.RemoveQuotes(params)))
+		switch {
+		case ctx.Command.Flags().Changed("params"):
+			if stdinParamsRequested(ctx) {
+				logger.Warn(ctx, "Ignoring --params-stdin: params were provided via --params")
+			}
+		default:
+			hasInput, err := stdinHasParamsInput(ctx)
+			if err != nil {
+				return nil, "", err
+			}
+			if hasInput {
+				params, err = readStdinParams()
+				if err != nil {
+					return nil, "", err
+				}
+			}
+		}
+		loadParams := params
+		if ctx.Command.Flags().Changed("params") {
+			loadParams = stringutil.RemoveQuotes(loadParams)
+		}
+		loadOpts = append(loadOpts, spec.WithParams(loadParams))
 	}
 
 	dag, err := spec.Load(ctx, dagPath, loadOpts...)

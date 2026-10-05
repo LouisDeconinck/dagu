@@ -691,7 +691,7 @@ func (p *Plan) isRunningLocked() bool {
 func (p *Plan) hasActiveNodesLocked() bool {
 	for _, node := range p.nodes {
 		s := node.State().Status
-		if s == ir.NodeRunning || s == ir.NodeRetrying {
+		if s == ir.NodeRunning || s == ir.NodeRetrying || node.isExecuting() {
 			return true
 		}
 	}

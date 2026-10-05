@@ -208,8 +208,17 @@ Current builtin actions:
 | `template.render` | Text/template rendering | Exactly one of `template` or `template_ref`, optional data/config |
 | `log.write` | Log messages | `message` |
 | `mail.send` | Email sending | mail executor config |
-| `mail.search` | Email search over IMAP | `mailbox` and search filters |
+| `mail.search` | Email search over IMAP or the Gmail API | `mailbox` and search filters |
 | `mail.organize` | Email marking and moving | `mailbox`, `emails`, `mark` or `move` |
+| `xlsx.read` | Workbook reading | `path`, optional `password`, `sheet`, `range`, `header`, `columns`, `types`, `where` |
+| `xlsx.info`, `xlsx.list_sheets` | Workbook metadata | `path`, optional `password` |
+| `xlsx.write`, `xlsx.append` | Workbook writing | `path`, `rows` or `input` |
+| `xlsx.update_rows` | Workbook row updates | `path`, `rows`, `key`, optional `set` and `missing` |
+| `xlsx.validate` | Workbook checks | `path`, at least one of `required`, `not_blank`, `unique`, `types`, `allowed`; optional `on_problem`, `max_problems` |
+| `xlsx.write_cells` | Template filling | `path`, `cells`, optional `merge`, `output`, `sheet` |
+| `xlsx.sheet` | Sheet management | `path`, `operation`, `sheet`, `to` for `copy` and `rename`, optional `if_exists`, `missing`, `position` |
+| `xlsx.convert` | Workbook export | `path`, `output`, optional `format`, `encoding`, `delimiter` |
+| `xlsx.extract` | Fields of a form-like sheet located by a model | `path`, `instruction`, `schema`, a model through `llm`; optional `sheet`, `range`, `send_values`, `cache` |
 | `archive.create`, `archive.extract`, `archive.list` | Archive operations | archive config |
 | `file.stat`, `file.read`, `file.write`, `file.copy`, `file.move`, `file.delete`, `file.mkdir`, `file.list` | File operations | path/source/destination/content config |
 | `git.checkout` | Git repository checkout | `repository`, `path`, optional `ref`, `depth`, auth config |

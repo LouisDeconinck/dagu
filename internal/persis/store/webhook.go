@@ -17,6 +17,10 @@ import (
 
 var _ auth.WebhookStore = (*WebhookStore)(nil)
 
+// webhookLastUsedWriteInterval limits how often a busy webhook rewrites its
+// record just to record use.
+const webhookLastUsedWriteInterval = time.Minute
+
 // WebhookStore implements [auth.WebhookStore].
 // DAG-name lookups use an in-memory index (byDAGName) rebuilt from the
 // collection on startup; all writes keep it in sync under mu.
@@ -146,61 +150,64 @@ func (s *WebhookStore) List(ctx context.Context) ([]*auth.Webhook, error) {
 	return out, nil
 }
 
-// Update modifies an existing webhook.
-// Returns [auth.ErrWebhookNotFound] if the webhook does not exist.
-func (s *WebhookStore) Update(ctx context.Context, webhook *auth.Webhook) error {
-	if webhook == nil {
-		return errors.New("webhook store: webhook cannot be nil")
-	}
-	if webhook.ID == "" {
-		return auth.ErrInvalidWebhookID
-	}
-	if webhook.DAGName == "" {
-		return auth.ErrInvalidWebhookDAGName
+// UpdateByDAGName applies mutate to the current webhook for dagName and stores
+// the result. Concurrent updates, including those from other processes sharing
+// the collection, never overwrite each other. mutate may run more than once.
+// An error from mutate aborts the update and is returned unchanged.
+// Returns [auth.ErrWebhookNotFound] if no webhook exists for the DAG.
+func (s *WebhookStore) UpdateByDAGName(
+	ctx context.Context,
+	dagName string,
+	mutate func(*auth.Webhook) error,
+) (*auth.Webhook, error) {
+	if dagName == "" {
+		return nil, auth.ErrInvalidWebhookDAGName
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	id, ok := s.byDAGName[dagName]
+	s.mu.RUnlock()
+	if !ok {
+		return nil, auth.ErrWebhookNotFound
+	}
 
-	existingRec, err := s.col.Get(ctx, webhook.ID)
-	if err != nil {
-		if errors.Is(err, persis.ErrNotFound) {
-			return auth.ErrWebhookNotFound
+	var updated *auth.Webhook
+	err := retryConflict(ctx, func(ctx context.Context) error {
+		rec, err := s.col.Get(ctx, id)
+		if err != nil {
+			return err
 		}
-		return err
-	}
-	var existingStored auth.WebhookForStorage
-	if err := persis.Decode(existingRec, &existingStored); err != nil {
-		return fmt.Errorf("webhook store: decode existing: %w", err)
-	}
-
-	stored, err := s.toStorage(webhook)
-	if err != nil {
-		return err
-	}
-	data, err := persis.Encode(stored)
-	if err != nil {
-		return err
-	}
-
-	if existingStored.DAGName != webhook.DAGName {
-		if id, taken := s.byDAGName[webhook.DAGName]; taken && id != webhook.ID {
-			return auth.ErrWebhookAlreadyExists
+		webhook, err := s.fromRecord(rec)
+		if err != nil {
+			return err
 		}
+		if err := mutate(webhook); err != nil {
+			return err
+		}
+		if webhook.ID != id || webhook.DAGName != dagName {
+			return errors.New("webhook store: update cannot change the webhook ID or DAG name")
+		}
+		stored, err := s.toStorage(webhook)
+		if err != nil {
+			return err
+		}
+		data, err := persis.Encode(stored)
+		if err != nil {
+			return err
+		}
+		if err := s.col.CompareAndSwap(ctx, id, rec.Data, data); err != nil {
+			return err
+		}
+		updated = webhook
+		return nil
+	})
+	if errors.Is(err, persis.ErrNotFound) {
+		return nil, auth.ErrWebhookNotFound
 	}
-	if err := s.col.Put(ctx, &persis.Record{
-		ID:        webhook.ID,
-		Data:      data,
-		CreatedAt: existingRec.CreatedAt,
-		UpdatedAt: time.Now().UTC(),
-	}); err != nil {
-		return err
+	if err != nil {
+		return nil, err
 	}
-	if existingStored.DAGName != webhook.DAGName {
-		delete(s.byDAGName, existingStored.DAGName)
-		s.byDAGName[webhook.DAGName] = webhook.ID
-	}
-	return nil
+	return updated, nil
 }
 
 // Delete removes a webhook by its ID.
@@ -247,36 +254,52 @@ func (s *WebhookStore) DeleteByDAGName(ctx context.Context, dagName string) erro
 	return s.Delete(ctx, id)
 }
 
-// UpdateLastUsed updates the LastUsedAt timestamp for a webhook.
-func (s *WebhookStore) UpdateLastUsed(ctx context.Context, id string) error {
+// UpdateLastUsed records recent use of a webhook and, when profileTokenID is
+// not empty, of that profile token, persisting each timestamp at most once per
+// minute. It never restores a profile token removed by a concurrent update.
+func (s *WebhookStore) UpdateLastUsed(ctx context.Context, id, profileTokenID string) error {
 	if id == "" {
 		return auth.ErrInvalidWebhookID
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rec, err := s.col.Get(ctx, id)
-	if err != nil {
-		if errors.Is(err, persis.ErrNotFound) {
-			return auth.ErrWebhookNotFound
+	err := retryConflict(ctx, func(ctx context.Context) error {
+		rec, err := s.col.Get(ctx, id)
+		if err != nil {
+			return err
 		}
-		return err
-	}
-	var stored auth.WebhookForStorage
-	if err := persis.Decode(rec, &stored); err != nil {
-		return fmt.Errorf("webhook store: decode for UpdateLastUsed: %w", err)
-	}
-	now := time.Now().UTC()
-	stored.LastUsedAt = &now
-	data, err := persis.Encode(stored)
-	if err != nil {
-		return err
-	}
-	return s.col.Put(ctx, &persis.Record{
-		ID:        rec.ID,
-		Data:      data,
-		CreatedAt: rec.CreatedAt,
-		UpdatedAt: now,
+		var stored auth.WebhookForStorage
+		if err := persis.Decode(rec, &stored); err != nil {
+			return fmt.Errorf("webhook store: decode for UpdateLastUsed: %w", err)
+		}
+		now := time.Now().UTC()
+		changed := false
+		if lastUsedStale(stored.LastUsedAt, now) {
+			stored.LastUsedAt = &now
+			changed = true
+		}
+		for i := range stored.ProfileTokens {
+			token := &stored.ProfileTokens[i]
+			if token.ID == profileTokenID && lastUsedStale(token.LastUsedAt, now) {
+				token.LastUsedAt = &now
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
+		data, err := persis.Encode(stored)
+		if err != nil {
+			return err
+		}
+		return s.col.CompareAndSwap(ctx, id, rec.Data, data)
 	})
+	if errors.Is(err, persis.ErrNotFound) {
+		return auth.ErrWebhookNotFound
+	}
+	return err
+}
+
+func lastUsedStale(lastUsed *time.Time, now time.Time) bool {
+	return lastUsed == nil || now.Sub(*lastUsed) >= webhookLastUsedWriteInterval
 }
 
 // ─── encoding helpers ─────────────────────────────────────────────────────────

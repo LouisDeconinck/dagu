@@ -4,6 +4,7 @@
 package spec003_value_resolution_test
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/dagucloud/dagu/v2/conformance/harness"
@@ -91,6 +92,31 @@ func TestStringInsertionCoercion(t *testing.T) {
 	})
 }
 
+func TestInsertedTextStaysLiteral(t *testing.T) {
+	t.Parallel()
+
+	dagu := harness.NewRunner(t)
+	result := dagu.Run("start", "--run-id=spec003-insertion", "insertion_literal_text.yaml")
+	result.ExpectExitCode(0)
+	dagu.ExpectFileContent("insertion.txt", "p\\$INSERTED\n$INSERTED/data\n$INSERTED/data\nexpanded\nexpanded$INSERTED/data\n"+
+		"$INSERTED/data\n$INSERTED\np\\$INSERTED\n$INSERTED/data-spec003-insertion\n")
+}
+
+// A retry rebuilds the DAG from its stored definition, and root env inserted
+// at the first load must stay literal on that path too.
+func TestRootEnvInsertionOnRetry(t *testing.T) {
+	t.Parallel()
+
+	const runID = "spec003-root-env-retry"
+	dagu := harness.NewRunner(t)
+	env := []string{"DAGU_HOME=" + filepath.Join(t.TempDir(), "dagu")}
+
+	dagu.RunWithEnv(env, "start", "--run-id="+runID, "root_env_retry.yaml").ExpectNonZeroExitCode()
+	dagu.WriteFile("ready", "")
+	dagu.RunWithEnv(env, "retry", "--run-id="+runID, "root_env_retry.yaml").ExpectExitCode(0)
+	dagu.ExpectTextFileContent("root_copy.out", "$INSERTED/data\n$INSERTED/data\n")
+}
+
 // TestDefectAndRuntimeOnlyNoticeClassification proves the two notice classes
 // from "Unresolved Supported References" are actually distinguished, not just
 // both labeled generically:
@@ -117,6 +143,15 @@ func TestDefectAndRuntimeOnlyNoticeClassification(t *testing.T) {
 		result := dagu.Run("validate", "notice_defect_unknown_const.yaml")
 		result.ExpectExitCode(0)
 		result.ExpectStderrContains("${consts.unknown_name}", "steps[0].run")
+	})
+
+	t.Run("defect: unknown const in root ssh is reported without --show-unresolved", func(t *testing.T) {
+		t.Parallel()
+
+		dagu := harness.NewRunner(t)
+		result := dagu.Run("validate", "notice_defect_unknown_const_ssh.yaml")
+		result.ExpectExitCode(0)
+		result.ExpectStderrContains("${consts.unknown_host}", "ssh.host")
 	})
 
 	t.Run("defect: step-output reference missing its authored dependency is reported without --show-unresolved", func(t *testing.T) {

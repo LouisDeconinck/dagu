@@ -520,6 +520,48 @@ func TestResolveSubDAGPassEnv(t *testing.T) {
 		require.Nil(t, got)
 	})
 
+	t.Run("ListRejectsInheritedSecret", func(t *testing.T) {
+		// A value a local child run inherited implicitly from its parent keeps
+		// its secret source, so naming it under pass_env still fails the step
+		// instead of writing it into a dispatch record.
+		ctx := config.WithConfig(context.Background(), &config.Config{})
+		ctx = runctx.NewContext(ctx,
+			&ir.DAG{Name: "child"},
+			"child-run", "child.log",
+			runctx.WithInheritedEnvs([]cmnvalue.EnvEntry{
+				{Key: "API_TOKEN", Value: "s3cr3t", Source: cmnvalue.EnvSourceSecret},
+			}))
+
+		got, err := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{
+			Names: []string{"API_TOKEN"},
+		})
+
+		require.Error(t, err)
+		require.ErrorContains(t, err, "API_TOKEN")
+		require.ErrorContains(t, err, "secret")
+		require.Nil(t, got)
+	})
+
+	t.Run("AllExcludesInheritedSecretsAndParams", func(t *testing.T) {
+		ctx := config.WithConfig(context.Background(), &config.Config{})
+		ctx = runctx.NewContext(ctx,
+			&ir.DAG{Name: "child", Env: []string{"OWN=value"}},
+			"child-run", "child.log",
+			runctx.WithInheritedEnvs([]cmnvalue.EnvEntry{
+				{Key: "INHERITED_SECRET", Value: "s3cr3t", Source: cmnvalue.EnvSourceSecret},
+				{Key: "INHERITED_PARAM", Value: "param", Source: cmnvalue.EnvSourceParam},
+				{Key: "INHERITED_ENV", Value: "env", Source: cmnvalue.EnvSourceDAGEnv},
+			}))
+
+		got, err := resolveSubDAGPassEnv(ctx, &ir.SubDAGPassEnv{All: true})
+
+		require.NoError(t, err)
+		// Inherited secrets and params keep their sources, so pass_env never
+		// carries them. An inherited DAG env value remains passable: it is
+		// ordinary run environment, not a secret this run holds.
+		require.Equal(t, []string{"INHERITED_ENV=env", "OWN=value"}, got)
+	})
+
 	t.Run("ListSkipsToolManagedNames", func(t *testing.T) {
 		ctx := newCtx(t, nil)
 

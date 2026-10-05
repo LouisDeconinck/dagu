@@ -71,6 +71,7 @@ func (w *referenceFieldWalker) walkDAG(dag *ir.DAG) {
 	w.add(root.withPathValue("working_dir", dag.WorkingDir).withField(cmnvalue.DAGWorkingDirField("working_dir")))
 	w.walkConditions("preconditions", dag.Preconditions, root)
 	w.walkContainer("container", dag.Container, root)
+	w.walkSSH("ssh", dag.SSH, root)
 
 	for i := range dag.Steps {
 		w.walkStep(fmt.Sprintf("steps[%d]", i), dag.Steps[i])
@@ -127,7 +128,7 @@ func (w *referenceFieldWalker) walkStep(path string, step ir.Step) {
 	if step.RepeatPolicy.Condition != nil {
 		fieldPath := path + ".repeat_policy.condition"
 		w.add(base.withPathValue(fieldPath, step.RepeatPolicy.Condition.Condition).withField(cmnvalue.ConditionValueField(fieldPath)))
-		w.addNumericExpected(path+".repeat_policy.expected", step.RepeatPolicy.Condition, base)
+		w.addNumericExpected(path+".repeat_policy.expected", step.RepeatPolicy.Condition.Expected, base)
 	}
 	w.walkSubDAG(path+".child_dag", step.SubDAG, base)
 	if step.Parallel != nil {
@@ -246,7 +247,10 @@ func (w *referenceFieldWalker) walkConditions(path string, conditions []*ir.Cond
 		w.add(base.withPathValue(fieldPath, condition.Condition).withField(cmnvalue.ConditionValueField(fieldPath)))
 		evalPath := fmt.Sprintf("%s[%d].eval", path, i)
 		w.add(base.withPathValue(evalPath, condition.Eval).withField(cmnvalue.ConditionEvalField(evalPath)))
-		w.addNumericExpected(fmt.Sprintf("%s[%d].expected", path, i), condition, base)
+		w.addNumericExpected(fmt.Sprintf("%s[%d].expected", path, i), condition.Expected, base)
+		for j, expected := range condition.ExpectedAny {
+			w.addNumericExpected(fmt.Sprintf("%s[%d].expected_any[%d]", path, i, j), expected, base)
+		}
 	}
 }
 
@@ -254,11 +258,11 @@ func (w *referenceFieldWalker) walkConditions(path string, conditions []*ir.Cond
 // which is the one form that resolves a value reference. A literal or regex
 // pattern stays literal, so reporting it here would describe a resolution that
 // never happens.
-func (w *referenceFieldWalker) addNumericExpected(fieldPath string, condition *ir.Condition, base ReferenceField) {
-	if !stringutil.HasNumericPrefix(condition.Expected) {
+func (w *referenceFieldWalker) addNumericExpected(fieldPath, expected string, base ReferenceField) {
+	if !stringutil.HasNumericPrefix(expected) {
 		return
 	}
-	w.add(base.withPathValue(fieldPath, condition.Expected).withField(cmnvalue.ConditionValueField(fieldPath)))
+	w.add(base.withPathValue(fieldPath, expected).withField(cmnvalue.ConditionValueField(fieldPath)))
 }
 
 func (w *referenceFieldWalker) walkEnvWith(path string, env []string, base ReferenceField, fieldForPath func(string) cmnvalue.Field) {
@@ -349,6 +353,34 @@ func (w *referenceFieldWalker) walkContainer(path string, container *ir.Containe
 	for i, value := range container.Shell {
 		fieldPath := fmt.Sprintf("%s.shell[%d]", path, i)
 		w.add(base.withPathValue(fieldPath, value).withField(cmnvalue.ShellCommandField(fieldPath, cmnvalue.CommandContext{Target: cmnvalue.CommandTargetDocker, ShellConfigured: true})))
+	}
+}
+
+// walkSSH emits the DAG-level SSH fields that resolve with the steps[].with
+// rules. Shell arguments come from the ssh.shell value.
+func (w *referenceFieldWalker) walkSSH(path string, cfg *ir.SSHConfig, base ReferenceField) {
+	if cfg == nil {
+		return
+	}
+	add := func(fieldPath, value string) {
+		w.add(base.withPathValue(fieldPath, value).withField(cmnvalue.ExecutorConfigField(fieldPath)))
+	}
+	add(path+".user", cfg.User)
+	add(path+".host", cfg.Host)
+	add(path+".port", cfg.Port)
+	add(path+".key", cfg.Key)
+	add(path+".password", cfg.Password)
+	add(path+".known_host_file", cfg.KnownHostFile)
+	add(path+".shell", cfg.Shell)
+	for _, arg := range cfg.ShellArgs {
+		add(path+".shell", arg)
+	}
+	if cfg.Bastion != nil {
+		add(path+".bastion.host", cfg.Bastion.Host)
+		add(path+".bastion.port", cfg.Bastion.Port)
+		add(path+".bastion.user", cfg.Bastion.User)
+		add(path+".bastion.key", cfg.Bastion.Key)
+		add(path+".bastion.password", cfg.Bastion.Password)
 	}
 }
 

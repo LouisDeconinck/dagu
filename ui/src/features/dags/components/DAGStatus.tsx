@@ -39,6 +39,7 @@ import { DAGContext } from '../contexts/DAGContext';
 import { getEventHandlers } from '../lib/getEventHandlers';
 import { updateDAGRunNodeStatus } from '../lib/nodeStatus';
 import { ApprovalTab } from './approval';
+import { ApprovalResumeAlert } from './approval/ApprovalResumeAlert';
 import { AgentSessionTab } from './agent-session';
 import ArtifactsTab from './artifacts/ArtifactsTab';
 import { ChatHistoryTab } from './chat-history';
@@ -781,6 +782,14 @@ function DAGStatus({
             </div>
           </div>
         </div>
+
+        {displayDAGRun.status === Status.Waiting &&
+          displayDAGRun.approvalResumePending && (
+            <ApprovalResumeAlert
+              key={displayDAGRunIdentity}
+              dagRun={displayDAGRun}
+            />
+          )}
 
         {/* Status Tab Content */}
         {childRunStack.length > 0 && (

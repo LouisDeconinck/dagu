@@ -7,8 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +19,7 @@ import (
 
 	api "github.com/dagucloud/dagu/v2/api/v1"
 	"github.com/dagucloud/dagu/v2/internal/ir"
+	"github.com/dagucloud/dagu/v2/internal/spec"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -171,6 +175,55 @@ func TestRemoteClientRetryDAGRunSendsChildTarget(t *testing.T) {
 	assert.Equal(t, "child-run", *got.body.SubDAGRunId)
 }
 
+func TestRemoteDAGLookup(t *testing.T) {
+	t.Parallel()
+
+	details := &api.DAGDetails{Name: "declared"}
+	listed := api.DAGFile{FileName: "actual", Dag: api.DAG{Name: "declared"}}
+	for _, tt := range []struct {
+		name     string
+		status   int
+		details  *api.DAGDetails
+		listed   []api.DAGFile
+		fileName string
+		wantErr  string
+	}{
+		{name: "Details", status: http.StatusOK, details: details, fileName: "lookup"},
+		{name: "NameFallback", status: http.StatusNotFound, listed: []api.DAGFile{listed}, fileName: "actual"},
+		{name: "MissingDetails", status: http.StatusOK, wantErr: "missing DAG identity"},
+		{name: "EmptyName", status: http.StatusOK, details: &api.DAGDetails{}, wantErr: "missing DAG identity"},
+		{name: "NotFound", status: http.StatusNotFound, wantErr: "was not found"},
+		{name: "Ambiguous", status: http.StatusNotFound, listed: []api.DAGFile{listed, listed}, wantErr: "ambiguous"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/dags" {
+					assert.Equal(t, "lookup", r.URL.Query().Get("name"))
+					assert.NoError(t, json.NewEncoder(w).Encode(struct {
+						Dags []api.DAGFile `json:"dags"`
+					}{Dags: tt.listed}))
+					return
+				}
+				assert.Equal(t, "/dags/lookup", r.URL.Path)
+				w.WriteHeader(tt.status)
+				assert.NoError(t, json.NewEncoder(w).Encode(api.GetDAGDetails200JSONResponse{Dag: tt.details}))
+			}))
+			defer server.Close()
+			client := &remoteClient{baseURL: server.URL, client: server.Client()}
+			dag, err := client.resolveDAG(context.Background(), "lookup")
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.fileName, dag.FileName)
+			assert.Equal(t, "declared", dag.Dag.Name)
+		})
+	}
+}
+
 func TestRemoteStartSendsSteps(t *testing.T) {
 	t.Parallel()
 
@@ -178,7 +231,7 @@ func TestRemoteStartSendsSteps(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
-			_, _ = w.Write([]byte(`{"fileName":"etl"}`))
+			_, _ = w.Write([]byte(`{"dag":{"name":"etl"}}`))
 			return
 		}
 		var body api.ExecuteDAGJSONBody
@@ -208,6 +261,288 @@ func TestRemoteStartSendsSteps(t *testing.T) {
 	assert.Equal(t, "source", *body.OutputsFromRunId)
 	require.NotNil(t, body.Outputs)
 	assert.Equal(t, map[string]map[string]string{"extract": {"rows": "3"}}, *body.Outputs)
+}
+
+// These cases replace process stdin and must remain sequential.
+func TestRemoteRunParams(t *testing.T) {
+	commands := []struct {
+		name  string
+		flags []commandLineFlag
+		run   func(*Context, []string) error
+	}{
+		{name: "start", flags: startFlags, run: remoteRunStart},
+		{name: "enqueue", flags: enqueueFlags, run: remoteRunEnqueue},
+	}
+	oversizedInput := strings.Repeat("x", maxStdinParamsSize+1)
+	tests := []struct {
+		name       string
+		args       []string
+		stdin      string
+		wantParams *string
+		wantValues []string
+		wantErr    string
+		wantUnread bool
+		startOnly  bool
+		closed     bool
+	}{
+		{
+			name:    "ClosedStdinRejected",
+			args:    []string{"--params-stdin", "etl"},
+			closed:  true,
+			wantErr: "params from stdin",
+		},
+		{
+			name:       "FlagSkipsClosedStdin",
+			args:       []string{"--params-stdin", "--params=P1=flag", "etl"},
+			closed:     true,
+			wantParams: new("P1=flag"),
+		},
+		{
+			name:   "EmptyFlagSkipsClosedStdin",
+			args:   []string{"--params-stdin", "--params=", "etl"},
+			closed: true,
+		},
+		{
+			name:       "DashSkipsClosedStdin",
+			args:       []string{"--params-stdin", "etl", "--", "P1=dash"},
+			closed:     true,
+			wantParams: new(`P1="dash"`),
+		},
+		{
+			name:   "EmptyDashSkipsClosedStdin",
+			args:   []string{"--params-stdin", "etl", "--"},
+			closed: true,
+		},
+		{
+			name:       "InheritedStdinIgnored",
+			args:       []string{"etl"},
+			stdin:      "P1=stdin",
+			wantUnread: true,
+		},
+		{
+			name:       "DisabledStdinIgnored",
+			args:       []string{"--params-stdin=false", "etl"},
+			stdin:      "P1=stdin",
+			wantUnread: true,
+		},
+		{
+			name:       "InheritedOversizedStdinIgnored",
+			args:       []string{"etl"},
+			stdin:      oversizedInput,
+			wantUnread: true,
+		},
+		{
+			name:       "NamedStdin",
+			args:       []string{"--params-stdin", "etl"},
+			stdin:      "P1=foo P2=bar",
+			wantParams: new("P1=foo P2=bar"),
+		},
+		{
+			name:      "FromRunIDRejectsStdin",
+			args:      []string{"--params-stdin", "--from-run-id=source", "etl"},
+			stdin:     "P1=stdin",
+			wantErr:   "parameters cannot be provided when using --from-run-id",
+			startOnly: true,
+		},
+		{
+			name:       "FlagBeatsStdin",
+			args:       []string{"--params-stdin", "--params=P1=flag", "etl"},
+			stdin:      "P1=stdin",
+			wantParams: new("P1=flag"),
+		},
+		{
+			name:  "EmptyFlagBeatsStdin",
+			args:  []string{"--params-stdin", "--params=", "etl"},
+			stdin: "P1=stdin",
+		},
+		{
+			name:       "DashBeatsFlagAndStdin",
+			args:       []string{"--params-stdin", "--params=P1=flag", "etl", "--", "P1=dash"},
+			stdin:      "P1=stdin",
+			wantParams: new(`P1="dash"`),
+		},
+		{
+			name:  "EmptyDashBeatsFlagAndStdin",
+			args:  []string{"--params-stdin", "--params=P1=flag", "etl", "--"},
+			stdin: "P1=stdin",
+		},
+		{
+			name:  "EmptyFlagSkipsOversizedStdin",
+			args:  []string{"--params-stdin", "--params=", "etl"},
+			stdin: oversizedInput,
+		},
+		{
+			name:       "FlagSkipsOversizedStdin",
+			args:       []string{"--params-stdin", "--params=P1=flag", "etl"},
+			stdin:      oversizedInput,
+			wantParams: new("P1=flag"),
+		},
+		{
+			name:       "DashSkipsOversizedStdin",
+			args:       []string{"--params-stdin", "etl", "--", "P1=dash"},
+			stdin:      oversizedInput,
+			wantParams: new(`P1="dash"`),
+		},
+		{
+			name:    "OversizedStdinRejected",
+			args:    []string{"--params-stdin", "etl"},
+			stdin:   oversizedInput,
+			wantErr: "params from stdin exceed",
+		},
+		{
+			name:  "WhitespaceStdin",
+			args:  []string{"--params-stdin", "etl"},
+			stdin: " \n\t\n",
+		},
+		{
+			name:       "JSONStdin",
+			args:       []string{"--params-stdin", "etl"},
+			stdin:      `{"P1":"foo","P2":"bar"}`,
+			wantParams: new(`{"P1":"foo","P2":"bar"}`),
+		},
+		{
+			name:       "NamedQuotedStdin",
+			args:       []string{"--params-stdin", "etl"},
+			stdin:      "  P1=\"foo bar\" P2=\"\"\n",
+			wantParams: new(`P1="foo bar" P2=""`),
+			wantValues: []string{"P1=foo bar", "P2="},
+		},
+		{
+			name:       "QuotedFlag",
+			args:       []string{"--params-stdin", `--params="P1=foo P2=bar"`, "etl"},
+			stdin:      "P1=stdin",
+			wantParams: new("P1=foo P2=bar"),
+			wantValues: []string{"P1=foo", "P2=bar"},
+		},
+		{
+			name:       "DashSpacedValue",
+			args:       []string{"etl", "--", "hello world"},
+			wantParams: new(`"hello world"`),
+			wantValues: []string{"P1=default1", "P2=default2", "1=hello world"},
+		},
+		{
+			name:       "DashEmptyValue",
+			args:       []string{"etl", "--", ""},
+			wantParams: new(`""`),
+			wantValues: []string{"P1=default1", "P2=default2", "1="},
+		},
+		{
+			name:       "QuotedValueStdin",
+			args:       []string{"--params-stdin", "etl"},
+			stdin:      `"hello world"`,
+			wantParams: new(`"hello world"`),
+			wantValues: []string{"P1=default1", "P2=default2", "1=hello world"},
+		},
+		{
+			name:       "EmptyValueStdin",
+			args:       []string{"--params-stdin", "etl"},
+			stdin:      `""`,
+			wantParams: new(`""`),
+			wantValues: []string{"P1=default1", "P2=default2", "1="},
+		},
+		{
+			name:       "SpacedValueStdin",
+			args:       []string{"--params-stdin", "etl"},
+			stdin:      `" hello world "`,
+			wantParams: new(`" hello world "`),
+			wantValues: []string{"P1=default1", "P2=default2", "1= hello world "},
+		},
+	}
+	for _, commandSpec := range commands {
+		t.Run(commandSpec.name, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					if tt.startOnly && commandSpec.name != "start" {
+						t.Skip("enqueue does not support --from-run-id")
+					}
+					if tt.closed {
+						stdin, err := os.Open(os.DevNull)
+						require.NoError(t, err)
+						require.NoError(t, stdin.Close())
+						original := os.Stdin
+						os.Stdin = stdin
+						t.Cleanup(func() { os.Stdin = original })
+					} else if len(tt.stdin) > maxStdinParamsSize {
+						// Files avoid blocking on pipe capacity before the command reads.
+						path := filepath.Join(t.TempDir(), "params.txt")
+						require.NoError(t, os.WriteFile(path, []byte(tt.stdin), 0o600))
+						file, err := os.Open(path)
+						require.NoError(t, err)
+						original := os.Stdin
+						os.Stdin = file
+						t.Cleanup(func() {
+							os.Stdin = original
+							require.NoError(t, file.Close())
+						})
+					} else {
+						pipeStdin(t, tt.stdin)
+					}
+
+					requests := make(chan *string, 1)
+					server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Header().Set("Content-Type", "application/json")
+						if r.Method == http.MethodGet {
+							_, _ = w.Write([]byte(`{"dag":{"name":"etl"}}`))
+							return
+						}
+						var body struct {
+							Params *string `json:"params"`
+						}
+						if !assert.NoError(t, json.NewDecoder(r.Body).Decode(&body)) {
+							w.WriteHeader(http.StatusBadRequest)
+							return
+						}
+						requests <- body.Params
+						_, _ = w.Write([]byte(`{"dagRunId":"run-1"}`))
+					}))
+					defer server.Close()
+
+					command := &cobra.Command{Use: commandSpec.name}
+					initFlags(command, commandSpec.flags...)
+					require.NoError(t, command.Flags().Parse(tt.args))
+					ctx := &Context{
+						Context: context.Background(),
+						Command: command,
+						Remote:  &remoteClient{baseURL: server.URL, client: server.Client()},
+					}
+
+					err := commandSpec.run(ctx, command.Flags().Args())
+					if tt.wantErr != "" {
+						require.ErrorContains(t, err, tt.wantErr)
+						select {
+						case <-requests:
+							t.Fatal("run submitted after invalid stdin")
+						default:
+						}
+						return
+					}
+					require.NoError(t, err)
+					if tt.wantUnread {
+						remaining, err := io.ReadAll(os.Stdin)
+						require.NoError(t, err)
+						assert.Equal(t, tt.stdin, string(remaining))
+					}
+					select {
+					case params := <-requests:
+						if tt.wantParams == nil {
+							require.Nil(t, params)
+							return
+						}
+						require.NotNil(t, params)
+						assert.Equal(t, *tt.wantParams, *params)
+						if tt.wantValues != nil {
+							source := []byte("params: P1=default1 P2=default2\nsteps:\n  - name: print\n    run: echo ok\n")
+							dag, err := spec.LoadYAML(ctx, source, spec.WithParams(*params))
+							require.NoError(t, err)
+							assert.Equal(t, tt.wantValues, dag.Params)
+						}
+					default:
+						t.Fatal("run was not submitted")
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestWaitForRemoteStopHonorsContextCancellation(t *testing.T) {

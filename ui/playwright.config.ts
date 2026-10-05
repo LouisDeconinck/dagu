@@ -70,6 +70,8 @@ export default defineConfig({
     cwd: repoRoot,
     url: `${baseURL}/api/v1/health`,
     timeout: 90_000,
+    // Allow six sequential 10-second service shutdowns plus cleanup overhead.
+    gracefulShutdown: { signal: 'SIGTERM', timeout: 90_000 },
     reuseExistingServer: false,
     stdout: 'pipe',
     stderr: 'pipe',
