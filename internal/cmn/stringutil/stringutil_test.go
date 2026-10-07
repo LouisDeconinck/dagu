@@ -163,6 +163,12 @@ func TestKebabToCamel(t *testing.T) {
 		result := stringutil.KebabToCamel("état-major")
 		require.Equal(t, "étatMajor", result)
 	})
+
+	t.Run("InvalidUTF8", func(t *testing.T) {
+		// A stray invalid byte maps to a single U+FFFD.
+		result := stringutil.KebabToCamel("foo-\xff")
+		require.Equal(t, "foo\uFFFD", result)
+	})
 }
 
 func TestScreamingSnakeToCamel(t *testing.T) {
@@ -184,12 +190,37 @@ func TestScreamingSnakeToCamel(t *testing.T) {
 		{"A_B_C", "aBC"},
 		{"USER_ÉTAT", "userÉtat"},
 		{"ÉTAT_MAJOR", "étatMajor"},
+		{"FOO_\xffBAR", "foo\uFFFDbar"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			result := stringutil.ScreamingSnakeToCamel(tt.input)
 			require.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestUpperFirst(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"", ""},
+		{"a", "A"},
+		{"abc", "Abc"},
+		{"Abc", "Abc"},
+		{"état", "État"},
+		{"日本", "日本"},
+		// Digraphs have a distinct title-case form (U+01C5), not the
+		// fully upper-case U+01C4.
+		{"ǆ", "ǅ"},
+		{"\xffx", "\uFFFDx"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			require.Equal(t, tt.expected, stringutil.UpperFirst(tt.input))
 		})
 	}
 }

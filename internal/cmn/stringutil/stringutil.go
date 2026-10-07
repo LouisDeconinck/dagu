@@ -107,12 +107,7 @@ func ScreamingSnakeToCamel(s string) string {
 			result.WriteString(lower)
 			isFirst = false
 		} else {
-			// Capitalize first letter of subsequent parts
-			if len(lower) > 0 {
-				r, size := utf8.DecodeRuneInString(lower)
-				result.WriteRune(unicode.ToUpper(r))
-				result.WriteString(lower[size:])
-			}
+			result.WriteString(UpperFirst(lower))
 		}
 	}
 
@@ -126,26 +121,31 @@ func KebabToCamel(s string) string {
 		return ""
 	}
 
-	// Find the first non-empty part for the initial word
-	result := ""
-	startIdx := 0
-	for i := range parts {
-		if len(parts[i]) > 0 {
-			result = parts[i]
-			startIdx = i + 1
-			break
+	var result strings.Builder
+	isFirst := true
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		if isFirst {
+			result.WriteString(part)
+			isFirst = false
+		} else {
+			result.WriteString(UpperFirst(part))
 		}
 	}
 
-	// Capitalize remaining parts
-	for i := startIdx; i < len(parts); i++ {
-		if len(parts[i]) > 0 {
-			r, size := utf8.DecodeRuneInString(parts[i])
-			result += string(unicode.ToUpper(r)) + parts[i][size:]
-		}
-	}
+	return result.String()
+}
 
-	return result
+// UpperFirst returns s with its first rune converted to title case.
+// An empty string is returned unchanged.
+func UpperFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	r, size := utf8.DecodeRuneInString(s)
+	return string(unicode.ToTitle(r)) + s[size:]
 }
 
 const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
