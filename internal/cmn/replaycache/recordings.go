@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync"
 	"time"
 
@@ -32,53 +33,90 @@ const (
 //
 // What the attempt records is kept only once it succeeds, and what it
 // replayed can be dropped when it fails, so a recording that did the wrong
-// thing is not repeated. Every run of the DAG shares the file, so each
-// change is merged into the file as it is then, under a lock.
+// thing is not repeated. Every run of the DAG shares the file, and runs of a
+// step can start together and act one after another, so each lookup reads
+// the file as it is then, and each change is merged into it under a lock.
 type Recordings[T any] struct {
-	path    string
-	mu      sync.Mutex
-	entries map[string]T
-	// pending holds what the attempt recorded, until it succeeds.
-	pending map[string]T
+	path string
+	mu   sync.Mutex
+	// pending holds what the attempt recorded, until it succeeds. A nil
+	// entry removes the recording for its key.
+	pending map[string]*T
 	// used holds the entries the attempt replayed, as they were read.
 	used map[string]T
 }
 
-// Open reads the recordings in the file at path. A missing or corrupt file
-// holds none, since a lost recording only costs model calls.
-func Open[T any](path string) (*Recordings[T], error) {
-	entries, err := read[T](path)
-	if err != nil {
-		return nil, err
-	}
-	return &Recordings[T]{path: path, entries: entries, pending: map[string]T{}, used: map[string]T{}}, nil
+// Open returns an attempt's view of the recordings in the file at path.
+func Open[T any](path string) *Recordings[T] {
+	return &Recordings[T]{path: path, pending: map[string]*T{}, used: map[string]T{}}
 }
 
-// Lookup returns the recording for key and counts it as replayed.
+// Lookup returns the recording for key as the file holds it now and counts
+// it as replayed. A missing, corrupt, or unreadable file holds none, since a
+// lost recording only costs model calls.
 func (r *Recordings[T]) Lookup(key string) (T, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	entry, ok := r.entries[key]
+	entries, _ := read[T](r.path)
+	entry, ok := entries[key]
 	if ok {
+		r.mu.Lock()
 		r.used[key] = entry
+		r.mu.Unlock()
 	}
 	return entry, ok
+}
+
+// Find returns the first recording, in key order, that match accepts, as
+// the file holds it now, and counts it as replayed. It serves a lookup
+// whose key is not known in advance, such as a recording made for a sheet
+// of another shape that still answers this one. A missing, corrupt, or
+// unreadable file holds none.
+func (r *Recordings[T]) Find(match func(key string, entry T) bool) (string, T, bool) {
+	entries, _ := read[T](r.path)
+	for _, key := range slices.Sorted(maps.Keys(entries)) {
+		entry := entries[key]
+		if !match(key, entry) {
+			continue
+		}
+		r.mu.Lock()
+		r.used[key] = entry
+		r.mu.Unlock()
+		return key, entry, true
+	}
+	var none T
+	return "", none, false
 }
 
 // Stage records what an operation did, to be kept by Commit.
 func (r *Recordings[T]) Stage(key string, entry T) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.pending[key] = entry
+	r.pending[key] = &entry
 }
 
-// Commit keeps what the attempt recorded.
+// Drop marks the recording the attempt looked up for key as one that no
+// longer replays, to be removed by Commit unless another run replaced it
+// since. A later Stage for key takes its place.
+func (r *Recordings[T]) Drop(key string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pending[key] = nil
+}
+
+// Commit keeps what the attempt recorded and removes what it dropped.
 func (r *Recordings[T]) Commit(ctx context.Context) error {
-	pending, _ := r.take()
+	pending, used := r.take()
 	if len(pending) == 0 {
 		return nil
 	}
-	return r.update(ctx, func(entries map[string]T) { maps.Copy(entries, pending) })
+	return r.update(ctx, func(entries map[string]T) {
+		for key, entry := range pending {
+			if entry != nil {
+				entries[key] = *entry
+			} else if replayed, ok := used[key]; ok {
+				removeUnchanged(entries, key, replayed)
+			}
+		}
+	})
 }
 
 // Evict drops the recordings the attempt replayed, unless another run
@@ -89,10 +127,8 @@ func (r *Recordings[T]) Evict(ctx context.Context) error {
 		return nil
 	}
 	return r.update(ctx, func(entries map[string]T) {
-		for key, entry := range used {
-			if current, ok := entries[key]; ok && reflect.DeepEqual(current, entry) {
-				delete(entries, key)
-			}
+		for key, replayed := range used {
+			removeUnchanged(entries, key, replayed)
 		}
 	})
 }
@@ -103,8 +139,8 @@ func (r *Recordings[T]) Discard() {
 	_, _ = r.take()
 }
 
-// Held returns what the attempt recorded and replayed so far, encoded to be
-// carried across a pause for human input.
+// Held returns what the attempt recorded, dropped, and replayed so far,
+// encoded to be carried across a pause for human input.
 func (r *Recordings[T]) Held() (pending, used map[string]json.RawMessage) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -115,16 +151,24 @@ func (r *Recordings[T]) Held() (pending, used map[string]json.RawMessage) {
 func (r *Recordings[T]) Hold(pending, used map[string]json.RawMessage) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	maps.Copy(r.pending, decode[T](pending))
+	maps.Copy(r.pending, decode[*T](pending))
 	maps.Copy(r.used, decode[T](used))
 }
 
-func (r *Recordings[T]) take() (pending, used map[string]T) {
+func (r *Recordings[T]) take() (pending map[string]*T, used map[string]T) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	pending, used = r.pending, r.used
-	r.pending, r.used = map[string]T{}, map[string]T{}
+	r.pending, r.used = map[string]*T{}, map[string]T{}
 	return pending, used
+}
+
+// removeUnchanged removes the entry for key unless another run replaced it
+// after the attempt replayed it as replayed.
+func removeUnchanged[T any](entries map[string]T, key string, replayed T) {
+	if current, ok := entries[key]; ok && reflect.DeepEqual(current, replayed) {
+		delete(entries, key)
+	}
 }
 
 // update applies change to the file as it is now. An emptied file is
@@ -159,7 +203,7 @@ func (r *Recordings[T]) update(ctx context.Context, change func(map[string]T)) e
 
 func read[T any](path string) (map[string]T, error) {
 	entries := map[string]T{}
-	data, err := os.ReadFile(path) //nolint:gosec // The path comes from Store.Path under the data directory.
+	data, err := fileutil.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return entries, nil
 	}
@@ -172,7 +216,7 @@ func read[T any](path string) (map[string]T, error) {
 	return entries, nil
 }
 
-func encode[T any](entries map[string]T) map[string]json.RawMessage {
+func encode[V any](entries map[string]V) map[string]json.RawMessage {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -185,10 +229,10 @@ func encode[T any](entries map[string]T) map[string]json.RawMessage {
 	return raw
 }
 
-func decode[T any](raw map[string]json.RawMessage) map[string]T {
-	entries := make(map[string]T, len(raw))
+func decode[V any](raw map[string]json.RawMessage) map[string]V {
+	entries := make(map[string]V, len(raw))
 	for key, data := range raw {
-		var entry T
+		var entry V
 		if json.Unmarshal(data, &entry) == nil {
 			entries[key] = entry
 		}

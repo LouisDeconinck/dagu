@@ -416,7 +416,12 @@ func Run(ctx context.Context, spec CmdSpec) error {
 	cmd.Stdout = io.MultiWriter(stdout, fileOrDefault(spec.Stdout, os.Stdout))
 	cmd.Stderr = io.MultiWriter(stderr, fileOrDefault(spec.Stderr, os.Stderr))
 
-	if err := cmd.Run(); err != nil {
+	untrack, err := startTracked(ctx, cmd)
+	if err != nil {
+		return buildCommandError(err, stdout, stderr)
+	}
+	defer untrack()
+	if err := cmd.Wait(); err != nil {
 		return buildCommandError(err, stdout, stderr)
 	}
 	return nil
@@ -467,7 +472,8 @@ func StartProcess(ctx context.Context, spec CmdSpec) (*StartResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := cmd.Start(); err != nil {
+	untrack, err := startTracked(ctx, cmd)
+	if err != nil {
 		cleanupTransport(cleanup)
 		return nil, fmt.Errorf("failed to start command: %w", err)
 	}
@@ -478,6 +484,7 @@ func StartProcess(ctx context.Context, spec CmdSpec) (*StartResult, error) {
 	go execWithRecovery(ctx, func() {
 		defer close(done)
 		defer cleanupTransport(cleanup)
+		defer untrack()
 		done <- cmd.Wait()
 	})
 
@@ -494,6 +501,11 @@ func newCommand(ctx context.Context, spec CmdSpec, withContext bool) (*exec.Cmd,
 	var cmd *exec.Cmd
 	if withContext {
 		cmd = exec.CommandContext(ctx, spec.Executable, spec.Args...)
+		if ProcessRegistryFrom(ctx) != nil {
+			// Registered runs stop through signal propagation so they can
+			// finish cleanup and persist their terminal status.
+			cmd.Cancel = nil
+		}
 	} else {
 		cmd = exec.Command(spec.Executable, spec.Args...)
 	}

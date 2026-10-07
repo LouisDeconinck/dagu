@@ -13,6 +13,7 @@ import {
   RuntimeCondition,
 } from '@/features/dag-runs/components/common/runtimeConditions';
 import {
+  AlertCircle,
   Check,
   Clock,
   Copy,
@@ -195,6 +196,25 @@ function RuntimeConditions({
             condition={condition}
           />
         ))}
+      </div>
+    </div>
+  );
+}
+
+function RunError({ error }: { error?: string }): React.JSX.Element | null {
+  if (!error) {
+    return null;
+  }
+  return (
+    <div className="pb-2" data-testid="dag-run-error">
+      <div className="flex items-center mb-1">
+        <AlertCircle className="h-3.5 w-3.5 mr-1 text-error" />
+        <span className="text-xs font-semibold text-error">
+          <I18nText text={"DAGRun Error"} />
+        </span>
+      </div>
+      <div className="p-1.5 bg-error-muted border border-error/20 rounded-md text-xs text-error font-medium whitespace-pre-wrap break-words">
+        {error}
       </div>
     </div>
   );
@@ -483,6 +503,7 @@ function DAGStatusOverview({
         );
       })()}
 
+      <RunError error={status.error} />
       <RuntimeConditions conditions={status.conditions} />
       <PreconditionErrors preconditions={status.preconditions} />
     </div>

@@ -94,10 +94,16 @@ func ReportValueReferenceNotices(dag *ir.DAG, sink cmnvalue.ValueReferenceNotice
 	}
 }
 
+// isForeachItemScopeFieldPath reports whether a field resolves with item scope:
+// the owning foreach step's key and collect expressions and every body field.
 func isForeachItemScopeFieldPath(path string) bool {
-	return strings.Contains(path, ".foreach.key") ||
-		strings.Contains(path, ".foreach.steps[") ||
-		strings.Contains(path, ".foreach.collect.")
+	return isForeachItemFieldPath(path) || strings.Contains(path, ".foreach.steps[")
+}
+
+// isForeachItemFieldPath reports whether a field belongs to the foreach step
+// itself but is evaluated per item.
+func isForeachItemFieldPath(path string) bool {
+	return strings.Contains(path, ".foreach.key") || strings.Contains(path, ".foreach.collect.")
 }
 
 func reportStepEnvValueReferenceNotices(
@@ -264,22 +270,19 @@ func isEnvReferenceFieldPath(path string) bool {
 }
 
 type stepOutputNoticeContext struct {
-	stepsByID      map[string]ir.Step
-	outputNames    map[string]map[string]struct{}
-	depsByStepName map[string][]string
+	stepsByID   map[string]ir.Step
+	outputNames map[string]map[string]struct{}
 }
 
 func newStepOutputNoticeContext(dag *ir.DAG) *stepOutputNoticeContext {
 	ctx := &stepOutputNoticeContext{
-		stepsByID:      make(map[string]ir.Step),
-		outputNames:    make(map[string]map[string]struct{}),
-		depsByStepName: make(map[string][]string),
+		stepsByID:   make(map[string]ir.Step),
+		outputNames: make(map[string]map[string]struct{}),
 	}
 	if dag == nil {
 		return ctx
 	}
 	for _, step := range dag.Steps {
-		ctx.depsByStepName[step.Name] = append([]string(nil), step.Depends...)
 		if step.ID == "" {
 			continue
 		}
@@ -409,31 +412,7 @@ func (c *stepOutputNoticeContext) reason(
 			return cmnvalue.ValueReferenceReasonUnknownOutputName, true
 		}
 	}
-	if !c.dependsOn(ownerStepName, producer.Name) {
-		return cmnvalue.ValueReferenceReasonMissingDependency, true
-	}
 	return "", false
-}
-
-func (c *stepOutputNoticeContext) dependsOn(ownerStepName, producerStepName string) bool {
-	if ownerStepName == "" || producerStepName == "" {
-		return false
-	}
-	seen := make(map[string]struct{})
-	queue := append([]string(nil), c.depsByStepName[ownerStepName]...)
-	for len(queue) > 0 {
-		dep := queue[0]
-		queue = queue[1:]
-		if dep == producerStepName {
-			return true
-		}
-		if _, ok := seen[dep]; ok {
-			continue
-		}
-		seen[dep] = struct{}{}
-		queue = append(queue, c.depsByStepName[dep]...)
-	}
-	return false
 }
 
 type valueReferenceNoticeFieldSink struct {

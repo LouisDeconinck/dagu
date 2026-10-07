@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/signal"
+	"os"
 	"sync"
 	"syscall"
 	"time"
@@ -16,6 +16,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	"github.com/dagucloud/dagu/v2/internal/eventstore"
+	"github.com/dagucloud/dagu/v2/internal/launcher"
 	"github.com/dagucloud/dagu/v2/internal/opencodehost"
 	"github.com/dagucloud/dagu/v2/internal/persis"
 	persisfile "github.com/dagucloud/dagu/v2/internal/persis/file"
@@ -108,11 +109,11 @@ func runStartAll(ctx *Context, _ []string) error {
 
 	// Create a context that will be cancelled on interrupt signal.
 	// This must be created BEFORE server initialization so auth provider init can be cancelled.
-	signalCtx, stop := signal.NotifyContext(ctx.Context, syscall.SIGINT, syscall.SIGTERM)
+	signalCtx, stop := notifyShutdownContext(ctx.Context, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	// Create a signal-aware context for services (used for auth init and all service operations)
-	serviceCtx := ctx.WithContext(signalCtx)
+	serviceCtx := ctx.WithContext(ctx.withSignalPropagation(signalCtx))
 	if _, err := persisfile.NewDAGSettingsStore(
 		serviceCtx.Config,
 		serviceCtx.backend.Collection(persis.CollectionDAGSettings),
@@ -267,7 +268,11 @@ func runStartAll(ctx *Context, _ []string) error {
 			logger.Error(ctx, "Service failed, shutting down", tag.Error(err))
 		}
 	}
-	stop() // Restore default signal handling while graceful shutdown runs.
+	var received os.Signal
+	_ = errors.As(context.Cause(signalCtx), &received)
+	// Capture the signal before scheduler.Stop cancels its service context.
+	runsDone := launcher.PropagateSignal(serviceCtx, received)
+	stop() // Let a second SIGINT end graceful shutdown; SIGTERM stays absorbed.
 
 	// Stop all services gracefully
 	logger.Info(ctx, "Stopping all services")
@@ -288,6 +293,9 @@ func runStartAll(ctx *Context, _ []string) error {
 	if err := resourceService.Stop(ctx); err != nil {
 		logger.Error(ctx, "Failed to stop resource service", tag.Error(err))
 	}
+
+	// Runner cleanup follows each DAG's timeout, not the service budget.
+	<-runsDone
 
 	// Wait for all services to finish with timeout
 	done := make(chan struct{})

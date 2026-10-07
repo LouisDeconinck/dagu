@@ -408,6 +408,34 @@ func TestQueueProcessor_DefersUnchangedDistributedDispatchFailure(t *testing.T) 
 	require.Len(t, items, 1)
 }
 
+func TestQueueProcessor_DistributedDispatchFailsRunOnDefinitionError(t *testing.T) {
+	// A dispatch rejected because the definition cannot be built can never
+	// succeed, so the run is failed with the build error instead of staying
+	// queued behind a generic dispatch condition.
+	f := newQueueFixture(t).withDAG("broken-definition", 1).
+		withProcessor(config.Queues{}).
+		simulateQueue(1, false)
+	buildErr := errors.New("field 'actions.broken_action.input_schema': failed to parse schema JSON")
+	dispatcher := &mockDispatcher{errFunc: func(int32) error {
+		return &dispatch.DefinitionError{Err: buildErr}
+	}}
+	f.processor.dagExecutor = NewDAGExecutor(dispatcher, nil, config.ExecutionModeDistributed, "")
+	f.enqueueToQueue(f.dag.Name, "run-1", queuedomain.QueuePriorityHigh)
+
+	f.processor.ProcessQueueItems(f.ctx, f.dag.Name)
+
+	attempt, err := f.dagRunRepository.FindAttempt(f.ctx, ir.NewDAGRunRef(f.dag.Name, "run-1"))
+	require.NoError(t, err)
+	runStatus, err := attempt.ReadStatus(f.ctx)
+	require.NoError(t, err)
+	assert.Equal(t, ir.Failed, runStatus.Status)
+	assert.Contains(t, runStatus.Error, buildErr.Error())
+
+	items, err := f.queueStore.List(f.ctx, f.dag.Name)
+	require.NoError(t, err)
+	assert.Empty(t, items)
+}
+
 func TestQueueProcessor_ProcessQueueItems_FailsClosedOnLeaseCountError(t *testing.T) {
 	f := newQueueFixture(t).withDAG("distributed-count-error-dag", 1).
 		withProcessor(config.Queues{}).

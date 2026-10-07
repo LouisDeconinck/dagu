@@ -21,6 +21,11 @@ func (r *Runner) SetupPushBackConversation(ctx context.Context, node *Node) {
 	r.setupPushBackConversation(ctx, node)
 }
 
+// CheckDryRunStep exposes checkDryRunStep for testing.
+func CheckDryRunStep(ctx context.Context, step ir.Step) error {
+	return checkDryRunStep(ctx, step)
+}
+
 // StepSupportsChatMessages exposes stepSupportsChatMessages for testing.
 func StepSupportsChatMessages(step ir.Step) bool {
 	return stepSupportsChatMessages(step)

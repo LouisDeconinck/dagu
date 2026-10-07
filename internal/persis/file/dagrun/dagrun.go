@@ -20,6 +20,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/fileutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
+	"github.com/dagucloud/dagu/v2/internal/cmn/logpath"
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/persis"
@@ -328,6 +329,17 @@ func (dr DAGRun) removeLogFiles(ctx context.Context) error {
 				tag.File(file))
 		}
 		parentDirs[filepath.Dir(file)] = struct{}{}
+	}
+	// Foreach body logs are not recorded in the status; they live in a
+	// fixed directory beside the step's own log files.
+	for dir := range parentDirs {
+		foreachDir := filepath.Join(dir, logpath.ForeachLogDirName)
+		if err := fileutil.RemoveAll(foreachDir); err != nil {
+			logger.Error(ctx, "Failed to remove foreach body log directory",
+				tag.Error(err),
+				tag.RunID(dr.dagRunID),
+				tag.Dir(foreachDir))
+		}
 	}
 	for dir := range uniqueArtifactDirs {
 		// The index record always lives in the trusted root, even when the DAG

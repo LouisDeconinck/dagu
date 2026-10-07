@@ -20,6 +20,7 @@ const (
 	fieldHostConfigObject
 	fieldDAGEnv
 	fieldRuntimeDAGEnv
+	fieldDAGEnvCompletion
 	fieldDynamicParamEval
 	fieldDotenvPath
 	fieldStepDir
@@ -84,6 +85,10 @@ func DAGEnvField(path string) Field { return newField(path, fieldDAGEnv) }
 
 // RuntimeDAGEnvField returns the policy for runtime DAG env entries.
 func RuntimeDAGEnvField(path string) Field { return newField(path, fieldRuntimeDAGEnv) }
+
+// DAGEnvCompletionField returns the policy for completing a DAG env entry that
+// loading already resolved. Escapes applied at load are not applied again.
+func DAGEnvCompletionField(path string) Field { return newField(path, fieldDAGEnvCompletion) }
 
 // DynamicParamEvalField returns the policy for dynamic param eval values.
 func DynamicParamEvalField(path string) Field { return newField(path, fieldDynamicParamEval) }
@@ -191,8 +196,13 @@ func ContainerEnvField(path string) Field { return newField(path, fieldContainer
 // ExecutorConfigField returns the policy for executor configuration objects.
 func ExecutorConfigField(path string) Field { return newField(path, fieldExecutorConfig) }
 
-// TemplateScriptField returns the policy for template executor scripts.
+// TemplateScriptField returns the policy for scripts that executors such as
+// template and js interpret as written.
 func TemplateScriptField(path string) Field { return newField(path, fieldTemplateScript) }
+
+// IsTemplateScript reports whether the field is a script passed to its
+// executor as written rather than value-resolved.
+func (f Field) IsTemplateScript() bool { return f.kind == fieldTemplateScript }
 
 // TemplateConfigField returns the policy for template executor configuration.
 func TemplateConfigField(path string) Field {

@@ -142,6 +142,13 @@ func toStep(obj ir.Step) api.Step {
 	if len(obj.Dependencies) > 0 {
 		step.Dependencies = ptrOf(obj.Dependencies)
 	}
+	if len(obj.InferredDepends) > 0 {
+		inferred := make([]string, len(obj.InferredDepends))
+		for i, dep := range obj.InferredDepends {
+			inferred[i] = dep.Step
+		}
+		step.InferredDepends = &inferred
+	}
 	// Only authored declarations belong here. Names derived from a step's
 	// capture configuration are not published through DAGU_OUTPUT_FILE and are
 	// already visible in the field that configures them.
@@ -249,9 +256,10 @@ func toStep(obj ir.Step) api.Step {
 
 func toPrecondition(obj *ir.Condition) api.Condition {
 	condition := api.Condition{
-		Expected: ptrOf(obj.Expected),
-		Negate:   ptrOf(obj.Negate),
-		Error:    ptrOf(""),
+		Expected:    ptrOf(obj.Expected),
+		ExpectedAny: ptrOf(obj.ExpectedAny),
+		Negate:      ptrOf(obj.Negate),
+		Error:       ptrOf(""),
 	}
 	if obj.Condition != "" {
 		condition.Condition = ptrOf(obj.Condition)
@@ -408,10 +416,19 @@ func ToDAGRunDetails(s ir.DAGRunStatus) api.DAGRunDetails {
 	if s.AutoRetryLimit > 0 {
 		autoRetryLimit = ptrOf(s.AutoRetryLimit)
 	}
+	var runError *string
+	if s.Error != "" {
+		runError = ptrOf(s.Error)
+	}
 	artifactsAvailable := hasArtifactEntries(s.ArchiveDir)
 	var humanTaskResumePending *bool
 	if humantask.ResumePending(&s) {
 		humanTaskResumePending = ptrOf(true)
+	}
+
+	var approvalPending *bool
+	if approvalResumePending(&s) {
+		approvalPending = ptrOf(true)
 	}
 
 	return api.DAGRunDetails{
@@ -428,6 +445,7 @@ func ToDAGRunDetails(s ir.DAGRunStatus) api.DAGRunDetails {
 		Params:                 ptrOf(s.Params),
 		DagRunId:               s.DAGRunID,
 		Workspace:              workspaceResponseNameFromLabelStrings(s.Labels),
+		Error:                  runError,
 		ProfileName:            toRuntimeProfileName(s.ProfileName),
 		QueuedAt:               ptrOf(s.QueuedAt),
 		AutoRetryCount:         s.AutoRetryCount,
@@ -441,6 +459,7 @@ func ToDAGRunDetails(s ir.DAGRunStatus) api.DAGRunDetails {
 		WorkerId:               ptrOf(s.WorkerID),
 		Process:                toDAGRunProcess(s),
 		HumanTaskResumePending: humanTaskResumePending,
+		ApprovalResumePending:  approvalPending,
 		TriggerType:            toTriggerType(s.TriggerType),
 		TriggerActor:           ptrOf(s.TriggerActor),
 		Preconditions:          ptrOf(preconditions),

@@ -4,7 +4,10 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"strings"
 	"testing"
 
 	"github.com/dagucloud/dagu/v2/internal/llm"
@@ -268,4 +271,110 @@ func TestBuildRequestBody_Images(t *testing.T) {
 		{"inlineData":{"mimeType":"image/png","data":"AQI="}},
 		{"text":"describe"}
 	]`, string(parsed.Contents[0].Parts))
+}
+
+// Tool results name the function they answer, found through the call ID,
+// and the results of one turn's calls travel in one content, as Gemini
+// requires for parallel calls.
+func TestBuildRequestBody_FunctionResponses(t *testing.T) {
+	t.Parallel()
+
+	provider := &Provider{config: llm.Config{APIKey: "test-key"}}
+	body, err := provider.buildRequestBody(&llm.ChatRequest{
+		Model: "gemini-2.5-flash",
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: "weather in Tokyo and Paris"},
+			{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+				{ID: "call_0", Type: "function", Function: llm.ToolCallFunction{Name: "get_weather", Arguments: `{"city":"Tokyo"}`}},
+				{ID: "call_1", Type: "function", Function: llm.ToolCallFunction{Name: "get_time", Arguments: `{"city":"Paris"}`}},
+			}},
+			{Role: llm.RoleTool, ToolCallID: "call_0", Content: `{"celsius":21}`},
+			{Role: llm.RoleTool, ToolCallID: "call_1", Content: "noon"},
+			{Role: llm.RoleUser, Content: "thanks"},
+		},
+	})
+	require.NoError(t, err)
+
+	var parsed struct {
+		Contents []struct {
+			Role  string          `json:"role"`
+			Parts json.RawMessage `json:"parts"`
+		} `json:"contents"`
+	}
+	require.NoError(t, json.Unmarshal(body, &parsed))
+	require.Len(t, parsed.Contents, 4)
+	assert.Equal(t, "user", parsed.Contents[2].Role)
+	assert.JSONEq(t, `[
+		{"functionResponse":{"name":"get_weather","response":{"celsius":21}}},
+		{"functionResponse":{"name":"get_time","response":{"result":"noon"}}}
+	]`, string(parsed.Contents[2].Parts))
+	assert.JSONEq(t, `[{"text":"thanks"}]`, string(parsed.Contents[3].Parts))
+}
+
+// Tool schemas are sent as JSON Schema, which keeps keywords such as
+// additionalProperties and $defs that the OpenAPI parameters field rejects.
+func TestBuildRequestBody_FunctionDeclarationSchema(t *testing.T) {
+	t.Parallel()
+
+	provider := &Provider{config: llm.Config{APIKey: "test-key"}}
+	parameters := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"category": map[string]any{"$ref": "#/$defs/category"},
+		},
+		"$defs": map[string]any{
+			"category": map[string]any{"type": "string", "enum": []any{"refund", "question"}},
+		},
+	}
+	body, err := provider.buildRequestBody(&llm.ChatRequest{
+		Model:    "gemini-2.5-flash",
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "Hello"}},
+		Tools: []llm.Tool{{
+			Type:     "function",
+			Function: llm.ToolFunction{Name: "respond", Description: "Answer", Parameters: parameters},
+		}},
+	})
+	require.NoError(t, err)
+
+	var parsed struct {
+		Tools []struct {
+			FunctionDeclarations []map[string]json.RawMessage `json:"functionDeclarations"`
+		} `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal(body, &parsed))
+	require.Len(t, parsed.Tools, 1)
+	require.Len(t, parsed.Tools[0].FunctionDeclarations, 1)
+	declaration := parsed.Tools[0].FunctionDeclarations[0]
+
+	expected, err := json.Marshal(parameters)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(expected), string(declaration["parametersJsonSchema"]))
+	assert.NotContains(t, declaration, "parameters", "parameters and parametersJsonSchema are mutually exclusive")
+}
+
+// A single SSE data line larger than bufio.Scanner's default 64 KiB limit must
+// not terminate the stream.
+func TestStreamResponse_LargeEvent(t *testing.T) {
+	t.Parallel()
+
+	big := strings.Repeat("a", 200*1024)
+	stream := "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"" + big + "\"}]},\"finishReason\":\"STOP\"}]}\n\n"
+
+	provider := &Provider{}
+	events := make(chan llm.StreamEvent)
+	go provider.streamResponse(context.Background(), io.NopCloser(strings.NewReader(stream)), events)
+
+	var deltas []string
+	done := false
+	for event := range events {
+		require.NoError(t, event.Error)
+		if event.Done {
+			done = true
+			continue
+		}
+		deltas = append(deltas, event.Delta)
+	}
+	require.True(t, done)
+	require.Equal(t, []string{big}, deltas)
 }

@@ -16,6 +16,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/dagucloud/dagu/v2/internal/cmn/fileutil"
+	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
+	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
+	"github.com/dagucloud/dagu/v2/internal/cmn/logpath"
 	"github.com/dagucloud/dagu/v2/internal/cmn/runenv"
 
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
@@ -25,9 +29,10 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/runtime/executor"
 )
 
-var errForeachItemFailed = errors.New("one or more foreach item bodies failed")
-
-var _ executor.StatusDetailsProvider = (*foreachExecutor)(nil)
+var (
+	_ executor.StatusDetailsProvider = (*foreachExecutor)(nil)
+	_ executor.NodeStatusDeterminer  = (*foreachExecutor)(nil)
+)
 
 type foreachExecutor struct {
 	step          ir.Step
@@ -35,6 +40,17 @@ type foreachExecutor struct {
 	stderr        io.Writer
 	cancel        context.CancelFunc
 	statusDetails []ir.NodeStatusDetail
+	// outcome is what the last Run saw, for DetermineNodeStatus.
+	outcome runOutcome
+}
+
+// runOutcome counts the item bodies of one run and keeps the error a run
+// that failed as a whole reports.
+type runOutcome struct {
+	total     int
+	failed    int
+	cancelled bool
+	err       error
 }
 
 type expandedItem struct {
@@ -89,17 +105,69 @@ func (e *foreachExecutor) Run(ctx context.Context) error {
 	e.cancel = cancel
 	defer cancel()
 
+	e.outcome = runOutcome{}
 	items, err := e.expandItems(ctx)
 	if err != nil {
+		e.outcome.err = err
 		return err
 	}
 
-	results, runErr := e.runItems(ctx, items)
+	results, dispatchErr := e.runItems(ctx, items)
 	e.statusDetails = foreachStatusDetails(items, results, e.step.Foreach.Key != "")
+	e.outcome = summarize(results, dispatchErr)
 	if err := e.writeAggregate(results); err != nil {
+		e.outcome.err = err
 		return err
 	}
-	return runErr
+	return e.outcome.err
+}
+
+// summarize decides what a run reports. A run every item body failed, or
+// one cut short, is an error; a run some item bodies failed is not, since
+// the work of the others is done and published, and DetermineNodeStatus
+// reports it as partially succeeded.
+func summarize(results []itemResult, dispatchErr error) runOutcome {
+	outcome := runOutcome{total: len(results)}
+	var first string
+	for _, result := range results {
+		// An item a cancellation kept from starting neither succeeded nor
+		// failed; the cancellation itself decides the outcome.
+		if result.Status == ir.NodeSucceeded.String() || result.Status == ir.NodeNotStarted.String() {
+			continue
+		}
+		outcome.failed++
+		if first == "" {
+			first = result.Error
+			if first == "" {
+				first = result.Status
+			}
+		}
+	}
+	switch {
+	case dispatchErr != nil:
+		// A cancelled run is aborted; a run that hit its deadline failed.
+		outcome.cancelled = errors.Is(dispatchErr, context.Canceled)
+		outcome.err = dispatchErr
+	case outcome.total > 0 && outcome.failed == outcome.total:
+		outcome.err = fmt.Errorf("all %d item bodies failed; first error: %s", outcome.total, first)
+	}
+	return outcome
+}
+
+// DetermineNodeStatus implements NodeStatusDeterminer: a run some item
+// bodies failed is partially succeeded, so the steps after the loop run
+// and the aggregate tells them which items failed.
+func (e *foreachExecutor) DetermineNodeStatus() (ir.NodeStatus, error) {
+	switch {
+	case e.outcome.cancelled:
+		return ir.NodeAborted, nil
+	case e.outcome.err != nil:
+		return ir.NodeFailed, e.outcome.err
+	case e.outcome.failed > 0:
+		return ir.NodePartiallySucceeded, nil
+	default:
+		return ir.NodeSucceeded, nil
+	}
 }
 
 func (e *foreachExecutor) GetStatusDetails() []ir.NodeStatusDetail {
@@ -261,21 +329,12 @@ dispatch:
 		}(item)
 	}
 	wg.Wait()
-	if dispatchErr != nil {
-		return results, dispatchErr
+	if dispatchErr == nil {
+		// A cancellation that arrived while the last items ran is reported
+		// as such, not as those items' failure.
+		dispatchErr = ctx.Err()
 	}
-
-	var failed bool
-	for _, result := range results {
-		if result.Status != ir.NodeSucceeded.String() {
-			failed = true
-			break
-		}
-	}
-	if failed {
-		return results, errForeachItemFailed
-	}
-	return results, nil
+	return results, dispatchErr
 }
 
 func (e *foreachExecutor) runItem(ctx context.Context, item expandedItem) itemResult {
@@ -289,9 +348,15 @@ func (e *foreachExecutor) runItem(ctx context.Context, item expandedItem) itemRe
 		return itemResult{Index: item.index, Key: item.key, Status: ir.NodeFailed.String(), Error: err.Error()}
 	}
 
+	logDir, cleanup, err := bodyLogDir(ctx, item.index)
+	if err != nil {
+		return itemResult{Index: item.index, Key: item.key, Status: ir.NodeFailed.String(), Error: err.Error()}
+	}
+	defer cleanup()
+
 	bodyRunID := bodyDAGRunID(ctx, item.index)
 	runner := runtime.New(&runtime.Config{
-		LogDir:   bodyLogDir(ctx),
+		LogDir:   logDir,
 		DAGRunID: bodyRunID,
 	})
 	err = runner.Run(itemCtx, plan, nil)
@@ -325,6 +390,7 @@ func cloneSteps(steps []ir.Step) []ir.Step {
 			maps.Copy(cloned[i].ExecutorConfig.Config, step.ExecutorConfig.Config)
 		}
 		cloned[i].Depends = append([]string(nil), step.Depends...)
+		cloned[i].InferredDepends = append([]ir.InferredDependency(nil), step.InferredDepends...)
 		cloned[i].Env = append([]string(nil), step.Env...)
 		cloned[i].Commands = append([]ir.CommandEntry(nil), step.Commands...)
 		cloned[i].Outputs = append([]ir.StepOutputDeclaration(nil), step.Outputs...)
@@ -400,16 +466,20 @@ func (e *foreachExecutor) writeAggregate(results []itemResult) error {
 	}
 	output.Summary.Total = len(results)
 	for _, result := range results {
-		if result.Status == ir.NodeSucceeded.String() {
+		switch result.Status {
+		case ir.NodeSucceeded.String():
 			output.Summary.Succeeded++
 			if result.Outputs == nil {
 				output.Outputs = append(output.Outputs, map[string]string{})
 			} else {
 				output.Outputs = append(output.Outputs, result.Outputs)
 			}
-			continue
+		case ir.NodeNotStarted.String():
+			// An item a cancellation kept from starting is listed, not
+			// counted as a body that failed.
+		default:
+			output.Summary.Failed++
 		}
-		output.Summary.Failed++
 	}
 
 	w := e.stdout
@@ -424,18 +494,39 @@ func (e *foreachExecutor) writeAggregate(results []itemResult) error {
 	return err
 }
 
-func bodyLogDir(ctx context.Context) string {
+// scratchLogDirPrefix names the temporary directories holding body logs of
+// runs that have no log directory of their own.
+const scratchLogDirPrefix = "dagu-foreach-"
+
+// bodyLogDir returns the directory an item's body logs are written to.
+// Body logs belong to the parent step's log directory, where run removal
+// finds them. A run without a log directory gets a scratch directory that
+// the returned cleanup removes once the body has finished.
+func bodyLogDir(ctx context.Context, index int) (string, func(), error) {
+	itemDir := strconv.Itoa(index)
+	keep := func() {}
 	env := runtime.GetEnv(ctx)
 	if env.Scope != nil {
 		if stdout, ok := env.Scope.Get(runenv.EnvKeyDAGRunStepStdoutFile); ok && stdout != "" {
-			return filepath.Join(filepath.Dir(stdout), "foreach")
+			return filepath.Join(filepath.Dir(stdout), logpath.ForeachLogDirName, itemDir), keep, nil
 		}
 	}
 	rCtx := runtime.GetDAGContext(ctx)
 	if rCtx.DAGRunLogDir != "" {
-		return filepath.Join(rCtx.DAGRunLogDir, "foreach")
+		return filepath.Join(rCtx.DAGRunLogDir, logpath.ForeachLogDirName, itemDir), keep, nil
 	}
-	return filepath.Join(os.TempDir(), "dagu-foreach")
+	dir, err := os.MkdirTemp("", scratchLogDirPrefix)
+	if err != nil {
+		return "", keep, fmt.Errorf("failed to create scratch log directory for item %d: %w", index, err)
+	}
+	cleanup := func() {
+		if err := fileutil.RemoveAll(dir); err != nil {
+			logger.Warn(ctx, "Failed to remove scratch log directory",
+				tag.Error(err),
+				tag.Dir(dir))
+		}
+	}
+	return dir, cleanup, nil
 }
 
 func bodyDAGRunID(ctx context.Context, index int) string {

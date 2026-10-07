@@ -229,6 +229,22 @@ Clear the recorded `act` operations that computer steps replay, so the next run 
 dagu computer cache clear <dag> [--step <id>]
 ```
 
+### dagu xlsx inspect
+
+Describe every sheet of an `.xlsx` workbook: used range, detected data block, header row, column names and types, a profile of each column, row count, tables, and a few typed sample rows, plus the workbook's named ranges and date system. Types and the profile cover every data row up to 5000: filled and blank counts, distinct count, the values when a few repeat, min and max of number and date columns, and the cells that do not read as the column's type. The text format shows them after each column, as in `状態 (string: 済, 未; 40 blank), 数量 (number; 1..250; 1 odd: D300 "未定")`. It reads the file directly, needs no configuration or engine, and creates no run. `--sheet` describes one sheet only and `--rows` sets the sample size. A hidden sheet is marked `(hidden)` and rows hidden by a filter or by hand are counted, as in `300 rows, 12 hidden`. `--format json` prints one object: `path`, `date_system`, `sheets` (each with `name`, `hidden`, `used_range`, `range`, `header_row`, `headers`, `types`, `row_count`, `hidden_rows`, `columns`, `profile_truncated`, `tables`, `sample`), `named_ranges`, and `warnings`.
+
+```sh
+dagu xlsx inspect <path> [--sheet <name>] [--rows <n>] [--format json]
+```
+
+### dagu xlsx read
+
+Print the typed rows of a sheet the way `xlsx.read` publishes them: numbers stay numbers, dates become ISO 8601 text, text keeps its leading zeros, and each row carries `_row`. The flags mirror the action's fields: `--sheet`, `--range`, `--header` (`true`, `false`, a row number, or `3,4`), `--columns` (comma-separated, with `name:alias` renames), `--max-rows`, and `--skip-hidden` (leave out rows hidden by a filter or by hand). The text format is tab-separated, with tabs, line breaks, and backslashes inside a cell escaped as `\t`, `\n`, `\r`, and `\\` so one cell stays in one column; `--format json` prints `rows`, `count`, `headers`, `sheet`, `range`, `warnings`, and `truncated`.
+
+```sh
+dagu xlsx read <path> [--sheet <name>] [--range A2:F] [--header false] [--columns "a,b:c"] [--max-rows <n>] [--skip-hidden] [--format json]
+```
+
 ### dagu ps
 
 List running DAG processes.
@@ -248,6 +264,21 @@ Deprecated: prefer `dagu rm --history`.
 ```sh
 dagu cleanup <dag-name> [--retention-days <n>] [--dry-run] [--yes/-y]
 ```
+
+### dagu prune-artifacts
+
+Remove artifact directories and index records that no surviving DAG run points to. Orphans appear when a run record is deleted by a route other than `dagu rm`, or when the artifact root moved. Only the artifact layout is examined: `<root>/YYYY/MM/DD/<run>` directories with their index records, and pre-date `<root>/<dag>/dag-run_<ts>_<id>` directories. Liveness is decided by name: an entry is removed only when no run in the current history tree could still claim it, and only when it is older than `--older-than`. A minimum age of 1h is always enforced because a run's artifact directory exists before its record does. Without `--yes`, the command reports how many entries it found before asking to delete them.
+
+```sh
+dagu prune-artifacts [--older-than|-t <duration>] [--root <dir>] [--dry-run] [--yes/-y]
+```
+
+Flags:
+
+- `--older-than/-t` — Only remove entries older than a duration (e.g. `10d`, `24h`, `1w`). Default `24h`; a minimum of 1h is enforced
+- `--root` — Artifact root to prune (default: configured `paths.artifact_dir`). Pass a previous artifacts directory (e.g. `<old data_dir>/artifacts`) or a DAG's `artifacts.dir`. A root that holds the run history or the log directory is refused
+- `--dry-run` — Preview removals without deleting
+- `--yes/-y` — Skip confirmation prompt
 
 ### dagu schema
 

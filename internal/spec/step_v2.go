@@ -79,6 +79,7 @@ var builtinActionNormalizers = map[string]actionNormalizer{
 	"http.request":        normalizeHTTPRequestAction,
 	"human.task":          normalizeHumanTaskAction,
 	"jq.filter":           normalizeJQFilterAction,
+	"js.run":              normalizeJSRunAction,
 	"k8s.run":             optionalCommandAction("k8s", "command"),
 	"kubernetes.run":      optionalCommandAction("kubernetes", "command"),
 	"log.write":           normalizeLogAction,
@@ -109,6 +110,17 @@ var builtinActionNormalizers = map[string]actionNormalizer{
 	"wait.file":           operationAction("wait", "file"),
 	"wait.http":           operationAction("wait", "http"),
 	"wait.until":          operationAction("wait", "until"),
+	"xlsx.append":         xlsxAction("append", true),
+	"xlsx.convert":        xlsxAction("convert", true),
+	"xlsx.extract":        xlsxExtractAction(),
+	"xlsx.info":           xlsxAction("info", true),
+	"xlsx.list_sheets":    xlsxAction("list_sheets", true),
+	"xlsx.read":           xlsxAction("read", true),
+	"xlsx.sheet":          xlsxAction("sheet", true),
+	"xlsx.update_rows":    xlsxAction("update_rows", true),
+	"xlsx.validate":       xlsxAction("validate", true),
+	"xlsx.write":          xlsxAction("write", true),
+	"xlsx.write_cells":    xlsxAction("write_cells", true),
 }
 
 func normalizeStepExecutionRaw(raw map[string]any, registry *customStepTypeRegistry) (map[string]any, error) {
@@ -814,6 +826,25 @@ func normalizeJQFilterAction(normalized map[string]any, with map[string]any) err
 		delete(with, "data")
 	}
 	return finishAction(normalized, "jq", with)
+}
+
+func normalizeJSRunAction(normalized map[string]any, with map[string]any) error {
+	value, err := requireActionField(with, "script")
+	if err != nil {
+		return err
+	}
+	script, ok := value.(string)
+	if !ok || strings.TrimSpace(script) == "" {
+		return ir.NewValidationError("with", with, fmt.Errorf("with.script must be a non-empty string"))
+	}
+	if _, hasInput := with["input"]; hasInput {
+		if _, hasFile := with["input_file"]; hasFile {
+			return ir.NewValidationError("with", with, fmt.Errorf("js.run does not allow both with.input and with.input_file"))
+		}
+	}
+	delete(with, "script")
+	normalized["script"] = script
+	return finishAction(normalized, "js", with)
 }
 
 func stringifyActionData(data any) (string, error) {

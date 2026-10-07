@@ -24,6 +24,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
+	"github.com/dagucloud/dagu/v2/internal/cmn/fileutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/stringutil"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 )
@@ -283,6 +284,7 @@ func startupError(message string, waitErr error, stderr string) error {
 
 func scanEndpoint(stdout io.Reader, ready chan<- string) {
 	scanner := bufio.NewScanner(stdout)
+	fileutil.ConfigureScanner(scanner)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if endpoint, ok := strings.CutPrefix(line, "opencode server listening on "); ok {

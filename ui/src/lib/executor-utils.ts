@@ -46,8 +46,12 @@ export function getExecutorCommand(
     case 'mail':
       if (config.to) return `Mail to ${config.to}`;
       return config.mailbox ? `mail: ${config.mailbox}` : null;
+    case 'xlsx':
+      return config.path ? `xlsx: ${config.path}` : null;
     case 'jq':
       return config.expression ? `jq: ${config.expression}` : null;
+    case 'js':
+      return config.input_file ? `js: ${config.input_file}` : 'js';
     case 'docker':
       return config.image ? `docker: ${config.image}` : null;
     case 'router':

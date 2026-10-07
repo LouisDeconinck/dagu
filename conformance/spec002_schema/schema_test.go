@@ -81,6 +81,11 @@ func TestValidate(t *testing.T) {
 			stderrParts: []string{"document 2", "empty"},
 		},
 		{
+			name:        "empty document between documents is forbidden",
+			file:        "empty_document_between.yaml",
+			stderrParts: []string{"document 2", "empty"},
+		},
+		{
 			name:        "later document name is required",
 			file:        "later_document_without_name.yaml",
 			stderrParts: []string{"document 2", "name"},

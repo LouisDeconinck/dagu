@@ -758,10 +758,14 @@ func (tp *TickPlanner) shouldRun(ctx context.Context, dag *ir.DAG, scheduledTime
 		return false
 	}
 	if running {
+		logger.Info(ctx, "Skipping job because the DAG is running",
+			tag.DAG(dag.Name),
+			tag.ScheduledTime(scheduledTime),
+		)
 		return false
 	}
 
-	// Guard 1b: isQueued — prevent live run while a catchup run is queued.
+	// Guard 1b: isQueued, a queued run of any trigger keeps the DAG busy, as a running one does.
 	// On error, conservatively skip (assume busy) to avoid duplicates.
 	queued, qErr := tp.cfg.IsQueued(ctx, dag)
 	if qErr != nil {
@@ -772,6 +776,10 @@ func (tp *TickPlanner) shouldRun(ctx context.Context, dag *ir.DAG, scheduledTime
 		return false
 	}
 	if queued {
+		logger.Info(ctx, "Skipping job because a run of the DAG is queued",
+			tag.DAG(dag.Name),
+			tag.ScheduledTime(scheduledTime),
+		)
 		return false
 	}
 

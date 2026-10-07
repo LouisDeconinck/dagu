@@ -5,6 +5,7 @@ package value_test
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/value"
@@ -49,6 +50,122 @@ func TestResolveRefSinglePass(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, templateText, got)
+}
+
+func TestResolverKeepsInsertedText(t *testing.T) {
+	t.Parallel()
+
+	fields := []struct {
+		name  string
+		field value.Field
+	}{
+		{name: "executor", field: value.ExecutorConfigField("steps[0].with.password")},
+		{name: "root env", field: value.DAGEnvField("env.COPY")},
+		{name: "runtime env", field: value.RuntimeDAGEnvField("env.COPY")},
+		{name: "step env", field: value.StepEnvField("steps[0].env.COPY")},
+		{name: "directory", field: value.StepDirField("steps[0].working_dir")},
+	}
+	texts := []struct {
+		name string
+		text string
+	}{
+		{name: "escaped dollar", text: `p\$INSERTED`},
+		{name: "environment variable", text: `$INSERTED/data`},
+		{name: "braced variable", text: `${INSERTED}/data`},
+		{name: "scoped reference", text: `${env.INSERTED}`},
+		{name: "parameter reference", text: `${params.other}`},
+		{name: "JSON reference", text: `${DATA.part}`},
+		{name: "quoted JSON reference", text: `"${DATA.part}"`},
+		{name: "empty", text: ""},
+	}
+	for _, field := range fields {
+		for _, text := range texts {
+			t.Run(field.name+"/"+text.name, func(t *testing.T) {
+				t.Parallel()
+
+				resolver := value.NewResolver(value.StaticScope{}, value.RuntimeScope{
+					Params: value.Values{"text": text.text, "other": "expanded"},
+					Env: testEnvScope(map[string]string{
+						"INSERTED": "expanded",
+						"DATA":     `{"part":"expanded"}`,
+					}),
+				})
+				got, err := resolver.String(context.Background(), "before ${params.text} after", field.field)
+				require.NoError(t, err)
+				assert.Equal(t, "before "+text.text+" after", got)
+			})
+		}
+	}
+}
+
+func TestResolverExpandsAuthoredText(t *testing.T) {
+	t.Parallel()
+
+	resolver := value.NewResolver(value.StaticScope{}, value.RuntimeScope{
+		Params: value.Values{"text": `p\$INSERTED`, "path": "/data"},
+		Env:    testEnvScope(map[string]string{"INSERTED": "expanded"}),
+	})
+	got, err := resolver.Object(context.Background(), map[string]any{
+		"nested": []any{"${params.text}:$INSERTED", `\$INSERTED`, "$INSERTED${params.path}", "$INSERTED${env.MISSING}", `$INSERTED\$INSERTED`},
+	}, value.ExecutorConfigField("steps[0].with"))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"nested": []any{`p\$INSERTED:expanded`, "$INSERTED", "expanded/data", "expanded${env.MISSING}", "expanded$INSERTED"},
+	}, got)
+}
+
+// Completion runs over a value that loading already resolved, so escapes stay as
+// loading left them while names in the given scope still expand.
+func TestResolverDAGEnvCompletion(t *testing.T) {
+	t.Parallel()
+
+	resolver := value.NewResolver(value.StaticScope{}, value.RuntimeScope{
+		Env: testEnvScope(map[string]string{"RUN": "run-1"}),
+	})
+	got, err := resolver.String(context.Background(), `p\$RUN:$RUN`, value.DAGEnvCompletionField("env.COPY"))
+	require.NoError(t, err)
+	assert.Equal(t, `p\$RUN:run-1`, got)
+}
+
+func TestResolverInsertionInDynamicFields(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX commands")
+	}
+
+	fields := []struct {
+		name  string
+		field value.Field
+	}{
+		{name: "parameter", field: value.DynamicParamEvalField("params[0].eval")},
+		{name: "condition", field: value.ConditionEvalField("preconditions[0].eval")},
+	}
+	tests := []struct {
+		name string
+		raw  string
+		text string
+		want string
+	}{
+		{name: "backtick data", raw: "${params.text}", text: "`printf executed`", want: "`printf executed`"},
+		{name: "dollar data", raw: "${params.text}", text: "$(printf executed)", want: "$(printf executed)"},
+		{name: "backtick command", raw: "`printf '%s' '${params.text}' | tr a-z A-Z`", text: "hello", want: "HELLO"},
+		{name: "dollar command", raw: "$(printf '%s' '${params.text}' | tr a-z A-Z)", text: "hello", want: "HELLO"},
+		{name: "unresolved backtick", raw: "`printf '%s' ${env.MISSING}`", want: "${env.MISSING}"},
+		{name: "unresolved dollar", raw: "$(printf '%s' ${env.MISSING})", want: "${env.MISSING}"},
+	}
+	for _, field := range fields {
+		for _, test := range tests {
+			t.Run(field.name+"/"+test.name, func(t *testing.T) {
+				t.Parallel()
+				resolver := value.NewResolver(value.StaticScope{}, value.RuntimeScope{
+					Params: value.Values{"text": test.text},
+				})
+				got, err := resolver.String(context.Background(), test.raw, field.field)
+				require.NoError(t, err)
+				assert.Equal(t, test.want, got)
+			})
+		}
+	}
 }
 
 func TestResolveRefValidation(t *testing.T) {

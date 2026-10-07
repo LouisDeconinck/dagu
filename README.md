@@ -609,12 +609,17 @@ Dagu includes built-in actions that run within the Dagu process or on the select
 | `state.get` / `state.set` / `state.delete` / `state.list` / `state.diff` | Persistent JSON state across DAG runs |
 | `data.convert` / `data.pick` | Convert and select structured data |
 | `jq.filter` | JSON transformation using jq expressions |
+| `js.run` | JavaScript transforms in an embedded sandbox, no Node.js needed |
 | `archive.create` / `archive.extract` / `archive.list` | Create, extract, and list zip/tar archives |
 | `wait.duration` / `wait.until` / `wait.file` / `wait.http` | Wait for time, file state, or HTTP readiness |
 | `human.task` | Wait for acknowledgement or typed operator input before downstream steps continue |
 | `mail.send` | Send email via SMTP |
-| `mail.search` | Find email in an IMAP mailbox |
+| `mail.search` | Find email in an IMAP or Gmail mailbox |
 | `mail.organize` | Mark, move, archive, or trash email |
+| `xlsx.read` / `xlsx.info` / `xlsx.list_sheets` | Read typed rows and describe `.xlsx` workbooks without a spreadsheet application |
+| `xlsx.write` / `xlsx.append` / `xlsx.update_rows` | Write reports, append rows, and write per-row results back into a workbook |
+| `xlsx.validate` / `xlsx.write_cells` / `xlsx.sheet` / `xlsx.convert` | Check rows against rules, fill template cells and formulas, manage sheets, and export a sheet to CSV, JSON, or JSONL |
+| `xlsx.extract` | Read fields out of a form-like sheet: a model names the cells, the engine reads their typed values, and a layout seen before with the same instruction and fields is read from a cache without a model call |
 | `template.render` | Text generation with template rendering |
 | `router.route` | Conditional step routing based on values and patterns |
 | `dag.run` | Invoke another DAG as a sub-workflow with params and dependencies |
@@ -829,7 +834,7 @@ See the [distributed execution documentation](https://docs.dagu.sh/server-admin/
 | `dagu cleanup <dag>` | Clean up old run data |
 | `dagu version` | Show version |
 
-The table lists the most common commands. The binary ships 31 in total, including `exec`, `ls`, `ps`, `rm`, `sync`, `schema`, `example`, `config`, `profile`, `context`, `license`, `upgrade`, and `completion`; run `dagu --help` or see the [CLI reference](https://docs.dagu.sh/getting-started/cli) for all of them.
+The table lists the most common commands. The binary ships 36 in total, including `exec`, `ls`, `ps`, `rm`, `prune-artifacts`, `sync`, `schema`, `example`, `config`, `profile`, `context`, `license`, `upgrade`, and `completion`; run `dagu --help` or see the [CLI reference](https://docs.dagu.sh/getting-started/cli) for all of them.
 
 ## Environment Variables
 
@@ -965,6 +970,7 @@ OIDC variables: `DAGU_AUTH_OIDC_CLIENT_ID`, `DAGU_AUTH_OIDC_CLIENT_SECRET`, `DAG
 | `DAGU_SCHEDULER_ZOMBIE_DETECTION_INTERVAL` | `45s` | Zombie run detection interval (`0` to disable) |
 | `DAGU_SCHEDULER_LOCK_STALE_THRESHOLD` | `30s` | HA lock stale threshold |
 | `DAGU_QUEUE_ENABLED` | `true` | Enable queue system |
+| `DAGU_SIGNAL_PROPAGATION` | `false` | Forward shutdown signals (`SIGINT`/`SIGTERM`) received by the server or scheduler to the process groups of running DAG-run subprocesses it launched |
 
 ### Coordinator / Worker
 

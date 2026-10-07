@@ -18,7 +18,8 @@ type paramToken struct {
 }
 
 // StartParamInput describes start params regardless of caller (CLI/API).
-// Use DashArgs for params passed after "--", or RawParams for --params style input.
+// Use DashArgs for parameter tokens or RawParams for parameter text. Quotes in
+// RawParams delimit values rather than wrapping the complete input.
 type StartParamInput struct {
 	DashArgs  []string
 	RawParams string
@@ -26,7 +27,7 @@ type StartParamInput struct {
 
 // paramTokenRegex matches positional and named params similarly to spec.parseStringParams.
 var paramTokenRegex = regexp.MustCompile(
-	`(?:([^\s=]+)=)?("(?:\\"|[^"])*"|` + "`[^`]*`" + `|[^"\s]+)`,
+	`(?:([^\s="]+)=)?("(?:\\"|[^"])*"|` + "`[^`]*`" + `|[^"\s]+)`,
 )
 
 func ValidateStartArgs(hasDash bool, args []string) error {
@@ -74,8 +75,7 @@ func extractProvidedParamTokens(input StartParamInput) ([]paramToken, bool) {
 		return parseParamsFromArgs(input.DashArgs), false
 	}
 
-	raw := stringutil.RemoveQuotes(input.RawParams)
-	raw = strings.TrimSpace(raw)
+	raw := strings.TrimSpace(input.RawParams)
 	if raw == "" {
 		return nil, false
 	}

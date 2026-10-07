@@ -153,6 +153,7 @@ func TestLoadSchemaFromURL(t *testing.T) {
 		_, err := loadSchemaFromURL(server.URL + "/schema.json")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "500")
+		assert.True(t, IsSourceUnavailable(err))
 	})
 
 	t.Run("InvalidURL", func(t *testing.T) {
@@ -161,6 +162,7 @@ func TestLoadSchemaFromURL(t *testing.T) {
 		_, err := loadSchemaFromURL("://invalid-url")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid")
+		assert.False(t, IsSourceUnavailable(err))
 	})
 
 	t.Run("UnsupportedScheme", func(t *testing.T) {
@@ -177,6 +179,22 @@ func TestLoadSchemaFromURL(t *testing.T) {
 		// Use a port that's unlikely to be in use
 		_, err := loadSchemaFromURL("http://127.0.0.1:59999/schema.json")
 		require.Error(t, err)
+		assert.True(t, IsSourceUnavailable(err))
+	})
+
+	t.Run("ExceedsSizeLimit", func(t *testing.T) {
+		t.Parallel()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(make([]byte, schemaMaxResponseBytes+1))
+		}))
+		defer server.Close()
+
+		_, err := loadSchemaFromURL(server.URL + "/schema.json")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "10 MiB")
 	})
 }
 
@@ -388,6 +406,7 @@ func TestGetSchemaFromRef(t *testing.T) {
 		_, err := getSchemaFromRef("", "", schemaPath)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "parse schema JSON")
+		assert.False(t, IsSourceUnavailable(err))
 	})
 
 	t.Run("SchemaFileNotFound", func(t *testing.T) {
@@ -396,6 +415,7 @@ func TestGetSchemaFromRef(t *testing.T) {
 		_, err := getSchemaFromRef("", "", "nonexistent.json")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to load schema")
+		assert.True(t, IsSourceUnavailable(err))
 	})
 
 	t.Run("URLNotFound", func(t *testing.T) {
@@ -409,6 +429,7 @@ func TestGetSchemaFromRef(t *testing.T) {
 		_, err := getSchemaFromRef("", "", server.URL+"/missing.json")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to load schema")
+		assert.True(t, IsSourceUnavailable(err))
 	})
 }
 

@@ -302,12 +302,13 @@ func hasPendingPushBack(nodes []*ir.Node) bool {
 
 // nodeRunnable reports whether a not-started step will run once resumed
 // because every dependency lets it proceed. Steps with build inputs are
-// excluded because their inferred producer edges are not stored with the run.
+// excluded because their path-derived producer edges are not stored with the
+// run.
 func nodeRunnable(node *ir.Node, byName map[string]*ir.Node) bool {
 	if node == nil || node.Status != ir.NodeNotStarted || len(node.Step.Inputs) > 0 {
 		return false
 	}
-	for _, name := range node.Step.Depends {
+	for _, name := range node.Step.AllDepends() {
 		if dep := byName[name]; dep == nil || !dependencyAllowsRun(dep) {
 			return false
 		}
@@ -316,7 +317,7 @@ func nodeRunnable(node *ir.Node, byName map[string]*ir.Node) bool {
 }
 
 func dependsOnCompletedHumanTask(node *ir.Node, byName map[string]*ir.Node) bool {
-	for _, name := range node.Step.Depends {
+	for _, name := range node.Step.AllDepends() {
 		if dep := byName[name]; dep != nil && dep.Step.HumanTask != nil && nodeCompleted(dep) {
 			return true
 		}
@@ -385,6 +386,25 @@ func ResumePending(status *ir.DAGRunStatus) bool {
 // run by a resumed attempt yet.
 func PushBackPending(status *ir.DAGRunStatus) bool {
 	return status != nil && hasPendingPushBack(status.Nodes)
+}
+
+// UnblockedNodeReady reports whether a manual action unblocked a step that a
+// resumed attempt can run while other manual steps keep waiting: a
+// not-started node has every dependency satisfied, and no retryable node
+// would be re-run by the resume (see resumeReady). Approval, push-back, and
+// agent-session resumes use it to continue independent branches.
+func UnblockedNodeReady(status *ir.DAGRunStatus) bool {
+	if status == nil {
+		return false
+	}
+	return !hasRetryableNode(status.Nodes) && hasRunnableNode(status.Nodes)
+}
+
+func hasRunnableNode(nodes []*ir.Node) bool {
+	byName := nodesByName(nodes)
+	return slices.ContainsFunc(nodes, func(node *ir.Node) bool {
+		return nodeRunnable(node, byName)
+	})
 }
 
 // ValidateRetry rejects retry operations that would bypass human-task completion state.
