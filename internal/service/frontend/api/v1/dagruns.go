@@ -4935,8 +4935,8 @@ func (a *API) GetDAGRunsListData(ctx context.Context, queryString string) (any, 
 
 		page, err := a.dagRunRepository.ListStatusesPage(readCtx, opts.query)
 		if err != nil {
-			if errors.Is(err, persis.ErrInvalidDAGRunQueryCursor) {
-				return nil, err
+			if apiErr := dagRunListBadRequest(err); apiErr != nil {
+				return nil, apiErr
 			}
 			return nil, fmt.Errorf("error listing dag-runs: %w", err)
 		}

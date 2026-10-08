@@ -1395,17 +1395,27 @@ func TestDAGRunListOptionsFromQueryStringRejectsInvalidFilters(t *testing.T) {
 	}
 }
 
-func TestGetDAGRunsListDataReturnsBadRequestForInvalidParams(t *testing.T) {
+func TestGetDAGRunsListDataRejectsInvalidCursor(t *testing.T) {
 	t.Parallel()
 
-	api := &API{}
-	_, err := api.GetDAGRunsListData(context.Background(), "fromDate=not-a-timestamp")
-	require.Error(t, err)
+	api := &API{
+		dagRunRepository: persis.NewDAGRunRepository(invalidCursorDAGRunStore{}, nil, persis.DAGRunRepositoryOptions{}),
+	}
 
-	apiErr, ok := err.(*Error)
-	require.True(t, ok)
+	_, err := api.GetDAGRunsListData(context.Background(), "cursor=stale")
+
+	var apiErr *Error
+	require.ErrorAs(t, err, &apiErr)
 	require.Equal(t, http.StatusBadRequest, apiErr.HTTPStatus)
 	require.Equal(t, openapiv1.ErrorCodeBadRequest, apiErr.Code)
+}
+
+type invalidCursorDAGRunStore struct {
+	testutil.DAGRunStoreStub
+}
+
+func (invalidCursorDAGRunStore) QueryStatuses(context.Context, persis.DAGRunStatusQuery) (persis.DAGRunStatusPage, error) {
+	return persis.DAGRunStatusPage{}, fmt.Errorf("%w: filters changed", persis.ErrInvalidDAGRunQueryCursor)
 }
 
 func TestDAGRunListOptionsFromQueryStringParsesDateRange(t *testing.T) {
