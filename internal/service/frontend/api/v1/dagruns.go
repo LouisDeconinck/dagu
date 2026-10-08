@@ -4945,6 +4945,13 @@ func (a *API) GetDAGRunsListData(ctx context.Context, queryString string) (any, 
 	})
 }
 
+// ValidateDAGRunsListQuery returns a 400 *Error when GetDAGRunsListData would
+// reject the query string's filters.
+func (a *API) ValidateDAGRunsListQuery(ctx context.Context, queryString string) error {
+	_, err := a.dagRunListOptionsFromQueryString(ctx, queryString)
+	return err
+}
+
 func (a *API) dagRunListOptionsFromQueryString(ctx context.Context, queryString string) (dagRunListOptions, error) {
 	params, err := url.ParseQuery(queryString)
 	if err != nil {
