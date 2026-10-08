@@ -58,7 +58,7 @@ func TestResumeManagedAttemptTargetsOwningWorker(t *testing.T) {
 		defaultExecMode: config.ExecutionModeLocal,
 	}
 
-	require.NoError(t, api.resumeManagedAttempt(t.Context(), dag, status, status.DAGRunID))
+	require.NoError(t, api.resumeManagedAttempt(t.Context(), dag, status, status.DAGRunID, nil))
 	require.Len(t, recorder.dispatched, 1)
 	task := recorder.dispatched[0]
 	require.Equal(t, dispatch.DispatchOperationRetry, task.Operation)

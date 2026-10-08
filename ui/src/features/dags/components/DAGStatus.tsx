@@ -39,6 +39,7 @@ import { DAGContext } from '../contexts/DAGContext';
 import { getEventHandlers } from '../lib/getEventHandlers';
 import { updateDAGRunNodeStatus } from '../lib/nodeStatus';
 import { ApprovalTab } from './approval';
+import { ApprovalResumeAlert } from './approval/ApprovalResumeAlert';
 import { AgentSessionTab } from './agent-session';
 import ArtifactsTab from './artifacts/ArtifactsTab';
 import { ChatHistoryTab } from './chat-history';
@@ -52,6 +53,7 @@ import {
 import { DAGStatusOverview, NodeStatusTable } from './dag-details';
 import { DAGSpecReadOnly } from './dag-editor';
 import { StepDetailsDrawer } from './step-details';
+import type { ForeachLogTarget } from '../hooks/useStepLogQuery';
 import {
   LogViewer,
   ParallelExecutionModal,
@@ -185,6 +187,8 @@ function DAGStatus({
     dagRunId: string;
     stream: Stream;
     node?: components['schemas']['Node'];
+    foreach?: ForeachLogTarget;
+    bodyStepStatus?: NodeStatus;
   }>({
     isOpen: false,
     logType: 'step',
@@ -782,6 +786,14 @@ function DAGStatus({
           </div>
         </div>
 
+        {displayDAGRun.status === Status.Waiting &&
+          displayDAGRun.approvalResumePending && (
+            <ApprovalResumeAlert
+              key={displayDAGRunIdentity}
+              dagRun={displayDAGRun}
+            />
+          )}
+
         {/* Status Tab Content */}
         {childRunStack.length > 0 && (
           <SubRunStackModal
@@ -1075,6 +1087,7 @@ function DAGStatus({
           isOpen={isStepDetailsOpen}
           step={selectedDetailNode?.step}
           node={selectedDetailNode}
+          dagRun={displayDAGRun}
           onClose={closeStepDetails}
           onViewLog={(node, stream) =>
             handleViewLog(
@@ -1082,6 +1095,17 @@ function DAGStatus({
               displayDAGRun.dagRunId,
               node
             )
+          }
+          onViewBodyStepLog={(bodyStepName, foreach, stream, bodyStepStatus) =>
+            setLogViewer({
+              isOpen: true,
+              logType: 'step',
+              stepName: bodyStepName,
+              dagRunId: displayDAGRun.dagRunId,
+              stream,
+              foreach,
+              bodyStepStatus,
+            })
           }
           onOpenSubRun={(node, subRunIndex) => openSubRunAt(node, subRunIndex)}
         />
@@ -1097,6 +1121,8 @@ function DAGStatus({
           dagRun={displayDAGRun}
           stream={logViewer.stream}
           node={logViewer.node}
+          foreach={logViewer.foreach}
+          bodyStepStatus={logViewer.bodyStepStatus}
         />
 
         {/* Parallel execution selection modal */}

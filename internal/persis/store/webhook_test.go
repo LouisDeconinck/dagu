@@ -5,6 +5,8 @@ package store_test
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/dagucloud/dagu/v2/internal/auth"
+	"github.com/dagucloud/dagu/v2/internal/persis"
 	"github.com/dagucloud/dagu/v2/internal/persis/store"
 	"github.com/dagucloud/dagu/v2/internal/persis/testutil"
 )
@@ -22,6 +25,42 @@ func newWebhookStore(t *testing.T) *store.WebhookStore {
 	s, err := store.NewWebhookStore(col, nil)
 	require.NoError(t, err)
 	return s
+}
+
+// conflictingCollection runs write once, right after the first Get, to
+// simulate another process changing a record between a store's read and write.
+type conflictingCollection struct {
+	persis.Collection
+	once  sync.Once
+	write func()
+}
+
+func (c *conflictingCollection) Get(ctx context.Context, id string) (*persis.Record, error) {
+	rec, err := c.Collection.Get(ctx, id)
+	c.once.Do(c.write)
+	return rec, err
+}
+
+// newConflictingWebhookStores creates wh through one store and returns it with
+// a second store over the same collection. The second store's first read is
+// followed by otherWrite, run through the first store.
+func newConflictingWebhookStores(
+	t *testing.T,
+	wh *auth.Webhook,
+	otherWrite func(other *store.WebhookStore),
+) (s, other *store.WebhookStore) {
+	t.Helper()
+	col := testutil.NewMemoryBackend().Collection("webhooks")
+	other, err := store.NewWebhookStore(col, nil)
+	require.NoError(t, err)
+	require.NoError(t, other.Create(context.Background(), wh))
+
+	s, err = store.NewWebhookStore(&conflictingCollection{
+		Collection: col,
+		write:      func() { otherWrite(other) },
+	}, nil)
+	require.NoError(t, err)
+	return s, other
 }
 
 func newWebhook(dagName string) *auth.Webhook {
@@ -105,49 +144,74 @@ func TestWebhookList(t *testing.T) {
 	assert.Len(t, list, 3)
 }
 
-func TestWebhookUpdate(t *testing.T) {
+func TestWebhookUpdateByDAGName(t *testing.T) {
 	ctx := context.Background()
 	s := newWebhookStore(t)
-	wh := newWebhook("dag-u")
+	wh := newWebhook("dag-mutate")
 	require.NoError(t, s.Create(ctx, wh))
+	require.NoError(t, s.UpdateLastUsed(ctx, wh.ID, ""))
 
-	wh.Enabled = false
-	wh.TokenPrefix = "tok2"
-	wh.AllowedProfiles = []string{"prod", "staging"}
-	require.NoError(t, s.Update(ctx, wh))
+	updated, err := s.UpdateByDAGName(ctx, "dag-mutate", func(w *auth.Webhook) error {
+		w.Enabled = false
+		return nil
+	})
+	require.NoError(t, err)
+	assert.False(t, updated.Enabled)
 
 	got, err := s.GetByID(ctx, wh.ID)
 	require.NoError(t, err)
 	assert.False(t, got.Enabled)
-	assert.Equal(t, "tok2", got.TokenPrefix)
-	assert.Equal(t, []string{"prod", "staging"}, got.AllowedProfiles)
+	// The mutation starts from the stored webhook, so fields written by
+	// other calls since the caller last read it are kept.
+	assert.NotNil(t, got.LastUsedAt)
 }
 
-func TestWebhookUpdate_NotFound(t *testing.T) {
+func TestWebhookUpdateByDAGName_MutateErrorAbortsWrite(t *testing.T) {
 	ctx := context.Background()
 	s := newWebhookStore(t)
-
-	err := s.Update(ctx, newWebhook("ghost"))
-	assert.ErrorIs(t, err, auth.ErrWebhookNotFound)
-}
-
-func TestWebhookUpdate_DAGNameChange(t *testing.T) {
-	ctx := context.Background()
-	s := newWebhookStore(t)
-	wh := newWebhook("old-dag")
+	wh := newWebhook("dag-mutate-error")
 	require.NoError(t, s.Create(ctx, wh))
 
-	wh.DAGName = "new-dag"
-	require.NoError(t, s.Update(ctx, wh))
+	errRejected := errors.New("rejected")
+	_, err := s.UpdateByDAGName(ctx, "dag-mutate-error", func(w *auth.Webhook) error {
+		w.Enabled = false
+		return errRejected
+	})
+	assert.ErrorIs(t, err, errRejected)
 
-	// old name no longer resolves
-	_, err := s.GetByDAGName(ctx, "old-dag")
-	assert.ErrorIs(t, err, auth.ErrWebhookNotFound)
-
-	// new name resolves
-	got, err := s.GetByDAGName(ctx, "new-dag")
+	got, err := s.GetByID(ctx, wh.ID)
 	require.NoError(t, err)
-	assert.Equal(t, wh.ID, got.ID)
+	assert.True(t, got.Enabled)
+}
+
+func TestWebhookUpdateByDAGName_KeepsConcurrentWrite(t *testing.T) {
+	ctx := context.Background()
+	wh := newWebhook("dag-mutate-conflict")
+	s, other := newConflictingWebhookStores(t, wh, func(other *store.WebhookStore) {
+		_, err := other.UpdateByDAGName(ctx, wh.DAGName, func(w *auth.Webhook) error {
+			w.AllowedProfiles = []string{"prod"}
+			return nil
+		})
+		require.NoError(t, err)
+	})
+
+	_, err := s.UpdateByDAGName(ctx, wh.DAGName, func(w *auth.Webhook) error {
+		w.Enabled = false
+		return nil
+	})
+	require.NoError(t, err)
+
+	got, err := other.GetByID(ctx, wh.ID)
+	require.NoError(t, err)
+	assert.False(t, got.Enabled)
+	assert.Equal(t, []string{"prod"}, got.AllowedProfiles)
+}
+
+func TestWebhookUpdateByDAGName_NotFound(t *testing.T) {
+	s := newWebhookStore(t)
+
+	_, err := s.UpdateByDAGName(context.Background(), "missing", func(*auth.Webhook) error { return nil })
+	assert.ErrorIs(t, err, auth.ErrWebhookNotFound)
 }
 
 func TestWebhookDelete(t *testing.T) {
@@ -201,7 +265,7 @@ func TestWebhookUpdateLastUsed(t *testing.T) {
 	require.NoError(t, s.Create(ctx, wh))
 
 	before := time.Now().UTC()
-	require.NoError(t, s.UpdateLastUsed(ctx, wh.ID))
+	require.NoError(t, s.UpdateLastUsed(ctx, wh.ID, ""))
 
 	got, err := s.GetByID(ctx, wh.ID)
 	require.NoError(t, err)
@@ -209,11 +273,78 @@ func TestWebhookUpdateLastUsed(t *testing.T) {
 	assert.True(t, got.LastUsedAt.After(before) || got.LastUsedAt.Equal(before))
 }
 
+func TestWebhookUpdateLastUsed_ProfileToken(t *testing.T) {
+	ctx := context.Background()
+	s := newWebhookStore(t)
+	wh := newWebhook("dag-lu-token")
+	used := auth.NewWebhookProfileToken("a", "profile-a", "hash-a", "tok-a", "admin")
+	unused := auth.NewWebhookProfileToken("b", "profile-b", "hash-b", "tok-b", "admin")
+	wh.ProfileTokens = []auth.WebhookProfileToken{unused, used}
+	require.NoError(t, s.Create(ctx, wh))
+
+	require.NoError(t, s.UpdateLastUsed(ctx, wh.ID, used.ID))
+
+	got, err := s.GetByID(ctx, wh.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.LastUsedAt)
+	require.Len(t, got.ProfileTokens, 2)
+	assert.Nil(t, got.ProfileTokens[0].LastUsedAt)
+	assert.Equal(t, used.ID, got.ProfileTokens[1].ID)
+	assert.Equal(t, got.LastUsedAt, got.ProfileTokens[1].LastUsedAt)
+	assert.Equal(t, "hash-a", got.ProfileTokens[1].TokenHash)
+}
+
+// A last-used update must not restore a profile token that another process
+// revoked after the update read the webhook.
+func TestWebhookUpdateLastUsed_KeepsConcurrentRevoke(t *testing.T) {
+	ctx := context.Background()
+	wh := newWebhook("dag-lu-revoke")
+	token := auth.NewWebhookProfileToken("a", "profile-a", "hash-a", "tok-a", "admin")
+	wh.ProfileTokens = []auth.WebhookProfileToken{token}
+	s, other := newConflictingWebhookStores(t, wh, func(other *store.WebhookStore) {
+		_, err := other.UpdateByDAGName(ctx, wh.DAGName, func(w *auth.Webhook) error {
+			w.ProfileTokens = nil
+			return nil
+		})
+		require.NoError(t, err)
+	})
+
+	require.NoError(t, s.UpdateLastUsed(ctx, wh.ID, token.ID))
+
+	got, err := other.GetByID(ctx, wh.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.ProfileTokens)
+	assert.NotNil(t, got.LastUsedAt)
+}
+
+// Use within a minute of the recorded use is not written again, so a busy
+// webhook does not rewrite its record on every request. A profile token's
+// first use is still recorded.
+func TestWebhookUpdateLastUsed_Throttled(t *testing.T) {
+	ctx := context.Background()
+	s := newWebhookStore(t)
+	wh := newWebhook("dag-lu-throttle")
+	token := auth.NewWebhookProfileToken("a", "profile-a", "hash-a", "tok-a", "admin")
+	wh.ProfileTokens = []auth.WebhookProfileToken{token}
+	require.NoError(t, s.Create(ctx, wh))
+
+	require.NoError(t, s.UpdateLastUsed(ctx, wh.ID, ""))
+	first, err := s.GetByID(ctx, wh.ID)
+	require.NoError(t, err)
+	require.NotNil(t, first.LastUsedAt)
+
+	require.NoError(t, s.UpdateLastUsed(ctx, wh.ID, token.ID))
+	got, err := s.GetByID(ctx, wh.ID)
+	require.NoError(t, err)
+	assert.Equal(t, first.LastUsedAt, got.LastUsedAt)
+	assert.NotNil(t, got.ProfileTokens[0].LastUsedAt)
+}
+
 func TestWebhookUpdateLastUsed_NotFound(t *testing.T) {
 	ctx := context.Background()
 	s := newWebhookStore(t)
 
-	err := s.UpdateLastUsed(ctx, "nonexistent")
+	err := s.UpdateLastUsed(ctx, "nonexistent", "")
 	assert.ErrorIs(t, err, auth.ErrWebhookNotFound)
 }
 

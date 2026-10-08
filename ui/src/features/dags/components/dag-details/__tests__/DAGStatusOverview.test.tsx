@@ -105,6 +105,57 @@ describe('DAGStatusOverview', () => {
     expect(screen.getByText('alice')).toBeInTheDocument();
   });
 
+  it('renders the run error when present', () => {
+    render(
+      <DAGStatusOverview
+        status={{
+          dagRunId: 'run-error',
+          name: 'broken-dag',
+          rootDAGRunName: 'broken-dag',
+          rootDAGRunId: 'run-error',
+          log: '/tmp/test.log',
+          artifactsAvailable: false,
+          nodes: [],
+          autoRetryCount: 0,
+          autoRetryLimit: 0,
+          startedAt: '-',
+          finishedAt: '2026-03-13T10:02:00Z',
+          status: Status.Failed,
+          statusLabel: StatusLabel.failed,
+          error: 'invalid DAG definition: failed to parse schema JSON',
+        }}
+      />
+    );
+
+    expect(screen.getByTestId('dag-run-error')).toHaveTextContent(
+      'invalid DAG definition: failed to parse schema JSON'
+    );
+  });
+
+  it('omits the run error block when no error is recorded', () => {
+    render(
+      <DAGStatusOverview
+        status={{
+          dagRunId: 'run-ok',
+          name: 'healthy-dag',
+          rootDAGRunName: 'healthy-dag',
+          rootDAGRunId: 'run-ok',
+          log: '/tmp/test.log',
+          artifactsAvailable: false,
+          nodes: [],
+          autoRetryCount: 0,
+          autoRetryLimit: 0,
+          startedAt: '2026-03-13T10:01:00Z',
+          finishedAt: '2026-03-13T10:02:00Z',
+          status: Status.Success,
+          statusLabel: StatusLabel.succeeded,
+        }}
+      />
+    );
+
+    expect(screen.queryByTestId('dag-run-error')).not.toBeInTheDocument();
+  });
+
   it('renders a retrying node segment in the overview bar', () => {
     const { container } = render(
       <DAGStatusOverview

@@ -53,7 +53,6 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/runtime/runstate"
 	"github.com/dagucloud/dagu/v2/internal/runtime/transform"
 	"github.com/dagucloud/dagu/v2/internal/runtime/workspacebundle"
-	"github.com/dagucloud/dagu/v2/internal/runtimeenv"
 	secretpkg "github.com/dagucloud/dagu/v2/internal/secret"
 	"github.com/dagucloud/dagu/v2/internal/secret/providers"
 	"github.com/dagucloud/dagu/v2/internal/serviceregistry"
@@ -120,6 +119,14 @@ type Agent struct {
 
 	// plan is the execution plan for the DAG.
 	plan *runtime.Plan
+
+	// runnerDone includes startup and lifecycle handlers, before final status persistence.
+	runnerDone        chan struct{}
+	cleanupOnce       sync.Once
+	cleanupDone       chan struct{}
+	startupCancel     context.CancelFunc
+	startupFinishedAt time.Time
+	stopRequest       *stopRequest
 
 	// reporter is responsible for sending the report to the user.
 	reporter *reporter
@@ -236,6 +243,8 @@ type Agent struct {
 	workspaceSeed *runtimeexec.WorkspaceSeed
 	// extraEnvs are additional execution-scoped env vars injected into the DAG run context.
 	extraEnvs []string
+	// inheritedEnvs are env entries inherited from the parent run scope.
+	inheritedEnvs []cmnvalue.EnvEntry
 	// profileName is the selected runtime profile name for this run.
 	profileName string
 
@@ -262,6 +271,12 @@ type Agent struct {
 	evaluatedRegistryAuths map[string]*ir.AuthConfig
 	evaluatedWorkingDir    string
 	evaluatedS3            *ir.S3Config
+}
+
+type stopRequest struct {
+	intent        cmdutil.TerminationIntent
+	allowOverride bool
+	deadline      time.Time
 }
 
 // StatusPusher reports DAG run status outside the current execution process.
@@ -310,6 +325,10 @@ type Options struct {
 	ProgressDisplay bool
 	// ExtraEnvs are additional execution-scoped env vars injected into the DAG run context.
 	ExtraEnvs []string
+	// InheritedEnvs are env entries an in-process child run inherits from the
+	// parent run scope. They enter the run's environment below its own
+	// declared values, keeping each entry's source metadata.
+	InheritedEnvs []cmnvalue.EnvEntry
 	// WorkDir sets the existing per-run work directory.
 	WorkDir string
 	// WorkspaceSeed carries the workspace into inline child workflows.
@@ -410,6 +429,7 @@ func New(
 	}
 
 	a := &Agent{
+		cleanupDone:              make(chan struct{}),
 		rootDAGRun:               opts.RootDAGRun,
 		parentDAGRun:             opts.ParentDAGRun,
 		dagRunID:                 dagRunID,
@@ -432,6 +452,7 @@ func New(
 		profileResolver:          opts.ProfileResolver,
 		registry:                 opts.ServiceRegistry,
 		extraEnvs:                append([]string{}, opts.ExtraEnvs...),
+		inheritedEnvs:            append([]cmnvalue.EnvEntry{}, opts.InheritedEnvs...),
 		workDir:                  opts.WorkDir,
 		workspaceSeed:            opts.WorkspaceSeed,
 		profileName:              opts.ProfileName,
@@ -497,6 +518,19 @@ func workspaceNameFromDAG(dag *ir.DAG) string {
 // Run setups the runner and runs the DAG.
 func (a *Agent) Run(ctx context.Context) (runErr error) {
 	ctx, cancel := context.WithCancel(ctx)
+	startupCtx, cancelStartup := context.WithCancel(ctx)
+	defer cancelStartup()
+	runnerDone := make(chan struct{})
+	finishRunner := sync.OnceFunc(func() { close(runnerDone) })
+	defer finishRunner()
+	a.lock.Lock()
+	a.runnerDone = runnerDone
+	a.startupCancel = cancelStartup
+	stopRequested := a.stopRequest != nil
+	a.lock.Unlock()
+	if stopRequested {
+		cancelStartup()
+	}
 	runningStatusDone := make(chan struct{})
 	close(runningStatusDone)
 	stopRunningStatus := func() {}
@@ -504,6 +538,13 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 		cancel()
 		stopRunningStatus()
 		<-runningStatusDone
+	}()
+	var attempt runstate.Attempt
+	var executionStarted bool
+	defer func() {
+		if startupCtx.Err() != nil && !executionStarted && !a.finished.Load() {
+			runErr = a.abortStartup(ctx, attempt)
+		}
 	}()
 
 	// Set DAG context for all logs in this function.
@@ -518,23 +559,42 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	if !a.parentDAGRun.Zero() && a.dag.HasHumanTaskSteps() {
 		return fmt.Errorf("DAG %q contains human task steps and cannot run as a sub-DAG", a.dag.Name)
 	}
+	if a.rootDAGRun.ID != a.dagRunID {
+		logger.Debug(ctx, "Initiating a sub dag-run",
+			slog.String("root-run", a.rootDAGRun.String()),
+			slog.String("parent-run", a.parentDAGRun.String()),
+		)
+		a.isSubDAGRun.Store(true)
+		if a.parentDAGRun.Zero() {
+			return fmt.Errorf("parent dag-run is not specified for the sub dag-run %s", a.dagRunID)
+		}
+	}
 
 	// Initialize propagators for W3C trace context before anything else
 	telemetry.InitializePropagators()
 
-	// Resolve the per-run environment before secrets and runtime configuration.
-	resolvedEnv, dotenvErr := runtimeenv.Resolve(ctx, a.dag)
+	startup, err := a.resolveStartup(logger.WithValues(startupCtx, centralLogFields...))
+	if err != nil {
+		return a.abortStartup(ctx, nil)
+	}
+	resolvedEnv, dotenvErr := startup.env, startup.envErr
+	secretEnvs, secretErr := startup.secrets, startup.secretErr
+	profileValues, profileErr := startup.profileValues, startup.profileErr
+	a.lock.Lock()
+	if a.stopRequest != nil || startupCtx.Err() != nil {
+		a.lock.Unlock()
+		return a.abortStartup(ctx, nil)
+	}
 	a.dag.Env = resolvedEnv.Env
 	a.dag.RuntimeResolved = true
+	a.profileName = startup.profileName
+	a.profileResolvedAt = startup.profileResolvedAt
+	a.profileEntries = startup.profileEntries
+	a.secretMasker = newStatusSecretMasker(append(profileValues.allSecrets(), secretEnvs...))
+	a.lock.Unlock()
 	for _, warning := range resolvedEnv.Warnings {
 		logger.Warn(ctx, warning)
 	}
-
-	secretEnvs, secretErr := a.resolveSecrets(ctx)
-	profileValues, profileErr := a.resolveProfile(ctx)
-	a.lock.Lock()
-	a.secretMasker = newStatusSecretMasker(append(profileValues.allSecrets(), secretEnvs...))
-	a.lock.Unlock()
 
 	configVars := runtimeConfigVars(a.dag.Env, profileValues, secretEnvs)
 
@@ -594,29 +654,21 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 		ctx = logger.WithValues(ctx, traceLogFields...)
 	}
 
-	if a.rootDAGRun.ID != a.dagRunID {
-		logger.Debug(ctx, "Initiating a sub dag-run",
-			slog.String("root-run", a.rootDAGRun.String()),
-			slog.String("parent-run", a.parentDAGRun.String()),
-		)
-
-		a.isSubDAGRun.Store(true)
-		if a.parentDAGRun.Zero() {
-			return fmt.Errorf("parent dag-run is not specified for the sub dag-run %s", a.dagRunID)
-		}
+	if startupCtx.Err() != nil {
+		return a.abortStartup(ctx, nil)
 	}
-
-	var attempt runstate.Attempt
+	initializationCtx, finishInitialization := bindStartupContext(ctx, startupCtx)
+	defer finishInitialization()
 
 	// Check if the DAG is already running.
-	if err := a.checkIsAlreadyRunning(ctx); err != nil {
+	if err := a.checkIsAlreadyRunning(initializationCtx); err != nil {
 		return err
 	}
 
 	if !a.dry {
 		// Setup the attempt for the dag-run.
 		// It's not required for dry-run mode.
-		att, err := a.setupAttempt(ctx)
+		att, err := a.setupAttempt(initializationCtx)
 		if err != nil {
 			return fmt.Errorf("failed to setup execution history: %w", err)
 		}
@@ -635,8 +687,11 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	}
 
 	// Resolve per-run work directory
-	cleanupWorkDir, err := a.prepareWorkDir(ctx, attempt)
+	cleanupWorkDir, err := a.prepareWorkDir(initializationCtx, attempt)
 	if err != nil {
+		if startupCtx.Err() != nil {
+			return a.abortStartup(ctx, attempt)
+		}
 		return err
 	}
 	if cleanupWorkDir != nil {
@@ -657,12 +712,16 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	a.lock.Lock()
 	a.runner = runner
 	a.plan = plan
+	stopRequested = a.stopRequest != nil || startupCtx.Err() != nil
 	a.lock.Unlock()
+	if stopRequested {
+		return a.abortStartup(ctx, attempt)
+	}
 
 	// Create a new environment for the dag-run.
 	dagLoader := newDAGLoader(a.dagLoader, a.remoteDAGLoader)
 
-	subWorkflowRunner, err := a.createSubWorkflowRunner(ctx)
+	subWorkflowRunner, err := a.createSubWorkflowRunner(initializationCtx)
 	if err != nil {
 		return err
 	}
@@ -695,6 +754,9 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	}
 	if len(a.extraEnvs) > 0 {
 		contextOpts = append(contextOpts, runtime.WithEnvVars(a.extraEnvs...))
+	}
+	if len(a.inheritedEnvs) > 0 {
+		contextOpts = append(contextOpts, runtime.WithInheritedEnvs(a.inheritedEnvs))
 	}
 
 	if a.workDir != "" {
@@ -742,6 +804,8 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	if a.dagRunAttemptID != "" {
 		ctx = logger.WithValues(ctx, tag.AttemptID(a.dagRunAttemptID))
 	}
+	initializationCtx, finishRuntimeInitialization := bindStartupContext(ctx, startupCtx)
+	defer finishRuntimeInitialization()
 
 	if cleaner, ok := subWorkflowRunner.(interface{ Cleanup(context.Context) error }); ok {
 		defer func() {
@@ -753,6 +817,14 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 
 	// Handle dry execution.
 	if a.dry {
+		a.lock.Lock()
+		a.startupCancel = nil
+		stopRequested = a.stopRequest != nil || startupCtx.Err() != nil
+		a.lock.Unlock()
+		if stopRequested {
+			return context.Canceled
+		}
+		executionStarted = true
 		return a.dryRun(ctx)
 	}
 
@@ -761,14 +833,16 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	var initErr error
 
 	// Open the run file to write the status.
-	// TODO: Check if the run file already exists and if it does, return an error.
-	// This is to prevent duplicate execution of the same DAG run.
-	if err := attempt.Open(ctx); err != nil {
+	if err := attempt.Open(initializationCtx); err != nil {
 		return fmt.Errorf("failed to open execution history: %w", err)
 	}
 
 	defer func() {
-		if initErr != nil {
+		if startupCtx.Err() != nil && !executionStarted {
+			stopRunningStatus()
+			<-runningStatusDone
+			runErr = a.recordStartupAbort(ctx, attempt)
+		} else if initErr != nil {
 			a.initFailed.Store(true)
 			logger.Error(ctx, "Failed to initialize DAG execution", tag.Error(initErr))
 			st := a.Status(ctx)
@@ -797,31 +871,31 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 
 	// Evaluate SMTP and mail configs with environment variables and secrets.
 	// This must happen AFTER attempt.Open() to avoid persisting expanded secrets.
-	if err := a.evaluateMailConfigs(ctx); err != nil {
+	if err := a.evaluateMailConfigs(initializationCtx); err != nil {
 		initErr = err
 		return initErr
 	}
 
 	// Evaluate registry auth credentials with environment variables and secrets.
-	if err := a.evaluateRegistryAuths(ctx); err != nil {
+	if err := a.evaluateRegistryAuths(initializationCtx); err != nil {
 		initErr = err
 		return initErr
 	}
 
 	// Evaluate working directory with environment variables.
-	if err := a.evaluateWorkingDir(ctx); err != nil {
+	if err := a.evaluateWorkingDir(initializationCtx); err != nil {
 		initErr = err
 		return initErr
 	}
 
 	// Evaluate S3 configuration with environment variables and secrets.
-	if err := a.evaluateS3Config(ctx); err != nil {
+	if err := a.evaluateS3Config(initializationCtx); err != nil {
 		initErr = err
 		return initErr
 	}
 
 	// Setup the reporter to send notifications (must be after mail config evaluation)
-	if err := a.setupReporter(ctx); err != nil {
+	if err := a.setupReporter(initializationCtx); err != nil {
 		initErr = err
 		return initErr
 	}
@@ -863,7 +937,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	// Create a new container if the DAG has a container configuration.
 	if a.dag.Container != nil {
 		// Expand environment variables in container fields
-		expandedContainer, err := docker.EvalContainerFields(ctx, *a.dag.Container)
+		expandedContainer, err := docker.EvalContainerFields(initializationCtx, *a.dag.Container)
 		if err != nil {
 			initErr = fmt.Errorf("failed to evaluate container config: %w", err)
 			return initErr
@@ -887,7 +961,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 			return initErr
 		}
 		ctCfg.DaemonHost = host
-		ctCli, err := docker.InitializeClient(ctx, ctCfg)
+		ctCli, err := docker.InitializeClient(initializationCtx, ctCfg)
 		if err != nil {
 			initErr = fmt.Errorf("failed to initialize container client: %w", err)
 			return initErr
@@ -903,7 +977,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 		}()
 
 		if !isExecMode {
-			if err := ctCli.CreateContainerKeepAlive(ctx); err != nil {
+			if err := ctCli.CreateContainerKeepAlive(initializationCtx); err != nil {
 				initErr = fmt.Errorf("failed to create keepalive container: %w", err)
 				return initErr
 			}
@@ -937,7 +1011,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 			}
 		}
 
-		sshConfig, err := evalHostConfigObject(ctx, ssh.Config{
+		sshConfig, err := evalSSHConfig(initializationCtx, ssh.Config{
 			User:          a.dag.SSH.User,
 			Host:          a.dag.SSH.Host,
 			Port:          a.dag.SSH.Port,
@@ -949,7 +1023,7 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 			ShellArgs:     a.dag.SSH.ShellArgs,
 			Timeout:       sshTimeout,
 			Bastion:       bastionCfg,
-		}, runtime.GetEnv(ctx).UserEnvsMap(), "ssh")
+		}, runtime.GetEnv(ctx).UserEnvsMap())
 		if err != nil {
 			initErr = fmt.Errorf("failed to evaluate ssh config: %w", err)
 			return initErr
@@ -962,9 +1036,14 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 		ctx = ssh.WithSSHClient(ctx, cli)
 	}
 
-	listenerErrCh := make(chan error)
-	go execWithRecovery(ctx, func() {
-		err := a.socketServer.Serve(ctx, listenerErrCh)
+	listenerErrCh := make(chan error, 1)
+	defer func() {
+		if err := a.socketServer.Shutdown(context.WithoutCancel(ctx)); err != nil {
+			logger.Error(ctx, "Failed to shutdown socket frontend", tag.Error(err))
+		}
+	}()
+	go execWithRecovery(initializationCtx, func() {
+		err := a.socketServer.Serve(initializationCtx, listenerErrCh)
 		if err != nil && !errors.Is(err, sock.ErrServerRequestedShutdown) {
 			if errors.Is(err, sock.ErrUnsupported) {
 				return
@@ -974,7 +1053,13 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 	})
 
 	// It returns error if it failed to start the unix socket server.
-	if err := <-listenerErrCh; err != nil {
+	var listenerErr error
+	select {
+	case listenerErr = <-listenerErrCh:
+	case <-startupCtx.Done():
+		return startupCtx.Err()
+	}
+	if err := listenerErr; err != nil {
 		if errors.Is(err, sock.ErrUnsupported) {
 			logger.Warn(ctx,
 				"Unix socket transport unavailable; continuing without live status/control socket",
@@ -984,13 +1069,6 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 			initErr = fmt.Errorf("failed to start the unix socket server: %w", err)
 			return initErr
 		}
-	} else {
-		// Stop the socket server when the dag-run is finished.
-		defer func() {
-			if err := a.socketServer.Shutdown(ctx); err != nil {
-				logger.Error(ctx, "Failed to shutdown socket frontend", tag.Error(err))
-			}
-		}()
 	}
 
 	// Start progress display if enabled
@@ -1117,7 +1195,16 @@ func (a *Agent) Run(ctx context.Context) (runErr error) {
 		}
 	}
 
+	a.lock.Lock()
+	a.startupCancel = nil
+	stopRequested = a.stopRequest != nil || startupCtx.Err() != nil
+	a.lock.Unlock()
+	if stopRequested {
+		return context.Canceled
+	}
+	executionStarted = true
 	lastErr := a.runner.Run(ctx, a.plan, progressCh)
+	finishRunner()
 
 	// Drain the progress goroutine before computing the final status.
 	// This prevents the progress goroutine from overwriting the final
@@ -1448,6 +1535,7 @@ func (a *Agent) Status(ctx context.Context) ir.DAGRunStatus {
 			ir.WithRuntimeProfile(a.profileName, a.profileResolvedAt, a.profileEntries),
 			ir.WithDAGDefinitionID(a.definitionID),
 			ir.WithNoReuse(a.noReuse),
+			ir.WithFinishedAt(a.startupFinishedAt),
 		}
 		if source != nil {
 			statusOpts = append(statusOpts,
@@ -1461,14 +1549,22 @@ func (a *Agent) Status(ctx context.Context) ir.DAGRunStatus {
 		} else if a.scheduleTime != "" {
 			statusOpts = append(statusOpts, ir.WithScheduleTime(a.scheduleTime))
 		}
+		runStatus := ir.Failed
+		if !a.startupFinishedAt.IsZero() {
+			runStatus = ir.Aborted
+		}
 		status := ir.NewStatusBuilder(a.dag).
-			Create(a.dagRunID, ir.Failed, os.Getpid(), time.Time{}, statusOpts...)
+			Create(a.dagRunID, runStatus, os.Getpid(), time.Time{}, statusOpts...)
 		a.maskStatusSecrets(&status)
 		return status
 	}
 
 	runnerStatus := a.runner.Status(ctx, a.plan)
-	if a.initFailed.Load() {
+	finishedAt := a.plan.FinishAt()
+	if !a.startupFinishedAt.IsZero() {
+		runnerStatus = ir.Aborted
+		finishedAt = a.startupFinishedAt
+	} else if a.initFailed.Load() {
 		runnerStatus = ir.Failed
 	} else if runnerStatus == ir.NotStarted && a.plan.IsStarted() {
 		// Match the status to the execution plan.
@@ -1476,7 +1572,7 @@ func (a *Agent) Status(ctx context.Context) ir.DAGRunStatus {
 	}
 
 	opts := []ir.StatusOption{
-		ir.WithFinishedAt(a.plan.FinishAt()),
+		ir.WithFinishedAt(finishedAt),
 		transform.WithNodes(a.plan.NodeData()),
 		ir.WithLogFilePath(a.logFile),
 		ir.WithWorkingDir(a.evaluatedWorkingDir),
@@ -1698,7 +1794,8 @@ func (a *Agent) pushStatus(ctx context.Context, status ir.DAGRunStatus) error {
 			logger.Warn(ctx, "Coordinator rejected the worker attempt; stopping execution",
 				slog.String("reason", rejectedErr.AttemptRejectedReason()),
 			)
-			a.stopChildren(context.Background(), syscall.SIGTERM, true)
+			// The progress consumer must remain available while cleanup runs.
+			a.requestStop(context.Background(), syscall.SIGTERM, true)
 		}
 		return err
 	}
@@ -2074,6 +2171,18 @@ func (a *Agent) evaluateMailConfigs(ctx context.Context) error {
 }
 
 func evalHostConfigObject[T any](ctx context.Context, obj T, vars map[string]string, path string) (T, error) {
+	resolver := cmnvalue.NewResolver(cmnvalue.StaticScope{}, cmnvalue.RuntimeScope{Env: hostConfigScope(ctx, vars)})
+	return resolveConfigObject(ctx, resolver, obj, cmnvalue.HostConfigObjectField(path))
+}
+
+// evalSSHConfig resolves the DAG-level SSH config with the steps[].with rules,
+// because it supplies the connection defaults for SSH steps.
+func evalSSHConfig(ctx context.Context, cfg ssh.Config, vars map[string]string) (ssh.Config, error) {
+	resolver := runtime.ValueResolverWithScope(ctx, hostConfigScope(ctx, vars))
+	return resolveConfigObject(ctx, resolver, cfg, cmnvalue.ExecutorConfigField("ssh"))
+}
+
+func hostConfigScope(ctx context.Context, vars map[string]string) *cmnvalue.EnvScope {
 	scope := cmnvalue.GetEnvScope(ctx)
 	if scope == nil {
 		env := runtime.GetEnv(ctx)
@@ -2085,8 +2194,11 @@ func evalHostConfigObject[T any](ctx context.Context, obj T, vars map[string]str
 		}
 		scope = scope.WithEntries(vars, cmnvalue.EnvSourceStepEnv)
 	}
-	resolver := cmnvalue.NewResolver(cmnvalue.StaticScope{}, cmnvalue.RuntimeScope{Env: scope})
-	got, err := resolver.Object(ctx, obj, cmnvalue.HostConfigObjectField(path))
+	return scope
+}
+
+func resolveConfigObject[T any](ctx context.Context, resolver cmnvalue.Resolver, obj T, field cmnvalue.Field) (T, error) {
+	got, err := resolver.Object(ctx, obj, field)
 	if err != nil {
 		return obj, err
 	}
@@ -2239,6 +2351,12 @@ func (a *Agent) dryRun(ctx context.Context) error {
 // its configured signal on platforms that support signal delivery. If processes
 // do not terminate after MaxCleanUp time, it requests forceful termination.
 func (a *Agent) stopChildren(ctx context.Context, sig os.Signal, allowOverride bool) {
+	if done := a.requestStop(ctx, sig, allowOverride); done != nil {
+		<-done
+	}
+}
+
+func (a *Agent) requestStop(ctx context.Context, sig os.Signal, allowOverride bool) <-chan struct{} {
 	intent := cmdutil.TerminationFromSignal(sig)
 	logger.Info(ctx, "Stopping running child processes",
 		slog.String("stop-mode", string(intent.Mode)),
@@ -2247,67 +2365,72 @@ func (a *Agent) stopChildren(ctx context.Context, sig os.Signal, allowOverride b
 		slog.Duration("max-cleanup-time", a.dag.MaxCleanUpTime),
 	)
 
-	// Snapshot runner+plan under the read lock: listenSignals can attach
-	// before Run() assigns a.runner and a.plan, so an early signal would
-	// otherwise nil-deref below.
-	a.lock.RLock()
-	runner := a.runner
-	plan := a.plan
-	a.lock.RUnlock()
-	if runner == nil || plan == nil {
-		logger.Debug(ctx, "Agent not yet initialized; ignoring stop request",
-			tag.Signal(intent.SignalName()))
-		return
-	}
-
-	if !intent.IsTermination() {
-		// For non-termination signals, just forward the request once and return.
-		runner.Stop(ctx, plan, intent, nil, allowOverride)
-		return
-	}
-
-	signalCtx, cancel := context.WithTimeout(ctx, a.dag.MaxCleanUpTime)
-	defer cancel()
-
-	done := make(chan bool, 1)
-	go func() {
-		runner.Stop(ctx, plan, intent, done, allowOverride)
-	}()
-
-	resendTicker := time.NewTicker(5 * time.Second)
-	defer resendTicker.Stop()
-	probeTicker := time.NewTicker(500 * time.Millisecond)
-	defer probeTicker.Stop()
-
-	for {
-		select {
-		case <-done:
-			logger.Info(ctx, "All child processes have been terminated")
-			return
-
-		case <-signalCtx.Done():
-			forceIntent := cmdutil.ForceTermination()
-			logger.Info(ctx, "Max cleanup time reached, forcing child process termination",
-				slog.String("stop-mode", string(forceIntent.Mode)),
-				tag.Signal(forceIntent.SignalName()),
-			)
-			runner.Stop(ctx, plan, forceIntent, nil, false)
-			return
-
-		case <-resendTicker.C:
-			logger.Info(ctx, "Resending stop request to processes that haven't terminated",
-				slog.String("stop-mode", string(intent.Mode)),
-				tag.Signal(intent.SignalName()),
-			)
-			runner.Stop(ctx, plan, intent, nil, false)
-
-		case <-probeTicker.C:
-			if !plan.HasActiveNodes() {
-				logger.Info(ctx, "No running processes detected, termination complete")
-				return
-			}
+	a.lock.Lock()
+	if intent.IsTermination() {
+		if a.stopRequest == nil {
+			a.stopRequest = &stopRequest{intent: intent, allowOverride: allowOverride, deadline: time.Now().Add(a.dag.MaxCleanUpTime)}
+		} else if intent.IsForce() {
+			a.stopRequest.intent = intent
+			a.stopRequest.allowOverride = false
 		}
 	}
+	var request stopRequest
+	if a.stopRequest != nil {
+		request = *a.stopRequest
+	}
+	runner := a.runner
+	plan := a.plan
+	runnerDone := a.runnerDone
+	cancelStartup := a.startupCancel
+	a.lock.Unlock()
+	if intent.IsTermination() && cancelStartup != nil {
+		cancelStartup()
+		if !intent.IsForce() {
+			return runnerDone
+		}
+		return nil
+	}
+	if runner == nil || plan == nil {
+		return nil
+	}
+
+	if !intent.IsTermination() || intent.IsForce() {
+		// Force and non-termination requests do not start another cleanup period.
+		runner.Stop(ctx, plan, intent, nil, allowOverride)
+		return nil
+	}
+
+	a.cleanupOnce.Do(func() {
+		ctx := context.WithoutCancel(ctx)
+		signalCtx, cancel := context.WithDeadline(ctx, request.deadline)
+		intent, allowOverride := request.intent, request.allowOverride
+		go func() {
+			defer close(a.cleanupDone)
+			defer cancel()
+			resendTicker := time.NewTicker(5 * time.Second)
+			defer resendTicker.Stop()
+			stepsDone := make(chan bool, 1)
+			go runner.Stop(ctx, plan, intent, stepsDone, allowOverride)
+			for {
+				select {
+				case <-stepsDone:
+					logger.Info(ctx, "Workflow steps have stopped")
+					return
+				case <-signalCtx.Done():
+					forceIntent := cmdutil.ForceTermination()
+					logger.Info(ctx, "Max cleanup time reached, forcing child process termination",
+						slog.String("stop-mode", string(forceIntent.Mode)),
+						tag.Signal(forceIntent.SignalName()),
+					)
+					runner.Stop(ctx, plan, forceIntent, nil, false)
+					return
+				case <-resendTicker.C:
+					runner.Stop(ctx, plan, intent, nil, false)
+				}
+			}
+		}()
+	})
+	return a.cleanupDone
 }
 
 // setupPlan setups the DAG plan. If is retry execution, it loads nodes
@@ -2411,7 +2534,17 @@ func (a *Agent) setupAttempt(ctx context.Context) (runstate.Attempt, error) {
 	if a.runStateStore == nil {
 		return runstate.NewNoopAttempt(req), nil
 	}
-	return a.runStateStore.BeginAttempt(ctx, req)
+	attempt, err := a.runStateStore.BeginAttempt(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	// Pre-execution markers may be claimed; completed attempts may not run again.
+	if prev, err := attempt.ReadStatus(ctx); err == nil && prev != nil &&
+		prev.Status != ir.Queued && prev.Status != ir.NotStarted {
+		return nil, fmt.Errorf("%w: dag-run %s attempt %s already recorded status %s",
+			dagrun.ErrDAGRunAlreadyExists, a.dagRunID, attempt.ID(), prev.Status)
+	}
+	return attempt, nil
 }
 
 // setupSocketServer creates a socket server instance.
@@ -2443,17 +2576,17 @@ func (a *Agent) checkIsAlreadyRunning(ctx context.Context) error {
 func execWithRecovery(ctx context.Context, fn func()) {
 	defer func() {
 		if panicObj := recover(); panicObj != nil {
-			logRecoveredPanic(ctx, panicObj)
+			logRecoveredPanic(ctx, panicObj, debug.Stack())
 		}
 	}()
 	fn()
 }
 
-func logRecoveredPanic(ctx context.Context, panicObj any) {
+func logRecoveredPanic(ctx context.Context, panicObj any, stack []byte) {
 	logger.Error(ctx, "Recovered from panic",
 		slog.String("err", panicToError(panicObj).Error()),
 		slog.String("errType", fmt.Sprintf("%T", panicObj)),
-		slog.String("stackTrace", string(debug.Stack())),
+		slog.String("stackTrace", string(stack)),
 	)
 }
 

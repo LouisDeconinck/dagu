@@ -42,6 +42,21 @@ func TestToStepIncludesHarnessPrompt(t *testing.T) {
 	assert.Nil(t, (*step.Commands)[0].Args)
 }
 
+func TestToStepIncludesExpectedAny(t *testing.T) {
+	step := toStep(ir.Step{
+		Preconditions: []*ir.Condition{
+			{Condition: "${MODE}", ExpectedAny: []string{"full", "minimal"}},
+		},
+	})
+
+	require.NotNil(t, step.Preconditions)
+	require.Len(t, *step.Preconditions, 1)
+	precondition := (*step.Preconditions)[0]
+	require.NotNil(t, precondition.ExpectedAny)
+	assert.Equal(t, []string{"full", "minimal"}, *precondition.ExpectedAny)
+	assert.Nil(t, precondition.Expected)
+}
+
 func TestToDAGRunSummaryIncludesScheduleTime(t *testing.T) {
 	status := ir.DAGRunStatus{
 		Name:           "test-dag",
@@ -207,6 +222,30 @@ func TestToDAGRunDetailsTreatsHumanTaskFormWithTrailingDataAsAbsent(t *testing.T
 	require.Len(t, details.Nodes, 1)
 	require.NotNil(t, details.Nodes[0].Step.HumanTask)
 	assert.Nil(t, details.Nodes[0].Step.HumanTask.Form)
+}
+
+func TestToDAGRunDetailsIncludesError(t *testing.T) {
+	status := ir.DAGRunStatus{
+		Name:     "test-dag",
+		DAGRunID: "run-1",
+		Status:   ir.Failed,
+		Error:    "field 'actions.broken_action.input_schema': failed to parse schema JSON",
+	}
+
+	details := ToDAGRunDetails(status)
+	require.NotNil(t, details.Error)
+	assert.Equal(t, status.Error, *details.Error)
+}
+
+func TestToDAGRunDetailsOmitsErrorWhenEmpty(t *testing.T) {
+	status := ir.DAGRunStatus{
+		Name:     "test-dag",
+		DAGRunID: "run-1",
+		Status:   ir.Succeeded,
+	}
+
+	details := ToDAGRunDetails(status)
+	assert.Nil(t, details.Error)
 }
 
 func TestToDAGRunSummaryOmitsAutoRetryLimitWhenUnconfigured(t *testing.T) {

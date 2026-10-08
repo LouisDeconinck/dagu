@@ -31,6 +31,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	"github.com/dagucloud/dagu/v2/internal/cmn/runenv"
 	"github.com/dagucloud/dagu/v2/internal/cmn/stringutil"
+	"github.com/dagucloud/dagu/v2/internal/cmn/yamlutil"
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
 	"github.com/dagucloud/dagu/v2/internal/humantask"
@@ -55,6 +56,7 @@ var filenameUnsafeChars = regexp.MustCompile(`[^a-zA-Z0-9._-]`)
 
 const dagRunReadTimeout = 10 * time.Second
 const statusClientClosedRequest = 499
+const maxLogReadLines = 10000
 const artifactTextPreviewMaxBytes int64 = 2 * 1024 * 1024
 const artifactImagePreviewMaxBytes int64 = 5 * 1024 * 1024
 
@@ -149,15 +151,31 @@ func dagRunReadCanceledResponse(message string) api.Error {
 	}
 }
 
-// buildLogReadOptions constructs LogReadOptions from request parameters.
-func (a *API) buildLogReadOptions(head, tail, offset, limit *int) fileutil.LogReadOptions {
+// buildLogReadOptions enforces log limits regardless of schema validation.
+func (a *API) buildLogReadOptions(head, tail, offset, limit *int) (fileutil.LogReadOptions, error) {
+	for _, param := range []struct {
+		name  string
+		value *int
+	}{
+		{"head", head},
+		{"tail", tail},
+		{"limit", limit},
+	} {
+		if param.value != nil && (*param.value < 1 || *param.value > maxLogReadLines) {
+			return fileutil.LogReadOptions{}, &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Code:       api.ErrorCodeBadRequest,
+				Message:    fmt.Sprintf("%s must be between 1 and %d", param.name, maxLogReadLines),
+			}
+		}
+	}
 	return fileutil.LogReadOptions{
 		Head:     valueOf(head),
 		Tail:     valueOf(tail),
 		Offset:   valueOf(offset),
 		Limit:    valueOf(limit),
 		Encoding: a.logEncodingCharset,
-	}
+	}, nil
 }
 
 // ExecuteDAGRunFromSpec implements api.StrictServerInterface.
@@ -407,7 +425,7 @@ func persistInlineEnqueueLabels(dag *ir.DAG, labels string) error {
 		return nil
 	}
 
-	if err := os.WriteFile(dag.Location, patched, 0o600); err != nil {
+	if err := fileutil.WriteFileAtomic(dag.Location, patched, 0o600); err != nil {
 		return fmt.Errorf("write patched inline spec: %w", err)
 	}
 
@@ -418,6 +436,9 @@ func applyInlineEnqueueLabels(data []byte, labels string) ([]byte, error) {
 	if len(data) == 0 || labels == "" {
 		return data, nil
 	}
+
+	// Normalize once so every reader below sees the same documents.
+	data = yamlutil.ClearEmptyDocumentSeparators(data)
 
 	existingLabels, err := extractInlineEnqueueLabelStrings(data)
 	if err != nil {
@@ -858,7 +879,10 @@ func (a *API) GetDAGRunLog(ctx context.Context, request api.GetDAGRunLogRequestO
 		return nil, err
 	}
 
-	options := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	options, err := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	if err != nil {
+		return nil, err
+	}
 	content, lineCount, totalLines, hasMore, isEstimate, err := fileutil.ReadLogContent(dagStatus.Log, options)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -1097,8 +1121,11 @@ func (a *API) GetDAGRunStepLog(ctx context.Context, request api.GetDAGRunStepLog
 		}, nil
 	}
 
-	options := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
-	logFile := selectLogFile(node, *request.Params.Stream)
+	options, err := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	if err != nil {
+		return nil, err
+	}
+	logFile := selectLogFile(node, valueOf(request.Params.Stream))
 
 	content, lineCount, totalLines, hasMore, isEstimate, err := fileutil.ReadLogContent(logFile, options)
 	if err != nil {
@@ -1360,20 +1387,17 @@ func (a *API) ApproveDAGRunStep(ctx context.Context, request api.ApproveDAGRunSt
 	}
 
 	// Resume DAG if no more waiting steps, or if the approval unblocked a step
-	// that also waits on a completed human task.
-	shouldResume := !hasWaitingSteps(updated.Nodes) || humantask.ResumePending(updated)
+	// while other manual steps keep waiting.
+	shouldResume := !hasWaitingSteps(updated.Nodes) || humantask.ResumePending(updated) ||
+		humantask.UnblockedNodeReady(updated)
 	if shouldResume {
-		var resumeErr error
-		// Human-task checkpoints resume through the queue: dagu retry rejects a
-		// run while a human task waits.
-		if humantask.HasCompletedTask(updated) || humantask.PushBackPending(updated) {
-			_, resumeErr = a.humanTaskService().Resume(a.withEventContext(ctx), request.Name, request.DagRunId)
-		} else {
-			resumeErr = a.resumeDAGRun(ctx, ref, request.DagRunId)
-		}
-		if resumeErr != nil {
+		if resumeErr := a.resumeWaitingDAGRun(ctx, ref, updated); resumeErr != nil {
 			logger.Error(ctx, "Failed to resume DAG", tag.Error(resumeErr))
-			shouldResume = false
+			a.logStepApproval(ctx, request.Name, request.DagRunId, "", request.StepName, false)
+			if errors.Is(resumeErr, queue.ErrRetryStaleLatest) {
+				return nil, staleManualResumeError()
+			}
+			return ptrOf(api.ApproveDAGRunStep503JSONResponse(approvalResumeFailure())), nil
 		} else {
 			logger.Info(ctx, "DAG resumed after approval",
 				tag.RunID(request.DagRunId),
@@ -1498,7 +1522,7 @@ func (a *API) ApproveSubDAGRunStep(ctx context.Context, request api.ApproveSubDA
 		}, nil
 	}
 
-	// Resume sub-DAG if no more waiting steps
+	// Child runs resume directly only after every manual step is resolved.
 	shouldResume := !hasWaitingSteps(updated.Nodes)
 	if shouldResume {
 		if err := a.resumeSubDAGRun(ctx, rootRef, request.SubDAGRunId); err != nil {
@@ -1937,7 +1961,7 @@ func (a *API) PushBackDAGRunStep(ctx context.Context, request api.PushBackDAGRun
 	}
 	approvalIteration := updatedNode.ApprovalIteration
 
-	if err := a.resumeDAGRun(ctx, ref, request.DagRunId); err != nil {
+	if err := a.resumeWaitingDAGRun(ctx, ref, updated); err != nil {
 		logger.Error(ctx, "Failed to resume DAG after push-back, rolling back", tag.Error(err))
 		if rollbackErr := a.rollbackPushBack(ctx, ref, applied, original); rollbackErr != nil {
 			logger.Error(ctx, "Failed to rollback push-back state", tag.Error(rollbackErr))
@@ -2467,7 +2491,10 @@ func (a *API) GetSubDAGRunLog(ctx context.Context, request api.GetSubDAGRunLogRe
 		return nil, err
 	}
 
-	options := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	options, err := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	if err != nil {
+		return nil, err
+	}
 	content, lineCount, totalLines, hasMore, isEstimate, err := fileutil.ReadLogContent(dagStatus.Log, options)
 	if err != nil {
 		if strings.Contains(err.Error(), "file not found") {
@@ -2635,8 +2662,11 @@ func (a *API) GetSubDAGRunStepLog(ctx context.Context, request api.GetSubDAGRunS
 		}, nil
 	}
 
-	options := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
-	logFile := selectLogFile(node, *request.Params.Stream)
+	options, err := a.buildLogReadOptions(request.Params.Head, request.Params.Tail, request.Params.Offset, request.Params.Limit)
+	if err != nil {
+		return nil, err
+	}
+	logFile := selectLogFile(node, valueOf(request.Params.Stream))
 
 	content, lineCount, totalLines, hasMore, isEstimate, err := fileutil.ReadLogContent(logFile, options)
 	if err != nil {
@@ -3084,7 +3114,7 @@ func (a *API) retryDAGRun(ctx context.Context, dagName, dagRunID, retryDagRunID,
 	// For DAGs using a global queue, enqueue the retry so it respects queue capacity.
 	// Step retry is not supported via queue (queue processor does not pass step name).
 	if stepName == "" && a.config.FindQueueConfig(dag.ProcGroup()) != nil {
-		if err := a.enqueueRetry(ctx, attempt, dag); err != nil {
+		if err := a.enqueueRetry(ctx, prevStatus, dag); err != nil {
 			return retryDAGRunResult{}, err
 		}
 		a.logRetryAudit(ctx, dagName, sourceDagRunID, auditStepName, includeDownstream, false, false)
@@ -3190,14 +3220,10 @@ func retryPathRequestError(err error) error {
 	}
 }
 
-// enqueueRetry enqueues the retry and persists Queued status via queue.EnqueueRetry.
+// enqueueRetry queues the validated attempt only if its status still matches.
 // Retries respect global queue capacity because the queue processor picks them up
 // when capacity is available.
-func (a *API) enqueueRetry(ctx context.Context, attempt dagrun.Attempt, dag *ir.DAG) error {
-	status, err := attempt.ReadStatus(ctx)
-	if err != nil {
-		return fmt.Errorf("error reading status: %w", err)
-	}
+func (a *API) enqueueRetry(ctx context.Context, status *ir.DAGRunStatus, dag *ir.DAG) error {
 	eventCtx := a.withEventContext(ctx)
 	opts := queue.EnqueueRetryOptions{Processes: a.procRepository}
 	if actor := triggerActorFromContext(ctx); actor != "" {
@@ -3968,23 +3994,42 @@ func applyRejection(ctx context.Context, node *ir.Node, status *ir.DAGRunStatus,
 	status.FinishedAt = time.Now().Format(time.RFC3339)
 }
 
-func (a *API) resumeDAGRun(ctx context.Context, ref ir.DAGRunRef, dagRunID string) error {
+// resumeWaitingDAGRun accepts a manual resume only while its attempt and status
+// still match the accepted action.
+func (a *API) resumeWaitingDAGRun(ctx context.Context, ref ir.DAGRunRef, status *ir.DAGRunStatus) error {
+	ctx, cancel := context.WithTimeout(a.withEventContext(context.WithoutCancel(ctx)), manualResumeTimeout)
+	defer cancel()
 	attempt, err := a.dagRunRepository.FindAttempt(ctx, ref)
 	if err != nil {
 		return fmt.Errorf("find attempt: %w", err)
 	}
-
 	dag, err := attempt.ReadDAG(ctx)
 	if err != nil {
 		return fmt.Errorf("read DAG: %w", err)
 	}
-
-	status, err := attempt.ReadStatus(ctx)
-	if err != nil {
-		return fmt.Errorf("read status: %w", err)
+	group := status.ProcGroup
+	if group == "" {
+		group = dag.ProcGroup()
 	}
-
-	return a.resumeManagedAttempt(ctx, dag, status, dagRunID)
+	opts := queue.EnqueueRetryOptions{Processes: a.procRepository}
+	if actor := triggerActorFromContext(ctx); actor != "" {
+		opts.TriggerActor = &actor
+	}
+	if a.config.FindQueueConfig(group) != nil {
+		_, err := queue.EnqueueRetry(ctx, a.dagRunRepository, a.queueStore, dag, status, opts)
+		return err
+	}
+	admission, err := queue.PrepareRetry(ctx, a.dagRunRepository, dag, status, opts)
+	if err != nil || admission == nil {
+		return err
+	}
+	if err := a.resumeManagedAttempt(ctx, dag, admission.Status, ref.ID, admission); err != nil {
+		if rollbackErr := admission.Rollback(ctx); rollbackErr != nil && !errors.Is(rollbackErr, queue.ErrRetryStaleLatest) {
+			return errors.Join(err, rollbackErr)
+		}
+		return err
+	}
+	return nil
 }
 
 func (a *API) resumeSubDAGRun(ctx context.Context, rootRef ir.DAGRunRef, subDAGRunID string) error {
@@ -4003,10 +4048,10 @@ func (a *API) resumeSubDAGRun(ctx context.Context, rootRef ir.DAGRunRef, subDAGR
 		return fmt.Errorf("read sub-DAG status: %w", err)
 	}
 
-	return a.resumeManagedAttempt(ctx, dag, status, subDAGRunID)
+	return a.resumeManagedAttempt(ctx, dag, status, subDAGRunID, nil)
 }
 
-func (a *API) resumeManagedAttempt(ctx context.Context, dag *ir.DAG, status *ir.DAGRunStatus, runID string) error {
+func (a *API) resumeManagedAttempt(ctx context.Context, dag *ir.DAG, status *ir.DAGRunStatus, runID string, admission *queue.RetryAdmission) error {
 	if dispatch.ShouldDispatchToCoordinator(dag, a.coordinatorCli != nil, a.defaultExecMode) {
 		var err error
 		dag, err = a.refreshBaseSMTP(ctx, dag, status)
@@ -4053,13 +4098,31 @@ func (a *API) resumeManagedAttempt(ctx context.Context, dag *ir.DAG, status *ir.
 	if err != nil {
 		return fmt.Errorf("prepare DAG retry env: %w", err)
 	}
-	opts := launcher.RetryOptions{DAGRunID: runID, TriggerActor: status.TriggerActor}
+	opts := launcher.RetryOptions{DAGRunID: runID, TriggerActor: status.TriggerActor, QueueDispatch: admission != nil}
 	if !status.Root.Zero() && status.Root.ID != runID {
 		opts.Root = status.Root
 	}
 	retrySpec := a.subCmdBuilder.Retry(prepared, opts)
 	retrySpec.Env = append(retrySpec.Env, a.managedOpenCodeEnv(ctx, prepared)...)
-	return launcher.Start(ctx, retrySpec)
+	started, err := launcher.StartProcess(ctx, retrySpec)
+	if err != nil {
+		return err
+	}
+	if admission != nil {
+		// A subprocess can fail before claiming the admitted checkpoint.
+		// Once it claims the run, rollback cannot change its newer state.
+		go func() {
+			exitErr := <-started.Done
+			if err := admission.Rollback(ctx); err != nil {
+				if !errors.Is(err, queue.ErrRetryStaleLatest) {
+					logger.Error(ctx, "Failed to restore manual resume checkpoint", tag.Error(err))
+				}
+				return
+			}
+			logger.Error(ctx, "Manual resume process exited before claiming the run", tag.RunID(runID), tag.Error(exitErr))
+		}()
+	}
+	return nil
 }
 
 func (a *API) managedOpenCodeEnv(ctx context.Context, dag *ir.DAG) []string {
@@ -4397,7 +4460,7 @@ func (a *API) getDAGRunLogsData(ctx context.Context, identifier string) (DAGRunL
 	// Parse tail parameter with bounds validation (1-10000, default 500)
 	tail := 500
 	if queryParams != nil {
-		tail = clampInt(parseIntParam(queryParams.Get("tail"), 500), 1, 10000)
+		tail = clampInt(parseIntParam(queryParams.Get("tail"), 500), 1, maxLogReadLines)
 	}
 
 	options := fileutil.LogReadOptions{
@@ -4521,7 +4584,12 @@ func (a *API) stepLogFromStatus(ctx context.Context, dagStatus *ir.DAGRunStatus,
 	if err != nil {
 		return StepLogResponse{}, fmt.Errorf("step %s not found in DAG %s", stepName, dagStatus.Name)
 	}
+	return a.stepLogFromFiles(ctx, node.Stdout, node.Stderr, stepName, opts)
+}
 
+// stepLogFromFiles reads a step's stdout and stderr files as the step log
+// response. An empty path leaves that stream empty.
+func (a *API) stepLogFromFiles(ctx context.Context, stdoutPath, stderrPath, stepName string, opts StepLogReadOptions) (StepLogResponse, error) {
 	options := opts.logReadOptions(a.logEncodingCharset)
 	readStdout := opts.Stream == "" || opts.Stream == string(api.StreamStdout)
 	readStderr := opts.Stream == "" || opts.Stream == string(api.StreamStderr)
@@ -4531,8 +4599,9 @@ func (a *API) stepLogFromStatus(ctx context.Context, dagStatus *ir.DAGRunStatus,
 	var stdoutContent string
 	var lineCount, totalLines int
 	var hasMore bool
-	if readStdout && node.Stdout != "" {
-		stdoutContent, lineCount, totalLines, hasMore, _, err = fileutil.ReadLogContent(node.Stdout, options)
+	var err error
+	if readStdout && stdoutPath != "" {
+		stdoutContent, lineCount, totalLines, hasMore, _, err = fileutil.ReadLogContent(stdoutPath, options)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return StepLogResponse{}, fmt.Errorf("error reading stdout: %w", err)
 		}
@@ -4540,16 +4609,16 @@ func (a *API) stepLogFromStatus(ctx context.Context, dagStatus *ir.DAGRunStatus,
 
 	// Read stderr
 	var stderrContent string
-	if readStderr && node.Stderr != "" {
+	if readStderr && stderrPath != "" {
 		var stderrLineCount, stderrTotalLines int
 		var stderrHasMore bool
-		stderrContent, stderrLineCount, stderrTotalLines, stderrHasMore, _, err = fileutil.ReadLogContent(node.Stderr, options)
+		stderrContent, stderrLineCount, stderrTotalLines, stderrHasMore, _, err = fileutil.ReadLogContent(stderrPath, options)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			// Log warning for real errors, return empty stderr
 			logger.Warn(ctx, "Failed to read stderr log",
 				tag.Error(err),
 				slog.String("stepName", stepName),
-				slog.String("stderrPath", node.Stderr),
+				slog.String("stderrPath", stderrPath),
 			)
 			stderrContent = ""
 		}

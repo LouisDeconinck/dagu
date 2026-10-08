@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -67,6 +69,65 @@ func TestForeachRuntimeRunsBodyAndPublishesAggregate(t *testing.T) {
 	}, state.records())
 }
 
+// A loop some item bodies failed is partially succeeded: the steps after it
+// run, and the aggregate names the failed items.
+func TestForeachRuntimePartialFailureIsPartiallySucceeded(t *testing.T) {
+	probeType, _ := registerForeachProbeExecutor(t)
+	r := setupRunner(t)
+
+	parent := foreachRuntimeStep(probeType, []any{
+		map[string]any{"slug": "a", "url": "a"},
+		map[string]any{"slug": "b", "url": "b"},
+		map[string]any{"slug": "c", "url": "c"},
+	}, 3)
+	parent.Foreach.Steps[0].ExecutorConfig.Config["fail_for"] = "b"
+	after := successStep("after", "each")
+
+	result := r.newPlan(t, parent, after).assertRun(t, ir.PartiallySucceeded)
+	require.NoError(t, result.Error, "a partially succeeded loop is not a failed run")
+	node := result.nodeByName(t, "each")
+	assert.Equal(t, ir.NodePartiallySucceeded, node.State().Status)
+	assert.Equal(t, ir.NodeSucceeded, result.nodeByName(t, "after").State().Status, "the dependent runs without continue_on")
+
+	raw, ok := node.NodeData().StringFormOutputValue()
+	require.True(t, ok, "the aggregate is published")
+	var aggregate foreachAggregate
+	require.NoError(t, json.Unmarshal([]byte(raw), &aggregate))
+	assert.Equal(t, 3, aggregate.Summary.Total)
+	assert.Equal(t, 2, aggregate.Summary.Succeeded)
+	assert.Equal(t, 1, aggregate.Summary.Failed)
+	require.Len(t, aggregate.Items, 3)
+	assert.Equal(t, ir.NodeFailed.String(), aggregate.Items[1].Status)
+	assert.NotEmpty(t, aggregate.Items[1].Error)
+	assert.Equal(t, []map[string]string{{"summary": "a"}, {"summary": "c"}}, aggregate.Outputs, "outputs holds the successful bodies only")
+}
+
+// A loop every item body failed is failed, and the steps after it do not run.
+func TestForeachRuntimeAllItemsFailedIsFailed(t *testing.T) {
+	probeType, _ := registerForeachProbeExecutor(t)
+	r := setupRunner(t)
+
+	parent := foreachRuntimeStep(probeType, []any{
+		map[string]any{"slug": "a", "url": "a"},
+		map[string]any{"slug": "b", "url": "b"},
+	}, 2)
+	parent.Foreach.Steps[0].ExecutorConfig.Config["fail_for"] = "a,b"
+	after := successStep("after", "each")
+
+	result := r.newPlan(t, parent, after).assertRun(t, ir.Failed)
+	node := result.nodeByName(t, "each")
+	assert.Equal(t, ir.NodeFailed, node.State().Status)
+	assert.Contains(t, node.State().Error.Error(), "all 2 item bodies failed; first error:")
+	assert.Equal(t, ir.NodeAborted, result.nodeByName(t, "after").State().Status, "the dependent does not run")
+
+	raw, ok := node.NodeData().StringFormOutputValue()
+	require.True(t, ok, "the aggregate is still published")
+	var aggregate foreachAggregate
+	require.NoError(t, json.Unmarshal([]byte(raw), &aggregate))
+	assert.Equal(t, 2, aggregate.Summary.Failed)
+	assert.Empty(t, aggregate.Outputs)
+}
+
 func TestForeachRuntimeHonorsMaxConcurrent(t *testing.T) {
 	probeType, state := registerForeachProbeExecutor(t)
 	r := setupRunner(t)
@@ -81,6 +142,111 @@ func TestForeachRuntimeHonorsMaxConcurrent(t *testing.T) {
 	r.newPlan(t, parent).assertRun(t, ir.Succeeded)
 
 	assert.Equal(t, 2, state.maxActive())
+}
+
+// Concurrent items keep body logs in foreach/<step>/<index>/ instead of one
+// shared directory, and each item records its body run beside those logs.
+func TestForeachRuntimeItemLogsStaySeparate(t *testing.T) {
+	probeType, _ := registerForeachProbeExecutor(t)
+	r := setupRunner(t)
+
+	parent := foreachRuntimeStep(probeType, []any{
+		map[string]any{"slug": "one", "url": "one"},
+		map[string]any{"slug": "two", "url": "two"},
+	}, 2)
+	result := r.newPlan(t, parent).assertRun(t, ir.Succeeded)
+
+	base := filepath.Join(filepath.Dir(result.nodeByName(t, "each").State().Stdout), "foreach", "each")
+	for _, index := range []string{"0", "1"} {
+		matches, err := filepath.Glob(filepath.Join(base, index, "*.out"))
+		require.NoError(t, err)
+		require.Len(t, matches, 1)
+	}
+}
+
+// The step records its items up front and each item's body steps with their
+// log file names, so the item bodies can be inspected without the run
+// status carrying them.
+func TestForeachRuntimeRecordsItems(t *testing.T) {
+	probeType, _ := registerForeachProbeExecutor(t)
+	r := setupRunner(t)
+
+	parent := foreachRuntimeStep(probeType, []any{
+		map[string]any{"slug": "one", "url": "one"},
+		map[string]any{"slug": "two", "url": "two"},
+	}, 2)
+	result := r.newPlan(t, parent).assertRun(t, ir.Succeeded)
+	base := filepath.Join(filepath.Dir(result.nodeByName(t, "each").State().Stdout), "foreach", "each")
+
+	var items ir.ForeachItems
+	readJSONFile(t, filepath.Join(base, "items.json"), &items)
+	assert.Equal(t, ir.ForeachItems{Total: 2, Items: []ir.ForeachItemRef{
+		{Index: 0, Key: "one"},
+		{Index: 1, Key: "two"},
+	}}, items)
+
+	var item ir.ForeachItemStatus
+	readJSONFile(t, filepath.Join(base, "1", "status.json"), &item)
+	assert.Equal(t, 1, item.Index)
+	assert.Equal(t, "two", item.Key)
+	assert.Equal(t, ir.NodeSucceeded, item.Status)
+	assert.NotEmpty(t, item.StartedAt)
+	assert.NotEmpty(t, item.FinishedAt)
+	require.Len(t, item.Steps, 1)
+	assert.Equal(t, "write", item.Steps[0].Name)
+	assert.Equal(t, ir.NodeSucceeded, item.Steps[0].Status)
+	assert.FileExists(t, filepath.Join(base, "1", item.Steps[0].Stdout))
+	assert.FileExists(t, filepath.Join(base, "1", item.Steps[0].Stderr))
+}
+
+// A running item's record follows its body while the item is still going,
+// so it can be inspected before the step finishes.
+func TestForeachRuntimeRecordsRunningItem(t *testing.T) {
+	probeType, _ := registerForeachProbeExecutor(t)
+	r := setupRunner(t)
+	release := filepath.Join(t.TempDir(), "release")
+
+	parent := foreachRuntimeStep(probeType, []any{map[string]any{"slug": "one", "url": "one"}}, 1)
+	parent.Foreach.Steps[0].ExecutorConfig.Config["wait_for_file"] = release
+	ph := r.newPlan(t, parent)
+	recordPath := filepath.Join(ph.cfg.LogDir, "foreach", "each", "0", "status.json")
+
+	// The body stays blocked until the running record is seen or the wait
+	// gives up; the record observed is checked once the run is over.
+	observed := make(chan ir.ForeachItemStatus, 1)
+	go func() {
+		defer func() { _ = os.WriteFile(release, nil, 0600) }()
+		deadline := time.Now().Add(platformTestDuration(10*time.Second, 20*time.Second))
+		for time.Now().Before(deadline) {
+			var record ir.ForeachItemStatus
+			if data, err := os.ReadFile(recordPath); err == nil && json.Unmarshal(data, &record) == nil &&
+				len(record.Steps) == 1 && record.Steps[0].Status == ir.NodeRunning {
+				observed <- record
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		close(observed)
+	}()
+
+	ph.assertRun(t, ir.Succeeded)
+
+	record, ok := <-observed
+	require.True(t, ok, "the item record never showed the running body step")
+	assert.Equal(t, ir.NodeRunning, record.Status)
+	assert.Empty(t, record.FinishedAt)
+
+	var final ir.ForeachItemStatus
+	readJSONFile(t, recordPath, &final)
+	assert.Equal(t, ir.NodeSucceeded, final.Status)
+	assert.Equal(t, ir.NodeSucceeded, final.Steps[0].Status)
+}
+
+func readJSONFile(t *testing.T, path string, v any) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(data, v))
 }
 
 type foreachAggregate struct {
@@ -255,6 +421,22 @@ func (e *foreachProbeExecutor) Run(ctx context.Context) error {
 		}
 	}
 
+	// wait_for_file holds the body until the named file exists.
+	if path := stringConfigValue(e.cfg["wait_for_file"]); path != "" {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if _, err := os.Stat(path); err == nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+			}
+		}
+	}
+
 	if delay := stringConfigValue(e.cfg["delay_ms"]); delay != "" {
 		millis, err := strconv.Atoi(delay)
 		if err == nil && millis > 0 {
@@ -265,6 +447,13 @@ func (e *foreachProbeExecutor) Run(ctx context.Context) error {
 				return ctx.Err()
 			case <-timer.C:
 			}
+		}
+	}
+
+	// fail_for names the values whose item body fails, comma-separated.
+	for failing := range strings.SplitSeq(stringConfigValue(e.cfg["fail_for"]), ",") {
+		if failing != "" && failing == stringConfigValue(e.cfg["value"]) {
+			return fmt.Errorf("probe refused %s", failing)
 		}
 	}
 

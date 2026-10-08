@@ -284,7 +284,7 @@ function Graph({
 
       // Add indicator for sub dagRun nodes in the label only
       // Escape any special characters in the label to prevent Mermaid parsing errors
-      let label = step.id || step.name;
+      let label = step.name;
       if (isSubDAGRun && subDAGName) {
         if (hasParallelExecutions && subRuns.length > 0) {
           // Show parallel execution count in the label - avoid brackets in stadium nodes
@@ -352,6 +352,17 @@ function Graph({
           linkIndex++;
         });
       }
+
+      // Inferred dependencies come from step-output references rather than
+      // depends, so they are drawn dashed to stay distinguishable.
+      step.inferredDepends?.forEach((dep) => {
+        const depId = toMermaidNodeId(dep);
+        dat.push(`${depId} -.-> ${id};`);
+        linkStyles.push(
+          `linkStyle ${linkIndex} ${inferredLinkStyle(status)},stroke-dasharray:${INFERRED_LINK_DASH}`
+        );
+        linkIndex++;
+      });
 
       // We no longer add the standard Mermaid click handler
       // Double-click will be handled by our custom implementation
@@ -623,12 +634,31 @@ function getStepLabel(
   const hasParallelExecutions = !!step.parallel;
 
   if (!subDAGName) {
-    return step.id || step.name;
+    return step.name;
   }
   if (hasParallelExecutions && subRuns.length > 0) {
     return `${step.name} -> ${subDAGName} x${subRuns.length}`;
   }
   return `${step.name} -> ${subDAGName}`;
+}
+
+const INFERRED_LINK_DASH = '6 3';
+
+function inferredLinkStyle(status: NodeStatus): string {
+  if (status === NodeStatus.Failed) {
+    return 'stroke:#ef5350,stroke-width:1.8px';
+  }
+  if (status === NodeStatus.Success) {
+    return `stroke:${GRAPH_SUCCESS_LINK_STROKE},stroke-width:1.8px`;
+  }
+  return 'stroke:#62656f,stroke-width:1px';
+}
+
+function allDepends(step: {
+  depends?: string[];
+  inferredDepends?: string[];
+}): string[] {
+  return [...(step.depends ?? []), ...(step.inferredDepends ?? [])];
 }
 
 type FallbackNode = {
@@ -674,7 +704,7 @@ function GraphFallback({
         id: toMermaidNodeId(step.name),
         name: step.name,
         label: getStepLabel(step, node),
-        depends: step.depends ?? [],
+        depends: allDepends(step),
         status: node?.status ?? NodeStatus.NotStarted,
       };
     });
@@ -876,8 +906,9 @@ function calculateGraphBreadth(steps: Steps): number {
   // Initialize maps
   steps.forEach((node) => {
     const step = 'step' in node ? node.step : node;
-    nodeMap.set(step.name, step.depends || []);
-    step.depends?.forEach((dep) => {
+    const depends = allDepends(step);
+    nodeMap.set(step.name, depends);
+    depends.forEach((dep) => {
       if (!parentMap.has(dep)) {
         parentMap.set(dep, []);
       }
@@ -903,7 +934,7 @@ function calculateGraphBreadth(steps: Steps): number {
   // Start from nodes with no dependencies
   steps.forEach((node) => {
     const step = 'step' in node ? node.step : node;
-    if (!step.depends || step.depends.length === 0) {
+    if (allDepends(step).length === 0) {
       calculateLevel(step.name);
     }
   });

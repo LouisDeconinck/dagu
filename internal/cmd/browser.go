@@ -16,16 +16,17 @@ var replayCacheStepFlag = commandLineFlag{
 	usage: "Clear only this step (step ID, or step name when the step has no ID)",
 }
 
-// Browser returns the command group for browser step state.
+// Browser returns the command group for browser sessions and browser step
+// state.
 func Browser() *cobra.Command {
 	cmd := NewCommand(&cobra.Command{
 		Use:   "browser",
-		Short: "Manage state kept by browser steps",
+		Short: "Work sites in browser sessions and manage state kept by browser steps",
 	}, nil, func(ctx *Context, _ []string) error {
 		return ctx.Command.Help()
 	})
 
-	cmd.AddCommand(browserCacheCommand())
+	cmd.AddCommand(browserCacheCommand(), browserSessionCommand())
 	return cmd
 }
 

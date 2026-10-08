@@ -4,9 +4,11 @@
 package browser
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -54,8 +56,27 @@ type fakeEngine struct {
 	handle browserHandle
 	// replayFails makes recorded actions fail, as if the page changed.
 	replayFails bool
-	// actNavigatesTo is the page an act leaves the browser on, if set.
+	// actNavigatesTo is the page an act or a replay leaves the browser on,
+	// if set.
 	actNavigatesTo string
+	// replayNavigatesTo, if set, is the page a performed replay leaves the
+	// browser on in place of actNavigatesTo, so replays can load a page
+	// while acts do not.
+	replayNavigatesTo string
+	// hidden lists the selectors of recorded actions whose element is on
+	// the page but hidden, so a replay does not perform them.
+	hidden []string
+	// twoStepAct makes acts perform two actions, as a two-step act does.
+	twoStepAct bool
+	// actFills, if set, is what acts type into the element they choose, as
+	// an act that types a value itself does.
+	actFills string
+	// actLosesPage is how many of the next acts lose the connection to the
+	// page after their click lands.
+	actLosesPage int
+	// replayLosesPage is how many of the next replayed actions lose the
+	// connection to the page after their click lands.
+	replayLosesPage int
 	// onAct runs while an act asks the model, for what happens meanwhile.
 	onAct func()
 	// actDialogs are the dialogs the next act opens and the browser accepts.
@@ -70,6 +91,8 @@ type fakeEngine struct {
 	// pageText and visible describe the page that fixed checks read.
 	pageText string
 	visible  []string
+	// snapshot is the page's accessibility tree; its URL is the page's.
+	snapshot pageSnapshot
 	// downloads and downloadErr script what the next download wait reports.
 	downloads   []string
 	downloadErr error
@@ -78,10 +101,12 @@ type fakeEngine struct {
 	mu            sync.Mutex
 	generate      generateFunc
 	url           string
-	acts          []fakeAct
-	replays       [][]recordedAction
-	detached      bool
-	closed        bool
+	// loads counts the documents the page has loaded.
+	loads    int
+	acts     []fakeAct
+	replays  []recordedAction
+	detached bool
+	closed   bool
 }
 
 type fakeAct struct {
@@ -119,20 +144,34 @@ func (e *fakeEngine) TakeBlockedRequests() (map[string]int, error) {
 func (e *fakeEngine) Goto(_ context.Context, url string, _ time.Duration) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.url = url
+	e.load(url)
 	return nil
 }
+
+// load makes the page load a new document at url. The caller holds e.mu.
+func (e *fakeEngine) load(url string) {
+	e.url = url
+	e.loads++
+}
+
+// errFakeSessionLost is how the browser runtime reports an operation whose
+// page session was detached.
+var errFakeSessionLost = fmt.Errorf("%w: Failed to perform act: -32001 Session with given id not found.", errPageSessionLost)
 
 func (e *fakeEngine) Act(ctx context.Context, instruction string, variables map[string]string, _ time.Duration) (actOutcome, error) {
 	e.mu.Lock()
 	e.acts = append(e.acts, fakeAct{instruction: instruction, variables: maps.Clone(variables)})
 	if e.actNavigatesTo != "" {
-		e.url = e.actNavigatesTo
+		e.load(e.actNavigatesTo)
 	}
 	e.dialogs = append(e.dialogs, e.actDialogs...)
 	e.actDialogs = nil
 	e.blocked, e.actBlocked = e.actBlocked, nil
-	generate, onAct := e.generate, e.onAct
+	generate, onAct, twoStep, fills := e.generate, e.onAct, e.twoStepAct, e.actFills
+	losesPage := e.actLosesPage > 0
+	if losesPage {
+		e.actLosesPage--
+	}
 	e.mu.Unlock()
 	if onAct != nil {
 		onAct()
@@ -152,17 +191,40 @@ func (e *fakeEngine) Act(ctx context.Context, instruction string, variables map[
 		// The browser runtime reports a model that chose no element this way.
 		return actOutcome{Message: "Failed to perform act: No action found"}, nil
 	}
-	return actOutcome{
-		Success: true,
-		Actions: []recordedAction{{Selector: "xpath=" + choice.ElementID, Method: "click"}},
-	}, nil
+	if losesPage {
+		return actOutcome{}, errFakeSessionLost
+	}
+	actions := []recordedAction{{Selector: "xpath=" + choice.ElementID, Method: "click"}}
+	if fills != "" {
+		actions[0] = recordedAction{Selector: "xpath=" + choice.ElementID, Method: "fill", Arguments: []string{fills}}
+	}
+	if twoStep {
+		actions = append(actions, recordedAction{Selector: "xpath=" + choice.ElementID + "/next", Method: "click"})
+	}
+	return actOutcome{Success: true, Actions: actions}, nil
 }
 
-func (e *fakeEngine) Replay(_ context.Context, actions []recordedAction, _ map[string]string, _ time.Duration) (bool, error) {
+func (e *fakeEngine) Replay(_ context.Context, action recordedAction, _ map[string]string, _ time.Duration) (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.replays = append(e.replays, actions)
+	e.replays = append(e.replays, action)
+	if slices.Contains(e.hidden, action.Selector) {
+		return false, nil
+	}
+	if target := cmp.Or(e.replayNavigatesTo, e.actNavigatesTo); target != "" {
+		e.load(target)
+	}
+	if e.replayLosesPage > 0 {
+		e.replayLosesPage--
+		return false, errFakeSessionLost
+	}
 	return !e.replayFails, nil
+}
+
+func (e *fakeEngine) DocumentID(context.Context) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return fmt.Sprint(e.loads), nil
 }
 
 func (e *fakeEngine) Extract(ctx context.Context, instruction string, schema json.RawMessage, _ time.Duration) (json.RawMessage, error) {
@@ -208,6 +270,15 @@ func (e *fakeEngine) SelectorVisible(_ context.Context, selector string) (bool, 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return slices.Contains(e.visible, selector), nil
+}
+
+// Snapshot returns the scripted accessibility tree of the page.
+func (e *fakeEngine) Snapshot(context.Context) (pageSnapshot, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	snapshot := e.snapshot
+	snapshot.URL = e.url
+	return snapshot, nil
 }
 
 // WaitForDownloads reports the scripted downloads once, as if they finished

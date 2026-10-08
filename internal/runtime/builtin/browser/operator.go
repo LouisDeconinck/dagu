@@ -1,0 +1,407 @@
+// Copyright (C) 2026 Yota Hamada
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+package browser
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/dagucloud/dagu/v2/internal/runtime/builtin/internal/agentstep"
+)
+
+// operator performs the operations of with.do on one browser. It reports
+// what each operation did and leaves recording it to the caller.
+type operator struct {
+	eng            engine
+	bridge         *modelBridge
+	variables      map[string]string
+	allowedDomains []string
+	// recorder replays and records acts; nil when acts do neither.
+	recorder actRecorder
+	// shots stores the screenshots screenshot operations take.
+	shots *agentstep.ArtifactStore
+	// warn reports a problem that did not stop the operation at index.
+	warn func(index int, message string)
+}
+
+// actRecorder keeps the actions acts performed, keyed by replayKey.
+type actRecorder interface {
+	// lookup returns the actions recorded under key, if any.
+	lookup(key string) ([]recordedAction, bool)
+	stage(key string, actions []recordedAction)
+	drop(key string)
+}
+
+// opResult is what one operation did.
+type opResult struct {
+	agentstep.Report
+	// Actions are the actions an act performed or replayed.
+	Actions []recordedAction
+	// PageURL is the page an act started on, when the act was recorded.
+	PageURL string
+	// Values are the values an extract read, limited to the properties its
+	// schema lists.
+	Values map[string]any
+}
+
+func (o *operator) runOperation(ctx context.Context, index int, op operation) (opResult, error) {
+	timeout := op.timeout()
+	switch {
+	case op.Goto != "":
+		return o.gotoURL(ctx, index, op.Goto, timeout)
+	case op.Act != nil:
+		return o.act(ctx, index, *op.Act, timeout)
+	case op.Extract != nil:
+		return o.extract(ctx, index, *op.Extract, timeout)
+	case op.Expect != nil:
+		return o.expect(ctx, index, *op.Expect, timeout)
+	case op.Wait != nil:
+		return o.wait(ctx, index, *op.Wait, timeout)
+	case op.Screenshot != "":
+		return o.screenshot(ctx, index, op.Screenshot)
+	}
+	return opResult{}, fmt.Errorf("unsupported operation %q", op.kind())
+}
+
+// checkPage fails when the page has left the allowed domains, which a
+// redirect or an act can cause even when every goto target was allowed.
+func (o *operator) checkPage(ctx context.Context) error {
+	if len(o.allowedDomains) == 0 {
+		return nil
+	}
+	current, err := o.eng.CurrentURL(ctx)
+	if err != nil {
+		return err
+	}
+	if err := checkAllowedDomain(current, o.allowedDomains); err != nil {
+		return fmt.Errorf("the page navigated away: %w", err)
+	}
+	return nil
+}
+
+func (o *operator) gotoURL(ctx context.Context, index int, target string, timeout time.Duration) (opResult, error) {
+	began := time.Now()
+	if err := checkAllowedDomain(target, o.allowedDomains); err != nil {
+		return opResult{}, err
+	}
+	if err := o.eng.Goto(ctx, target, timeout); err != nil {
+		return opResult{}, err
+	}
+	return opResult{Report: agentstep.Report{Index: index, Kind: opGoto, Subject: target, Status: agentstep.StatusCompleted, Duration: time.Since(began)}}, nil
+}
+
+func (o *operator) act(ctx context.Context, index int, spec actSpec, timeout time.Duration) (opResult, error) {
+	// Validation guarantees every reference names a variable or an earlier
+	// ask, so a missing value means that ask was skipped.
+	for _, name := range agentstep.VariableReferences(spec.Instruction) {
+		if _, ok := o.variables[name]; !ok {
+			return opResult{}, fmt.Errorf("the instruction uses %%%s%%, but the ask that sets it did not run", name)
+		}
+	}
+	began, before := time.Now(), o.bridge.totals()
+	// The document the page shows before the act tells whether an act that
+	// lost the page took effect. It stays empty when the page cannot be read.
+	document, _ := o.eng.DocumentID(ctx)
+	recorded := o.recorder != nil && (spec.Cache == nil || *spec.Cache)
+	key, pageURL := "", ""
+	if recorded {
+		var err error
+		if pageURL, err = o.eng.CurrentURL(ctx); err != nil {
+			return opResult{}, err
+		}
+		key = replayKey(index, spec.Instruction, pageURL)
+	}
+	status := agentstep.StatusCompleted
+	if actions, ok := o.lookup(key); ok {
+		replayed, err := o.replay(ctx, actions, document, timeout)
+		if err != nil {
+			return opResult{}, err
+		}
+		if replayed {
+			return opResult{
+				Report: agentstep.Report{
+					Index: index, Kind: opAct, Subject: spec.Instruction, Status: agentstep.StatusCacheHit,
+					Detail: describeActions(actions), Duration: time.Since(began),
+				},
+				Actions: actions,
+				PageURL: pageURL,
+			}, nil
+		}
+		status = agentstep.StatusHealed
+		// The recording is dropped unless the act that heals it records what
+		// it did.
+		o.recorder.drop(key)
+		// A recorded action before the miss may have loaded a new document.
+		document, _ = o.eng.DocumentID(ctx)
+	}
+	outcome, err := o.performAct(ctx, index, spec.Instruction, document, timeout)
+	if err != nil {
+		return opResult{}, err
+	}
+	if !outcome.Success {
+		if strings.Contains(outcome.Message, noActionFoundMessage) {
+			return opResult{}, fmt.Errorf("the model (%s) answered that no element on the page matches the instruction; "+
+				"if the element is on the page, reword the instruction or try another model, "+
+				"since some models give this answer for every request", o.bridge.modelName())
+		}
+		return opResult{}, fmt.Errorf("act did not complete: %s", outcome.Message)
+	}
+	if recorded && len(outcome.Actions) > 0 {
+		o.recorder.stage(key, outcome.Actions)
+	}
+	detail := describeActions(outcome.Actions)
+	if len(outcome.Actions) == 0 {
+		// An act counted done because it loaded a new document says so.
+		detail = outcome.Message
+	}
+	return opResult{
+		Report: agentstep.Report{
+			Index: index, Kind: opAct, Subject: spec.Instruction, Status: status,
+			Detail: detail, Tokens: o.bridge.totals().sub(before).total(),
+			Duration: time.Since(began),
+		},
+		Actions: outcome.Actions,
+		PageURL: pageURL,
+	}, nil
+}
+
+// lookup returns the actions recorded under key, if there are any.
+func (o *operator) lookup(key string) ([]recordedAction, bool) {
+	if key == "" {
+		return nil, false
+	}
+	actions, ok := o.recorder.lookup(key)
+	return actions, ok && len(actions) > 0
+}
+
+// replay performs recorded actions in order and reports whether every one
+// succeeded. document identifies the page's document before the first. An
+// action that lost the page is judged by the document it started on: a new
+// document means it took effect, and the next action runs there; the same
+// document means it did not, and the replay ends so the model acts instead.
+func (o *operator) replay(ctx context.Context, actions []recordedAction, document string, timeout time.Duration) (bool, error) {
+	for i, action := range actions {
+		if i > 0 {
+			document, _ = o.eng.DocumentID(ctx)
+		}
+		replayed, err := o.eng.Replay(ctx, action, o.variables, timeout)
+		if errors.Is(err, errPageSessionLost) {
+			replayed, err = o.loadedNewDocument(ctx, document, err)
+		}
+		if err != nil || !replayed {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// performAct runs an act and judges one that lost the page by the page's
+// document: a document other than document means the act took effect, and
+// the same document means it did not, so it runs once more. Acting again
+// without that check could submit a form twice.
+func (o *operator) performAct(ctx context.Context, index int, instruction, document string, timeout time.Duration) (actOutcome, error) {
+	for retried := false; ; retried = true {
+		outcome, err := o.eng.Act(ctx, instruction, o.variables, timeout)
+		if !errors.Is(err, errPageSessionLost) {
+			return outcome, err
+		}
+		loaded, judgeErr := o.loadedNewDocument(ctx, document, err)
+		if loaded {
+			return actOutcome{Success: true, Message: "the page loaded a new document before the act reported back"}, nil
+		}
+		if judgeErr != nil {
+			return actOutcome{}, judgeErr
+		}
+		if retried {
+			return actOutcome{}, err
+		}
+		o.warn(index, "the browser lost its connection to the page before the act took effect; running it again")
+	}
+}
+
+// loadedNewDocument reports whether the page shows a document other than
+// document after lost, an error wrapping errPageSessionLost. It returns lost
+// when the documents cannot be compared.
+func (o *operator) loadedNewDocument(ctx context.Context, document string, lost error) (bool, error) {
+	if document == "" {
+		return false, lost
+	}
+	current, err := o.eng.DocumentID(ctx)
+	if err != nil {
+		return false, errors.Join(lost, err)
+	}
+	return current != document, nil
+}
+
+func (o *operator) extract(ctx context.Context, index int, spec extractSpec, timeout time.Duration) (opResult, error) {
+	began, before := time.Now(), o.bridge.totals()
+	schema, err := json.Marshal(spec.Schema)
+	if err != nil {
+		return opResult{}, fmt.Errorf("encode extract schema: %w", err)
+	}
+	data, err := o.eng.Extract(ctx, spec.Instruction, schema, timeout)
+	if err != nil {
+		return opResult{}, err
+	}
+	var values map[string]any
+	if err := json.Unmarshal(data, &values); err != nil {
+		return opResult{}, fmt.Errorf("extract returned a non-object value: %w", err)
+	}
+	// Only the fields a schema lists are published, matching the output
+	// names known when the DAG loads.
+	properties, listed := spec.Schema["properties"].(map[string]any)
+	published := make(map[string]any, len(values))
+	for name, value := range values {
+		if _, ok := properties[name]; listed && !ok {
+			continue
+		}
+		published[name] = value
+	}
+	return opResult{
+		Report: agentstep.Report{
+			Index: index, Kind: opExtract, Subject: spec.Instruction, Status: agentstep.StatusCompleted,
+			Detail: string(data), Tokens: o.bridge.totals().sub(before).total(), Duration: time.Since(began),
+		},
+		Values: published,
+	}, nil
+}
+
+// expect fails unless the condition holds. A fixed check keeps reading the
+// page until its within window or the operation timeout, because the page
+// may still be updating.
+func (o *operator) expect(ctx context.Context, index int, c condition, timeout time.Duration) (opResult, error) {
+	began, before := time.Now(), o.bridge.totals()
+	holds, reason, err := o.await(ctx, c, c.window(timeout), timeout)
+	if err != nil {
+		return opResult{}, err
+	}
+	if !holds {
+		return opResult{}, fmt.Errorf("expectation not met: %s", reason)
+	}
+	return opResult{Report: agentstep.Report{
+		Index: index, Kind: opExpect, Subject: c.String(), Status: agentstep.StatusCompleted, Detail: reason,
+		Tokens: o.bridge.totals().sub(before).total(), Duration: time.Since(began),
+	}}, nil
+}
+
+// await evaluates a condition. The model judges a statement once; a fixed
+// check is read repeatedly until it holds or window passes. A zero window
+// reads the page once.
+func (o *operator) await(ctx context.Context, c condition, window, timeout time.Duration) (bool, string, error) {
+	deadline := time.Now().Add(window)
+	for {
+		holds, reason, err := o.evaluate(ctx, c, timeout)
+		if err != nil || holds || c.judged() || !time.Now().Before(deadline) {
+			return holds, reason, err
+		}
+		select {
+		case <-ctx.Done():
+			return false, "", ctx.Err()
+		case <-time.After(conditionPollInterval):
+		}
+	}
+}
+
+// evaluate reports whether a condition holds now, and why.
+func (o *operator) evaluate(ctx context.Context, c condition, timeout time.Duration) (bool, string, error) {
+	switch {
+	case c.judged():
+		return o.judge(ctx, c.Statement, timeout)
+	case c.Text != "":
+		text, err := o.eng.PageText(ctx)
+		if err != nil {
+			return false, "", err
+		}
+		if strings.Contains(text, c.Text) {
+			return true, fmt.Sprintf("the page text contains %q", c.Text), nil
+		}
+		return false, fmt.Sprintf("the page text does not contain %q", c.Text), nil
+	case c.Selector != "":
+		visible, err := o.eng.SelectorVisible(ctx, c.Selector)
+		if err != nil {
+			return false, "", err
+		}
+		if visible {
+			return true, fmt.Sprintf("%q is visible", c.Selector), nil
+		}
+		return false, fmt.Sprintf("%q is not visible", c.Selector), nil
+	default:
+		current, err := o.eng.CurrentURL(ctx)
+		if err != nil {
+			return false, "", err
+		}
+		if strings.Contains(current, c.URL) {
+			return true, fmt.Sprintf("the URL contains %q", c.URL), nil
+		}
+		return false, fmt.Sprintf("the URL %s does not contain %q", current, c.URL), nil
+	}
+}
+
+func (o *operator) wait(ctx context.Context, index int, spec waitSpec, timeout time.Duration) (opResult, error) {
+	began := time.Now()
+	subject := spec.Selector
+	if spec.Duration != "" {
+		duration, err := time.ParseDuration(spec.Duration)
+		if err != nil || duration <= 0 {
+			return opResult{}, fmt.Errorf("wait duration %q must be a positive duration", spec.Duration)
+		}
+		subject = spec.Duration
+		timer := time.NewTimer(duration)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return opResult{}, ctx.Err()
+		case <-timer.C:
+		}
+	} else if err := o.eng.WaitForSelector(ctx, spec.Selector, timeout); err != nil {
+		return opResult{}, err
+	}
+	return opResult{Report: agentstep.Report{Index: index, Kind: opWait, Subject: subject, Status: agentstep.StatusCompleted, Duration: time.Since(began)}}, nil
+}
+
+func (o *operator) screenshot(ctx context.Context, index int, name string) (opResult, error) {
+	began := time.Now()
+	data, err := o.eng.Screenshot(ctx)
+	if err != nil {
+		return opResult{}, err
+	}
+	rel, err := o.shots.WriteScreenshot(name, data)
+	if err != nil {
+		return opResult{}, err
+	}
+	return opResult{Report: agentstep.Report{
+		Index: index, Kind: opScreenshot, Subject: name, Status: agentstep.StatusCompleted,
+		Detail: rel, Duration: time.Since(began), Files: []string{rel},
+	}}, nil
+}
+
+// judge asks the model whether a statement holds for the current page.
+func (o *operator) judge(ctx context.Context, statement string, timeout time.Duration) (bool, string, error) {
+	instruction := fmt.Sprintf("Decide whether this statement is true for the current page: %q. Set answer to true or false and give a one-sentence reason.", statement)
+	data, err := o.eng.Extract(ctx, instruction, statementSchema, timeout)
+	if err != nil {
+		return false, "", err
+	}
+	var verdict struct {
+		Answer bool   `json:"answer"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(data, &verdict); err != nil {
+		return false, "", fmt.Errorf("decode statement verdict: %w", err)
+	}
+	return verdict.Answer, verdict.Reason, nil
+}
+
+// stepRecorder records a step's acts in its replay cache.
+type stepRecorder struct {
+	cache *replayCache
+}
+
+func (r stepRecorder) lookup(key string) ([]recordedAction, bool) { return r.cache.Lookup(key) }
+func (r stepRecorder) stage(key string, actions []recordedAction) { r.cache.Stage(key, actions) }
+func (r stepRecorder) drop(key string)                            { r.cache.Drop(key) }

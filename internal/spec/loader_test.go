@@ -1068,6 +1068,10 @@ steps:
 		assert.Contains(t, dag.Env, "SUB_ENV=sub_value")
 		assert.Contains(t, dag.Env, "OVERWRITE_ENV=sub_overwrite_value")
 
+		// The root env span covers the child's own entries, not the base ones.
+		span := dag.RootEnvSpan
+		assert.ElementsMatch(t, []string{"SUB_ENV=sub_value", "OVERWRITE_ENV=sub_overwrite_value"}, dag.Env[span.Start:span.End])
+
 		// Other fields should be inherited
 		assert.Equal(t, "/base/logs", dag.LogDir)
 		assert.Equal(t, 90, dag.HistRetentionDays)
@@ -2412,14 +2416,16 @@ steps:
 		})
 	}
 
-	t.Run("EmptyDocumentSeparator", func(t *testing.T) {
-		t.Parallel()
-
-		// TODO: The YAML parser has limitations with empty documents (---)
-		// The behavior is inconsistent - sometimes it skips them, sometimes it errors.
-		// For now, we test that it loads something, but the sub DAG after
-		// the empty document may or may not be loaded.
-		multiDAGContent := `steps:
+	// Empty documents (bare `---` separators) and comment-only documents are
+	// skipped; every real document in the stream must still be loaded.
+	emptyDocTests := []struct {
+		name      string
+		content   string
+		wantLocal string
+	}{
+		{
+			name: "EmptyDocumentBetweenDAGs",
+			content: `steps:
   - name: step1
     run: echo "main"
 
@@ -2430,16 +2436,89 @@ name: child
 steps:
   - name: step1
     run: echo "child"
-`
-		tmpFile := createTempYAMLFile(t, multiDAGContent)
+`,
+			wantLocal: "child",
+		},
+		{
+			name: "CommentOnlyDocumentBetweenDAGs",
+			content: `steps:
+  - name: step1
+    run: echo "main"
 
-		// The behavior with empty documents is unpredictable
-		_, err := spec.Load(context.Background(), tmpFile)
-		if err != nil {
-			// If it errors, it should be a decode error
-			assert.Contains(t, err.Error(), "failed to decode document")
-		}
-	})
+---
+# this document only contains a comment
+---
+name: child
+steps:
+  - name: step1
+    run: echo "child"
+`,
+			wantLocal: "child",
+		},
+		{
+			name: "LeadingEmptyDocuments",
+			content: `---
+---
+steps:
+  - name: step1
+    run: echo "main"
+`,
+		},
+		{
+			name: "TrailingEmptyDocuments",
+			content: `steps:
+  - name: step1
+    run: echo "main"
+---
+name: child
+steps:
+  - name: step1
+    run: echo "child"
+---
+---
+`,
+			wantLocal: "child",
+		},
+	}
+
+	for _, tt := range emptyDocTests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmpFile := createTempYAMLFile(t, tt.content)
+			dag, err := spec.Load(context.Background(), tmpFile)
+			require.NoError(t, err)
+			assert.Len(t, dag.Steps, 1)
+			if tt.wantLocal == "" {
+				assert.Empty(t, dag.LocalDAGs)
+				return
+			}
+			local, ok := dag.LocalDAGs[tt.wantLocal]
+			require.True(t, ok, "document after an empty document must be loaded")
+			assert.Equal(t, tt.wantLocal, local.Name)
+		})
+	}
+
+	// A stream without a single real document is an error.
+	emptyStreamTests := []struct {
+		name    string
+		content string
+	}{
+		{name: "EmptyFile", content: ``},
+		{name: "OnlySeparator", content: "---\n"},
+		{name: "OnlySeparators", content: "---\n---\n"},
+		{name: "OnlyComment", content: "# just a comment\n"},
+		{name: "OnlySeparatorAndComment", content: "---\n# just a comment\n"},
+	}
+
+	for _, tt := range emptyStreamTests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmpFile := createTempYAMLFile(t, tt.content)
+			_, err := spec.Load(context.Background(), tmpFile)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "no DAGs found")
+		})
+	}
 
 	t.Run("ComplexMultiDAGWithParameters", func(t *testing.T) {
 		t.Parallel()

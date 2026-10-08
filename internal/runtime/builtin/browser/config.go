@@ -121,6 +121,16 @@ func (a *actSpec) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*plain)(a))
 }
 
+// MarshalJSON writes an act that sets nothing but its instruction as the
+// instruction string, the form it is usually written in.
+func (a actSpec) MarshalJSON() ([]byte, error) {
+	if a.Cache == nil {
+		return json.Marshal(a.Instruction)
+	}
+	type plain actSpec
+	return json.Marshal(plain(a))
+}
+
 // kind returns the operation name.
 func (o operation) kind() string {
 	switch {

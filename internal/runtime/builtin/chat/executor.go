@@ -17,6 +17,7 @@ import (
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
+	"github.com/dagucloud/dagu/v2/internal/cmn/stringutil"
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
 	"github.com/dagucloud/dagu/v2/internal/executor/registry"
 	"github.com/dagucloud/dagu/v2/internal/ir"
@@ -25,6 +26,7 @@ import (
 	// Import all providers to register them
 	_ "github.com/dagucloud/dagu/v2/internal/llm/allproviders"
 	"github.com/dagucloud/dagu/v2/internal/runtime"
+	"github.com/dagucloud/dagu/v2/internal/runtime/builtin/internal/agentstep"
 	"github.com/dagucloud/dagu/v2/internal/runtime/executor"
 )
 
@@ -34,11 +36,15 @@ var _ executor.PushBackAware = (*Executor)(nil)
 var _ executor.SubRunProvider = (*Executor)(nil)
 var _ executor.ToolDefinitionProvider = (*Executor)(nil)
 
+// providerFactory builds a provider for one resolved model configuration.
+type providerFactory func(ctx context.Context, cfg *ir.LLMConfig) (llmpkg.Provider, error)
+
 // Executor implements the executor.Executor interface for chat steps.
 type Executor struct {
 	stdout            io.Writer
 	stderr            io.Writer
 	step              ir.Step
+	newProvider       providerFactory
 	providerType      llmpkg.ProviderType
 	apiKeyEnvVar      string
 	messages          []ir.LLMMessage
@@ -56,12 +62,20 @@ type Executor struct {
 
 	// Tool definitions that were available to the LLM (for UI visibility)
 	savedToolDefinitions []ir.ToolDefinition
+
+	// answer is the output_schema the model answers through the respond
+	// tool, when the step declares one.
+	answer *answerSchema
 }
 
 // newChatExecutor creates a new chat executor from a step configuration.
 func newChatExecutor(ctx context.Context, step ir.Step) (executor.Executor, error) {
 	if step.LLM == nil {
 		return nil, fmt.Errorf("llm configuration is required for chat step")
+	}
+	// Handler steps skip load-time step validation.
+	if err := validateOutputSchema(step); err != nil {
+		return nil, err
 	}
 
 	cfg := step.LLM
@@ -118,6 +132,7 @@ func newChatExecutor(ctx context.Context, step ir.Step) (executor.Executor, erro
 		stdout:       os.Stdout,
 		stderr:       os.Stderr,
 		step:         step,
+		newProvider:  runtime.NewLLMProvider,
 		providerType: providerType,
 		apiKeyEnvVar: apiKeyEnvVar,
 		messages:     messages,
@@ -130,6 +145,18 @@ func newChatExecutor(ctx context.Context, step ir.Step) (executor.Executor, erro
 			return nil, fmt.Errorf("failed to initialize tool registry: %w", err)
 		}
 		e.toolRegistry = registry
+		// A tool's name comes from its DAG, which is known only once loaded.
+		if _, ok := registry.GetDAGByToolName(agentstep.RespondToolName); ok && step.HasOutputSchema() {
+			return nil, reservedToolError()
+		}
+	}
+
+	if step.HasOutputSchema() {
+		answer, err := newAnswerSchema(step.OutputSchema)
+		if err != nil {
+			return nil, err
+		}
+		e.answer = answer
 	}
 
 	return e, nil
@@ -406,6 +433,11 @@ func (e *Executor) runWithModel(ctx context.Context, model ir.ModelEntry, allMes
 		return err
 	}
 
+	// A structured answer is never streamed.
+	if e.answer != nil {
+		return e.runStructuredForModel(ctx, provider, allMessages, effectiveCfg)
+	}
+
 	// Dispatch to tool-enabled execution if tools are configured
 	if e.toolRegistry != nil && e.toolRegistry.HasTools() {
 		return e.runWithToolsForModel(ctx, provider, allMessages, effectiveCfg)
@@ -422,7 +454,7 @@ func (e *Executor) buildEffectiveConfig(model ir.ModelEntry) *ir.LLMConfig {
 
 // createProviderForModel creates an LLM provider for a specific model.
 func (e *Executor) createProviderForModel(ctx context.Context, _ ir.ModelEntry, cfg *ir.LLMConfig) (llmpkg.Provider, error) {
-	return runtime.NewLLMProvider(ctx, cfg)
+	return e.newProvider(ctx, cfg)
 }
 
 // runSimpleForModel executes a chat request without tool calling, using the given config.
@@ -499,62 +531,60 @@ func (e *Executor) runWithToolsForModel(ctx context.Context, provider llmpkg.Pro
 	tools := e.toolRegistry.ToLLMTools()
 
 	// Store tool definitions for UI visibility
-	e.savedToolDefinitions = make([]ir.ToolDefinition, len(tools))
-	for i, t := range tools {
-		e.savedToolDefinitions[i] = ir.ToolDefinition{
-			Name:        t.Function.Name,
-			Description: t.Function.Description,
-			Parameters:  t.Function.Parameters,
-		}
-	}
+	e.savedToolDefinitions = toolDefinitions(tools)
 
 	logger.Info(ctx, "Starting tool-enabled chat execution",
 		slog.Int("tool_count", len(tools)),
 		slog.Int("max_iterations", maxIterations),
 	)
 
-	// Working copy of messages for the tool loop
-	sessionMessages := make([]ir.LLMMessage, len(allMessages))
-	copy(sessionMessages, allMessages)
-
+	conv := newConversation(allMessages)
 	for iteration := range maxIterations {
-		var done bool
-		var err error
-		sessionMessages, done, err = e.executeToolStep(ctx, provider, cfg, tools, sessionMessages, iteration)
+		done, err := e.executeToolStep(ctx, provider, cfg, tools, conv, iteration)
 		if err != nil {
 			return err
 		}
 		if done {
-			e.savedMessages = sessionMessages
+			e.savedMessages = conv.messages
 			return nil
 		}
 	}
 
 	// Max iterations reached
-	return e.handleMaxIterationsReached(ctx, maxIterations, sessionMessages)
+	return e.handleMaxIterationsReached(ctx, maxIterations, conv.messages)
 }
 
-// executeToolStep performs a single iteration of the tool execution loop.
-// Returns updated messages, whether the session is done, and any error.
+// toolDefinitions lists the tools offered to the model, for UI visibility.
+func toolDefinitions(tools []llmpkg.Tool) []ir.ToolDefinition {
+	definitions := make([]ir.ToolDefinition, len(tools))
+	for i, t := range tools {
+		definitions[i] = ir.ToolDefinition{
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			Parameters:  t.Function.Parameters,
+		}
+	}
+	return definitions
+}
+
+// executeToolStep performs a single iteration of the tool execution loop,
+// adding the turn to conv. It reports whether the session is done.
 func (e *Executor) executeToolStep(
 	ctx context.Context,
 	provider llmpkg.Provider,
 	cfg *ir.LLMConfig,
 	tools []llmpkg.Tool,
-	msgs []ir.LLMMessage,
+	conv *conversation,
 	iteration int,
-) ([]ir.LLMMessage, bool, error) {
+) (bool, error) {
 	logger.Debug(ctx, "Tool loop iteration",
 		slog.Int("iteration", iteration+1),
-		slog.Int("message_count", len(msgs)),
+		slog.Int("message_count", len(conv.messages)),
 	)
-
-	// Mask secrets before sending to provider
-	maskedForProvider := maskSecretsForProvider(ctx, msgs)
 
 	req := &llmpkg.ChatRequest{
 		Model:       cfg.Model,
-		Messages:    toLLMMessages(maskedForProvider),
+		Messages:    conv.request(ctx),
 		Temperature: cfg.Temperature,
 		MaxTokens:   cfg.MaxTokens,
 		TopP:        cfg.TopP,
@@ -567,23 +597,22 @@ func (e *Executor) executeToolStep(
 	// Execute request
 	resp, err := llmpkg.ChatWithRetry(ctx, provider, req, llmpkg.DefaultLogicalRetryConfig())
 	if err != nil {
-		return nil, false, fmt.Errorf("chat request failed: %w", err)
+		return false, fmt.Errorf("chat request failed: %w", err)
 	}
 
 	// Check for final response (no tool calls)
 	if len(resp.ToolCalls) == 0 {
-		e.handleFinalResponse(ctx, msgs, resp, cfg, iteration)
-		// Return updated messages including the final response
-		finalMsgs := append(msgs, ir.LLMMessage{
+		e.handleFinalResponse(ctx, resp, iteration)
+		conv.add(ir.LLMMessage{
 			Role:     ir.LLMRoleAssistant,
 			Content:  resp.Content,
 			Metadata: e.createResponseMetadata(cfg, &resp.Usage),
-		})
-		return finalMsgs, true, nil
+		}, nil)
+		return true, nil
 	}
 
-	// Process tool calls
-	return e.processToolCalls(ctx, msgs, resp, iteration)
+	e.processToolCalls(ctx, conv, resp)
+	return false, nil
 }
 
 func (e *Executor) runStreamForModel(ctx context.Context, provider llmpkg.Provider, req *llmpkg.ChatRequest) (string, *llmpkg.Usage, error) {
@@ -665,9 +694,7 @@ func waitForStreamRetry(ctx context.Context, cfg llmpkg.LogicalRetryConfig, fail
 // handleFinalResponse processes and logs the final response from the LLM.
 func (e *Executor) handleFinalResponse(
 	ctx context.Context,
-	msgs []ir.LLMMessage,
 	resp *llmpkg.ChatResponse,
-	cfg *ir.LLMConfig,
 	iteration int,
 ) {
 	logger.Info(ctx, "LLM provided final response (no tool calls)",
@@ -681,13 +708,13 @@ func (e *Executor) handleFinalResponse(
 	}
 }
 
-// processToolCalls handles the execution of tool calls requested by the LLM.
+// processToolCalls runs the tool calls requested by the LLM and adds the
+// turn and its results to conv.
 func (e *Executor) processToolCalls(
 	ctx context.Context,
-	msgs []ir.LLMMessage,
+	conv *conversation,
 	resp *llmpkg.ChatResponse,
-	iteration int,
-) ([]ir.LLMMessage, bool, error) {
+) {
 	logger.Info(ctx, "LLM requested tool calls",
 		slog.Int("tool_call_count", len(resp.ToolCalls)),
 	)
@@ -705,12 +732,11 @@ func (e *Executor) processToolCalls(
 		}
 	}
 
-	assistantMsg := ir.LLMMessage{
+	conv.add(ir.LLMMessage{
 		Role:      ir.LLMRoleAssistant,
 		Content:   resp.Content,
 		ToolCalls: execToolCalls,
-	}
-	newMsgs := append(msgs, assistantMsg)
+	}, resp.ProviderState)
 
 	// Execute tools
 	toolCallResults := e.toolExecutor.ExecuteToolCalls(ctx, resp.ToolCalls)
@@ -726,7 +752,7 @@ func (e *Executor) processToolCalls(
 		if result.Error != "" {
 			toolMsg.Content = fmt.Sprintf("Error: %s", result.Error)
 		}
-		newMsgs = append(newMsgs, toolMsg)
+		conv.add(toolMsg, nil)
 
 		if tcr.SubRun.DAGRunID != "" {
 			e.collectedSubRuns = append(e.collectedSubRuns, tcr.SubRun)
@@ -734,7 +760,7 @@ func (e *Executor) processToolCalls(
 
 		contentPreview := result.Content
 		if len(contentPreview) > 200 {
-			contentPreview = contentPreview[:200] + "..."
+			contentPreview = stringutil.TruncUTF8Bytes(contentPreview, 200) + "..."
 		}
 		logger.Info(ctx, "Tool execution result",
 			tag.Tool(result.Name),
@@ -742,8 +768,6 @@ func (e *Executor) processToolCalls(
 			slog.String("content_preview", contentPreview),
 		)
 	}
-
-	return newMsgs, false, nil
 }
 
 // handleMaxIterationsReached handles the case where the tool loop hits the limit.
@@ -789,7 +813,7 @@ func (e *Executor) createResponseMetadata(cfg *ir.LLMConfig, usage *llmpkg.Usage
 }
 
 func init() {
-	executor.RegisterExecutor(ir.ExecutorTypeChat, newChatExecutor, nil, registry.ExecutorCapabilities{
+	executor.RegisterExecutor(ir.ExecutorTypeChat, newChatExecutor, validateStep, registry.ExecutorCapabilities{
 		LLM:      true,
 		Messages: true,
 		// All others false - chat doesn't support command, script, shell, container, subdag

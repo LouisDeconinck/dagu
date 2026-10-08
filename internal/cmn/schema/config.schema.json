@@ -243,6 +243,9 @@
       "enum": ["local", "distributed"],
       "default": "local"
     },
+    "signal_handling": {
+      "$ref": "#/definitions/SignalHandlingDef"
+    },
     "tunnel": {
       "$ref": "#/definitions/TunnelDef"
     },
@@ -967,7 +970,7 @@
       "properties": {
         "log_encoding_charset": {
           "type": "string",
-          "description": "Character encoding for log display."
+          "description": "Character encoding for log lines that are not valid UTF-8."
         },
         "navbar_color": {
           "type": "string",
@@ -1277,6 +1280,18 @@
         "stale_threshold": {
           "type": "string",
           "description": "Duration after which a process heartbeat is considered stale. Default: '90s'."
+        }
+      }
+    },
+    "SignalHandlingDef": {
+      "type": "object",
+      "description": "Signal handling options for supervising processes (server, scheduler, start-all).",
+      "additionalProperties": false,
+      "properties": {
+        "enable_propagation": {
+          "type": "boolean",
+          "description": "Forward shutdown signals (SIGINT, SIGTERM) received by a supervising process to the process groups of running DAG-run subprocesses it launched. Default: false.",
+          "default": false
         }
       }
     },

@@ -678,6 +678,9 @@ type dagBuildState struct {
 	spec   *dag
 	result *ir.DAG
 	errs   ir.ErrorList
+	// ownEnv counts the DAG's own env entries before base-config entries are
+	// composed in front of them.
+	ownEnv int
 }
 
 func newDAGBuildState(ctx buildContext, spec *dag) *dagBuildState {
@@ -720,6 +723,7 @@ func (s *dagBuildState) prepareParamEnvStage() {
 
 func (s *dagBuildState) runFieldStages() {
 	s.errs = append(s.errs, runTransformers(s.ctx, s.spec, s.result)...)
+	s.ownEnv = len(s.result.Env)
 }
 
 func (s *dagBuildState) composeInheritedContext() {
@@ -943,6 +947,11 @@ func (s *dagBuildState) capturePresolvedBuildEnv() {
 func (s *dagBuildState) markEnvEvaluated() {
 	s.result.EnvEvaluated = !s.ctx.opts.Has(buildFlagNoEval)
 	s.result.RuntimeResolved = s.ctx.opts.RuntimeResolved || (s.result.EnvEvaluated && len(s.result.Dotenv) == 0)
+	s.result.RootEnvSpan = ir.EnvSpan{}
+	if s.result.EnvEvaluated {
+		end := len(s.result.Env)
+		s.result.RootEnvSpan = ir.EnvSpan{Start: max(end-s.ownEnv, 0), End: end}
+	}
 }
 
 func (s *dagBuildState) finish() (*ir.DAG, error) {
@@ -1198,7 +1207,7 @@ func buildArtifacts(_ buildContext, d *dag) (*ir.ArtifactsConfig, error) {
 	// explicitly.
 	usesScreenAction := dagUsesBuiltinAction(d, browserActionPrefix) || dagUsesBuiltinAction(d, computerActionPrefix)
 	autoEnable := dagReferencesRunArtifactsDir(d) || usesArtifactAction || usesArtifactOutput || usesScreenAction ||
-		dagSavesMailAttachments(d)
+		dagSavesMailAttachments(d) || dagKeepsXlsxArtifact(d)
 
 	if usesArtifactAction && d.Artifacts != nil && d.Artifacts.Enabled != nil && !*d.Artifacts.Enabled {
 		return nil, ir.NewValidationError(
@@ -1274,6 +1283,35 @@ func dagSavesMailAttachments(d *dag) bool {
 		}
 		save, ok := derefForSearch(with.MapIndex(reflect.ValueOf("save_attachments")))
 		return ok && save.Kind() == reflect.Bool && save.Bool()
+	})
+}
+
+// dagKeepsXlsxArtifact reports whether an xlsx writer step may keep its
+// workbook as an artifact: artifact is literally true, or a value
+// reference such as ${params.KEEP} that is only known at run time. Storage
+// is enabled for the reference case so a value that resolves to true does
+// not fail the step.
+func dagKeepsXlsxArtifact(d *dag) bool {
+	return dagDeclaresAction(d, func(action string, with reflect.Value) bool {
+		if !strings.HasPrefix(action, "xlsx.") {
+			return false
+		}
+		with, ok := derefForSearch(with)
+		if !ok || with.Kind() != reflect.Map {
+			return false
+		}
+		keep, ok := derefForSearch(with.MapIndex(reflect.ValueOf("artifact")))
+		if !ok {
+			return false
+		}
+		if keep.Kind() == reflect.Bool {
+			return keep.Bool()
+		}
+		if keep.Kind() == reflect.String {
+			text := keep.String()
+			return cmnvalue.HasValueReference(text) || strings.EqualFold(strings.TrimSpace(text), "true")
+		}
+		return false
 	})
 }
 
@@ -3633,7 +3671,9 @@ func validateNoRouterForChainType(dag *ir.DAG, step *ir.Step) error {
 }
 
 // transformRouterSteps processes router-type steps and injects preconditions
-// into their target steps. It modifies the steps slice in place.
+// into their target steps. Each target gets one precondition per router, met
+// when any route listing that target matches. It modifies the steps slice in
+// place.
 func transformRouterSteps(steps []ir.Step) error {
 	// Build step index for lookup (using pointers to modify in place)
 	stepIndex := make(map[string]*ir.Step)
@@ -3649,41 +3689,43 @@ func transformRouterSteps(steps []ir.Step) error {
 		router := steps[i].Router
 		routerName := steps[i].Name
 
-		// Track targets to detect duplicates across routes
-		seenTargets := make(map[string]string) // target -> first pattern that used it
-
-		// For each route, inject precondition into target steps
+		// Collect each target's patterns in route order
+		var targetNames []string
+		patterns := make(map[string][]string)
 		for _, route := range router.Routes {
 			for _, targetName := range route.Targets {
-				// Check for duplicate target
-				if firstPattern, exists := seenTargets[targetName]; exists {
-					return ir.NewValidationError("routes", targetName,
-						fmt.Errorf("router %q: step %q is targeted by multiple routes (%q and %q); each step can only be a target of one route",
-							routerName, targetName, firstPattern, route.Pattern))
-				}
-				seenTargets[targetName] = route.Pattern
-
-				target, ok := stepIndex[targetName]
-				if !ok {
+				if _, ok := stepIndex[targetName]; !ok {
 					return ir.NewValidationError("routes", targetName,
 						fmt.Errorf("router %q references non-existent step %q", routerName, targetName))
 				}
-
-				// Inject precondition: check if value matches pattern
-				condition := &ir.Condition{
-					Condition: router.Value,
-					Expected:  route.Pattern,
+				if _, seen := patterns[targetName]; !seen {
+					targetNames = append(targetNames, targetName)
 				}
-				target.Preconditions = append(target.Preconditions, condition)
-
-				// Add router as dependency if not already present
-				if !slices.Contains(target.Depends, routerName) {
-					target.Depends = append(target.Depends, routerName)
+				if !slices.Contains(patterns[targetName], route.Pattern) {
+					patterns[targetName] = append(patterns[targetName], route.Pattern)
 				}
-
-				// Enable continueOn.skipped for proper flow
-				target.ContinueOn.Skipped = true
 			}
+		}
+
+		for _, targetName := range targetNames {
+			target := stepIndex[targetName]
+
+			// Inject precondition: check if value matches any of the patterns
+			condition := &ir.Condition{Condition: router.Value}
+			if targetPatterns := patterns[targetName]; len(targetPatterns) == 1 {
+				condition.Expected = targetPatterns[0]
+			} else {
+				condition.ExpectedAny = targetPatterns
+			}
+			target.Preconditions = append(target.Preconditions, condition)
+
+			// Add router as dependency if not already present
+			if !slices.Contains(target.Depends, routerName) {
+				target.Depends = append(target.Depends, routerName)
+			}
+
+			// Enable continueOn.skipped for proper flow
+			target.ContinueOn.Skipped = true
 		}
 
 		// Router itself allows downstream to continue

@@ -3102,6 +3102,51 @@ steps:
 	})
 }
 
+func TestSFTPStepsCarryOnlyTransferConfig(t *testing.T) {
+	// sftp.* steps must not embed DAG-level ssh settings; the executor config
+	// carries only transfer fields so the runtime falls back to the DAG-level
+	// SSH client. Connection keys in `with` remain as an explicit override.
+	yaml := `
+ssh:
+  user: testuser
+  host: example.com
+  key: ~/.ssh/id_rsa
+steps:
+  - name: upload
+    action: sftp.upload
+    with:
+      source: /local/file
+      destination: /remote/file
+  - name: download
+    action: sftp.download
+    with:
+      source: /remote/file
+      destination: /local/file
+      host: override.example.com
+`
+	ctx := context.Background()
+	dag, err := spec.LoadYAML(ctx, []byte(yaml))
+	require.NoError(t, err)
+	require.Len(t, dag.Steps, 2)
+
+	upload := dag.Steps[0]
+	assert.Equal(t, "sftp", upload.ExecutorConfig.Type)
+	assert.Equal(t, map[string]any{
+		"direction":   "upload",
+		"source":      "/local/file",
+		"destination": "/remote/file",
+	}, upload.ExecutorConfig.Config)
+
+	download := dag.Steps[1]
+	assert.Equal(t, "sftp", download.ExecutorConfig.Type)
+	assert.Equal(t, map[string]any{
+		"direction":   "download",
+		"source":      "/remote/file",
+		"destination": "/local/file",
+		"host":        "override.example.com",
+	}, download.ExecutorConfig.Config)
+}
+
 func TestRedisInheritance(t *testing.T) {
 	t.Run("StepInheritsRedisFromDAG", func(t *testing.T) {
 		yaml := `

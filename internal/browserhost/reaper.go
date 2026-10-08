@@ -23,6 +23,15 @@ const (
 	removeRetryDelay = 250 * time.Millisecond
 )
 
+// SweepAll sweeps the browsers steps keep and the browser sessions under the
+// browser data directory.
+func SweepAll(ctx context.Context, browserDataDir string, now time.Time, resumable ResumableFunc) error {
+	return errors.Join(
+		Sweep(ctx, NewStore(browserDataDir), now, resumable),
+		sweepSessions(ctx, NewInteractiveStore(browserDataDir), now),
+	)
+}
+
 // ResumableFunc reports whether a detached session still belongs to a step
 // that can resume it. A nil ResumableFunc treats every unexpired session as
 // resumable.
@@ -54,22 +63,122 @@ func Sweep(ctx context.Context, store *Store, now time.Time, resumable Resumable
 func Release(ctx context.Context, store *Store, record Record) error {
 	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
 	defer cancel()
-	// A browser that did not close keeps its record and files, so a later
-	// sweep can try again.
+	if err := closeOwned(closeCtx, record); err != nil {
+		return err
+	}
+	return store.Delete(record.ID)
+}
+
+// Retire closes the browser of a browser session and deletes the files it
+// owns, but keeps the record, as ended, until keepUntil, so the session's
+// history can still be read. It returns the ended record.
+func Retire(ctx context.Context, store *Store, record Record, keepUntil time.Time) (Record, error) {
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), closeTimeout)
+	defer cancel()
+	if err := closeOwned(closeCtx, record); err != nil {
+		return record, err
+	}
+	ended := Record{
+		ID:          record.ID,
+		State:       StateEnded,
+		Deadline:    keepUntil,
+		Profile:     record.Profile,
+		Interactive: record.Interactive,
+	}
+	return ended, store.Save(ended)
+}
+
+// closeOwned closes the browser described by record and deletes the files
+// it owns. A browser that did not close keeps its files, so a later sweep
+// can try again.
+func closeOwned(ctx context.Context, record Record) error {
 	if record.CDPURL != "" {
-		if err := closeRecordedBrowser(closeCtx, record); err != nil {
+		if err := closeRecordedBrowser(ctx, record); err != nil {
 			return fmt.Errorf("close browser at %s: %w", record.CDPURL, err)
 		}
 	}
 	var errs []error
-	if record.ExtensionDir != "" {
-		errs = append(errs, removeAll(closeCtx, record.ExtensionDir))
+	for _, dir := range []string{record.ExtensionDir, record.WorkDir} {
+		if dir != "" {
+			errs = append(errs, removeAll(ctx, dir))
+		}
 	}
 	if record.OwnsUserDataDir && record.UserDataDir != "" {
-		errs = append(errs, removeAll(closeCtx, record.UserDataDir))
+		errs = append(errs, removeAll(ctx, record.UserDataDir))
 	}
-	errs = append(errs, store.Delete(record.ID))
 	return errors.Join(errs...)
+}
+
+// sweepSessions closes the browsers of browser sessions that went idle past
+// their deadline or whose command process is gone, keeping their history,
+// and removes ended sessions past their retention. A session a command is
+// using is left alone.
+func sweepSessions(ctx context.Context, store *Store, now time.Time) error {
+	records, err := store.List()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, record := range records {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if record.State == StateEnded {
+			if !record.Deadline.IsZero() && now.After(record.Deadline) {
+				errs = append(errs, store.Purge(record.ID))
+			}
+			continue
+		}
+		if sessionAbandoned(record, now) {
+			_, err := RetireAbandoned(ctx, store, record.ID, now)
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// RetireAbandoned retires the browser session id when nothing will use its
+// browser again, unless one of its commands holds it. It reports whether
+// the session was retired.
+func RetireAbandoned(ctx context.Context, store *Store, id string, now time.Time) (bool, error) {
+	// A session in use is left without taking its lock, which a command
+	// starting meanwhile would find held.
+	if record, err := store.Load(id); err != nil || !sessionAbandoned(record, now) {
+		return false, nil
+	}
+	lock := store.SessionLock(id)
+	if err := lock.TryLock(); err != nil {
+		return false, nil
+	}
+	defer func() { _ = lock.Unlock() }()
+	// A command may have renewed the session since it was last read.
+	record, err := store.Load(id)
+	if err != nil || !sessionAbandoned(record, now) {
+		return false, nil
+	}
+	if _, err := Retire(ctx, store, record, now.Add(SessionRetention)); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// sessionAbandoned reports whether nothing will use a browser session's
+// browser again: it waited past its idle deadline, or the command driving
+// it is gone.
+func sessionAbandoned(record Record, now time.Time) bool {
+	switch record.State {
+	case StateInteractive:
+		return !record.Deadline.IsZero() && now.After(record.Deadline)
+	case StateRunning:
+		return !ownerAlive(record)
+	case StateEnded:
+		return false
+	case StateDetached:
+		// Only a step detaches its browser; a session never does.
+		return true
+	default:
+		return true
+	}
 }
 
 // closeRecordedBrowser closes the browser over DevTools. When the browser
@@ -118,12 +227,13 @@ func removeAll(ctx context.Context, dir string) error {
 	return err
 }
 
-// RunReaper sweeps the store until ctx is cancelled.
-func RunReaper(ctx context.Context, store *Store, resumable ResumableFunc) {
+// RunReaper sweeps the browsers steps keep and the browser sessions under
+// the browser data directory until ctx is cancelled.
+func RunReaper(ctx context.Context, browserDataDir string, resumable ResumableFunc) {
 	ticker := time.NewTicker(ReapInterval)
 	defer ticker.Stop()
 	for {
-		_ = Sweep(ctx, store, time.Now(), resumable)
+		_ = SweepAll(ctx, browserDataDir, time.Now(), resumable)
 		select {
 		case <-ctx.Done():
 			return
@@ -141,6 +251,10 @@ func abandoned(ctx context.Context, record Record, now time.Time, resumable Resu
 			return true
 		}
 		return resumable != nil && !resumable(ctx, record)
+	case StateInteractive, StateEnded:
+		// Browser sessions live in their own store; a step's record never
+		// holds these states.
+		return true
 	default:
 		return true
 	}
