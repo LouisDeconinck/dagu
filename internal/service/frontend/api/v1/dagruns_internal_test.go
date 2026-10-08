@@ -1365,29 +1365,34 @@ func TestDAGRunListOptionsFromQueryStringRejectsInvalidStatuses(t *testing.T) {
 	require.Contains(t, apiErr.Message, "invalid status parameter")
 }
 
-func TestDAGRunListOptionsFromQueryStringRejectsInvalidFilters(t *testing.T) {
+func TestValidateDAGRunsListQuery(t *testing.T) {
 	t.Parallel()
 
 	api := &API{}
+	require.NoError(t, api.ValidateDAGRunsListQuery(
+		context.Background(),
+		"fromDate=1700000000&toDate=1700086400&limit=25",
+	))
+
 	cases := []struct {
 		name        string
 		queryString string
 		wantMessage string
 	}{
-		{name: "fromDate", queryString: "fromDate=not-a-timestamp", wantMessage: "invalid fromDate parameter"},
-		{name: "toDate", queryString: "toDate=not-a-timestamp", wantMessage: "invalid toDate parameter"},
-		{name: "limit", queryString: "limit=many", wantMessage: "invalid limit parameter"},
+		{name: "fromDate", queryString: "fromDate=not-a-timestamp", wantMessage: `invalid fromDate parameter: "not-a-timestamp"`},
+		{name: "toDate", queryString: "toDate=not-a-timestamp", wantMessage: `invalid toDate parameter: "not-a-timestamp"`},
+		{name: "limit", queryString: "limit=many", wantMessage: `invalid limit parameter: "many"`},
+		{name: "padded limit", queryString: "limit=10+", wantMessage: `invalid limit parameter: "10 "`},
 		{name: "malformed query", queryString: "fromDate=%zz", wantMessage: "invalid query parameters"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := api.dagRunListOptionsFromQueryString(context.Background(), tc.queryString)
-			require.Error(t, err)
+			err := api.ValidateDAGRunsListQuery(context.Background(), tc.queryString)
 
-			apiErr, ok := err.(*Error)
-			require.True(t, ok)
+			var apiErr *Error
+			require.ErrorAs(t, err, &apiErr)
 			require.Equal(t, http.StatusBadRequest, apiErr.HTTPStatus)
 			require.Equal(t, openapiv1.ErrorCodeBadRequest, apiErr.Code)
 			require.Contains(t, apiErr.Message, tc.wantMessage)
@@ -1418,7 +1423,7 @@ func (invalidCursorDAGRunStore) QueryStatuses(context.Context, persis.DAGRunStat
 	return persis.DAGRunStatusPage{}, fmt.Errorf("%w: filters changed", persis.ErrInvalidDAGRunQueryCursor)
 }
 
-func TestDAGRunListOptionsFromQueryStringParsesDateRange(t *testing.T) {
+func TestDAGRunListQueryParsesDateRange(t *testing.T) {
 	t.Parallel()
 
 	api := &API{}

@@ -4994,24 +4994,14 @@ func (a *API) dagRunListOptionsFromQueryString(ctx context.Context, queryString 
 	if rawFromDate := params.Get("fromDate"); rawFromDate != "" {
 		ts, convErr := strconv.ParseInt(rawFromDate, 10, 64)
 		if convErr != nil {
-			logger.Warn(ctx, "Invalid fromDate parameter", slog.String("fromDate", rawFromDate), tag.Error(convErr))
-			return dagRunListOptions{}, &Error{
-				HTTPStatus: http.StatusBadRequest,
-				Code:       api.ErrorCodeBadRequest,
-				Message:    fmt.Sprintf("invalid fromDate parameter: %s", rawFromDate),
-			}
+			return dagRunListOptions{}, invalidDAGRunListParam(ctx, "fromDate", rawFromDate, convErr)
 		}
 		fromDate = &ts
 	}
 	if rawToDate := params.Get("toDate"); rawToDate != "" {
 		ts, convErr := strconv.ParseInt(rawToDate, 10, 64)
 		if convErr != nil {
-			logger.Warn(ctx, "Invalid toDate parameter", slog.String("toDate", rawToDate), tag.Error(convErr))
-			return dagRunListOptions{}, &Error{
-				HTTPStatus: http.StatusBadRequest,
-				Code:       api.ErrorCodeBadRequest,
-				Message:    fmt.Sprintf("invalid toDate parameter: %s", rawToDate),
-			}
+			return dagRunListOptions{}, invalidDAGRunListParam(ctx, "toDate", rawToDate, convErr)
 		}
 		toDate = &ts
 	}
@@ -5037,12 +5027,7 @@ func (a *API) dagRunListOptionsFromQueryString(ctx context.Context, queryString 
 	if rawLimit := params.Get("limit"); rawLimit != "" {
 		parsed, convErr := strconv.Atoi(rawLimit)
 		if convErr != nil {
-			logger.Warn(ctx, "Invalid limit parameter", slog.String("limit", rawLimit), tag.Error(convErr))
-			return dagRunListOptions{}, &Error{
-				HTTPStatus: http.StatusBadRequest,
-				Code:       api.ErrorCodeBadRequest,
-				Message:    fmt.Sprintf("invalid limit parameter: %s", rawLimit),
-			}
+			return dagRunListOptions{}, invalidDAGRunListParam(ctx, "limit", rawLimit, convErr)
 		}
 		limit = &parsed
 	}
@@ -5081,6 +5066,15 @@ func toCoreStatuses(statuses *api.StatusList) []ir.Status {
 		result = append(result, ir.Status(status))
 	}
 	return result
+}
+
+func invalidDAGRunListParam(ctx context.Context, name, value string, err error) *Error {
+	logger.Warn(ctx, "Invalid "+name+" parameter", slog.String(name, value), tag.Error(err))
+	return &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Code:       api.ErrorCodeBadRequest,
+		Message:    fmt.Sprintf("invalid %s parameter: %q", name, value),
+	}
 }
 
 func parseStatusListQueryValues(ctx context.Context, rawValues []string) (api.StatusList, error) {
