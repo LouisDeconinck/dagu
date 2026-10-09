@@ -119,10 +119,27 @@ func (p corsPolicy) originWarnings() []string {
 	var warnings []string
 	for _, entry := range p.allowedOrigins {
 		if problem := allowedOriginProblem(entry); problem != "" {
-			warnings = append(warnings, fmt.Sprintf("cors_allowed_origins entry %q %s", entry, problem))
+			warnings = append(warnings, fmt.Sprintf("cors_allowed_origins entry %q %s",
+				redactOriginUserinfo(entry), problem))
 		}
 	}
 	return warnings
+}
+
+// redactOriginUserinfo masks everything between the scheme and the last "@",
+// so credentials put in an entry by mistake are not logged. It works on the
+// raw string because the entries it reports are often not parseable URLs, and
+// it masks generously rather than risk printing part of a secret.
+func redactOriginUserinfo(entry string) string {
+	start := 0
+	if i := strings.Index(entry, "://"); i >= 0 {
+		start = i + len("://")
+	}
+	at := strings.LastIndex(entry[start:], "@")
+	if at < 0 {
+		return entry
+	}
+	return entry[:start] + "xxxxx" + entry[start+at:]
 }
 
 // allowedOriginProblem explains how allowsOrigin treats entry differently

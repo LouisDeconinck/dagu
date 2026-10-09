@@ -354,7 +354,6 @@ func TestCORSPolicy_OriginWarnings(t *testing.T) {
 		{origin: "https://*.example.com:443", want: wildcardWarning},
 		{origin: "app.example.com", want: invalidWarning},
 		{origin: "ftp://app.example.com", want: invalidWarning},
-		{origin: "https://user@app.example.com", want: invalidWarning},
 		{origin: "null", want: invalidWarning},
 	}
 	for _, tt := range tests {
@@ -369,6 +368,27 @@ func TestCORSPolicy_OriginWarnings(t *testing.T) {
 			require.Len(t, warnings, 1)
 			assert.Contains(t, warnings[0], tt.origin)
 			assert.Contains(t, warnings[0], tt.want)
+		})
+	}
+}
+
+// Credentials put in an entry by mistake must not reach the startup log.
+func TestCORSPolicy_OriginWarningsRedactCredentials(t *testing.T) {
+	t.Parallel()
+
+	for _, origin := range []string{
+		"https://user:secret@app.example.com",
+		"https://secret@app.example.com/admin",
+		"https://user:secret@*.example.com",
+		"user:secret@app.example.com",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			t.Parallel()
+
+			warnings := corsPolicy{allowedOrigins: []string{origin}}.originWarnings()
+			require.Len(t, warnings, 1)
+			assert.NotContains(t, warnings[0], "secret")
+			assert.Contains(t, warnings[0], "example.com")
 		})
 	}
 }
