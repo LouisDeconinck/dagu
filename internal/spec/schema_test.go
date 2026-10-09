@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -238,6 +239,34 @@ func TestLoadSchemaFromURLUsesIsolatedHTTPClient(t *testing.T) {
 	data, err := loadSchemaFromURL(server.URL + "/schema.json")
 	require.NoError(t, err)
 	assert.Equal(t, `{"type":"object"}`, string(data))
+}
+
+// The schema client is built from http.DefaultTransport, so a fake transport
+// stands in for an HTTPS host that redirects to plain HTTP.
+func TestLoadSchemaFromURLRefusesHTTPSDowngrade(t *testing.T) {
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Scheme == "https" {
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"http://schema.test/schema.json"}},
+				Body:       http.NoBody,
+				Request:    req,
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"type":"object"}`)),
+			Request:    req,
+		}, nil
+	})
+	t.Cleanup(func() {
+		http.DefaultTransport = originalTransport
+	})
+
+	_, err := loadSchemaFromURL("https://schema.test/schema.json")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "redirect from https to http")
 }
 
 func TestLoadSchemaFromFile(t *testing.T) {
