@@ -872,11 +872,15 @@ func (srv *Server) Serve(ctx context.Context) error {
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeadersMiddleware(srv.config.Server.TLS != nil))
 	r.Use(ipAccessPolicy.middleware)
-	r.Use(corsPolicy{
+	crossOriginPolicy := corsPolicy{
 		allowedOrigins: srv.config.Server.CORSAllowedOrigins,
 		publicURL:      srv.config.Server.PublicURL,
 		setupPath:      path.Join(apiV1BasePath, "auth/setup"),
-	}.middleware)
+	}
+	for _, warning := range crossOriginPolicy.originWarnings() {
+		logger.Warn(ctx, warning)
+	}
+	r.Use(crossOriginPolicy.middleware)
 	r.Use(middleware.RedirectSlashes)
 
 	if err := srv.setupRoutes(ctx, r); err != nil {
