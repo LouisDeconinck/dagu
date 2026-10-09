@@ -223,6 +223,37 @@ func TestRegisterDedicatedSSEFetchersKeepsDAGsListPollingWithoutAppStream(t *tes
 	}, time.Second, 10*time.Millisecond)
 }
 
+// An invalid dag-run filter must be reported to the client when subscribing
+// rather than retried by the poller in the background.
+func TestSSERejectsInvalidDAGRunsTopic(t *testing.T) {
+	t.Parallel()
+
+	mux := sse.NewMultiplexer(sse.StreamConfig{HeartbeatInterval: time.Hour}, nil)
+	t.Cleanup(mux.Shutdown)
+
+	srv := &Server{apiV1: &apiv1.API{}}
+	srv.registerDedicatedSSEFetchers(mux)
+
+	var fetches atomic.Int64
+	mux.RegisterFetcher(sse.TopicTypeDAGRuns, func(context.Context, string) (any, error) {
+		fetches.Add(1)
+		return map[string]any{}, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v1/events/stream?topic="+url.QueryEscape("dagruns:fromDate=abc"),
+		nil,
+	).WithContext(ctx)
+	recorder := httptest.NewRecorder()
+	sse.NewMultiplexHandler(mux, nil).HandleStream(recorder, req)
+
+	assert.Zero(t, fetches.Load())
+	assert.Contains(t, recorder.Body.String(), `"code":"invalid_topic"`)
+}
+
 func TestDAGFileChangeWakesDAGsListSSETopic(t *testing.T) {
 	t.Parallel()
 

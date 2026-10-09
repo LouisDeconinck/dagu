@@ -37,7 +37,7 @@ func (e *harnessExecutor) runManagedOpenCode(
 	cfg providerConfig,
 	host opencodehost.Config,
 ) (*os.File, error) {
-	client := &openCodeClient{host: host, directory: e.workDir, http: &http.Client{Timeout: 30 * time.Second}}
+	client := &openCodeClient{host: host, directory: e.workDir, http: newOpenCodeHTTPClient(30 * time.Second)}
 	e.mu.Lock()
 	e.managedHost = host
 	e.hasDeterminedStatus = false
@@ -352,7 +352,7 @@ func managedFileParts(workDir string, value any) ([]map[string]any, error) {
 		if total > maxManagedAttachmentRawBytes {
 			return nil, fmt.Errorf("managed OpenCode attachments exceed the %d MiB limit", maxManagedAttachmentRawBytes/(1024*1024))
 		}
-		mediaType := mime.TypeByExtension(filepath.Ext(path))
+		mediaType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
 		if mediaType == "" {
 			mediaType = http.DetectContentType(data)
 		}

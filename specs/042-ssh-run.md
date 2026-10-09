@@ -24,6 +24,9 @@ Workflow authors can validate an SSH command before connecting to its host.
 The command follows [Spec 014: Step Run Command](014-step-run-command.md).
 `dagu validate` accepts a configured SSH action without contacting the host or
 requiring its private key to exist locally.
+DAG-level `ssh` supplies connection defaults for `ssh.run`. Its string fields
+resolve Dagu-owned references as defined by
+[Spec 003: Value Resolution](003-value-resolution.md).
 
 ## Errors
 

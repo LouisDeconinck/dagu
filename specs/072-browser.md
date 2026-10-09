@@ -47,6 +47,12 @@ Each operation sets exactly one of:
 - `screenshot`: a name; the page is saved as a PNG run artifact.
 - `ask`: `{prompt, as, timeout}` waits for a person's answer (see Human input).
 
+A `goto`, or an `act` performed or replayed, ends once the page settles, so the
+next operation reads what it brought: a page it loaded waits until its network
+is idle, and a page it changed in place until its requests end and it stops
+changing for half a second. A page that has not settled after five seconds is
+read as it is.
+
 Any operation may set `when`, a condition checked once before the operation;
 the operation is skipped unless it holds. Any operation may set `timeout`, a
 duration such as `30s`; the default is two minutes. A browser that stops
@@ -186,9 +192,17 @@ the timeline and the step log after the operation that opened it.
 With `with.cache` true (the default), a successful `act` records the actions it
 performed. A later run of the same step on the same host replays them without a
 model request when the operation position, instruction, and page URL without
-query or fragment match. When a replay fails, the step asks the model again and
-records the new actions. `act.cache: false` disables the cache for one
-operation.
+query or fragment match. When a replay fails, the step asks the model again.
+If the step succeeds, the model's new actions replace the recording; an act
+that records no actions, such as one whose click loaded a new document before
+it reported back, removes the recording instead, unless another run of the step
+replaced it first. A replay fails when a recorded element is gone or is on the
+page but not visible, such as a field in a closed dialog. `act.cache: false`
+disables the cache for one operation.
+
+Runs of a step share its recordings, and each `act` reads them when it runs. A
+recording that another run of the step replaced or removed meanwhile, such as
+an earlier `foreach` item waiting for the same profile, is not replayed.
 
 The cache covers `act` only. `extract` and model-judged conditions make model
 requests on every run. A replay that finds an element at the recorded location
@@ -202,12 +216,15 @@ also clears its cache; removing only older runs keeps it. Each clears the cache
 on its own host only. After a clear, the next run of the step makes a model
 request and records again.
 
+`dagu browser session export` writes the recordings of the acts a browser
+session ran for a step that has not run yet (Spec 079).
+
 ### Profiles
 
 `browser.profile` names a persistent browser profile kept on the executing
 host. Cookies and storage survive across runs on that host. Runs that use the
 same profile run one at a time; a run fails immediately when another run
-waiting for input holds the profile.
+waiting for input, or a browser session (Spec 079), holds the profile.
 
 ### Human input
 
@@ -234,6 +251,13 @@ appear before the timeout, a download does not finish, the page leaves the
 allowed domains, the browser stops responding, or the browser cannot be
 started. When an `act` fails because its model chose no element, the error
 names the model, since some models give that answer for every request.
+
+The browser can lose its connection to the page before an `act` or a replay
+reports back, as when a click loads a new page. The step then checks the page
+instead of acting blindly, which could submit a form twice: a new document
+means the action took effect, and the step goes on; the same document means it
+did not, and the act runs once more. Losing the page again, or a page that
+cannot be read, fails the step.
 
 ## Examples
 

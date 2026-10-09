@@ -97,12 +97,14 @@ func (e Context) AllEnvs() []string {
 	return e.EnvScope.ToSlice()
 }
 
-// InheritedEnvs returns values passed to a child before its profile is resolved.
-func (e Context) InheritedEnvs() []string {
+// InheritedEnvs returns values passed to a child before its profile is
+// resolved. Each entry keeps the source and origin it holds in this run's
+// scope so the child can still recognise secrets, params, and host values.
+func (e Context) InheritedEnvs() []cmnvalue.EnvEntry {
 	if e.EnvScope == nil {
 		return nil
 	}
-	return e.EnvScope.ToSliceWithoutOrigin(runtimeProfileOrigin)
+	return e.EnvScope.EntriesWithoutOrigin(runtimeProfileOrigin)
 }
 
 // PassableEnvs returns the run's own environment values, excluding secrets,
@@ -141,6 +143,7 @@ type contextOptions struct {
 	params             []string
 	defaultEnvs        []string
 	envs               []string
+	inheritedEnvs      []cmnvalue.EnvEntry
 	defaultSecretEnvs  []string
 	secretEnvs         []string
 	profileDefaults    []string
@@ -251,6 +254,16 @@ func WithDefaultEnvVars(envs ...string) ContextOption {
 func WithEnvVars(envs ...string) ContextOption {
 	return func(o *contextOptions) {
 		o.envs = append(o.envs, envs...)
+	}
+}
+
+// WithInheritedEnvs sets environment entries a child run inherits from the
+// parent run scope. They enter at ambient precedence, just above the process
+// environment, so every value the run declares or resolves for itself wins on
+// conflict. Each entry keeps the source it held in the parent scope.
+func WithInheritedEnvs(entries []cmnvalue.EnvEntry) ContextOption {
+	return func(o *contextOptions) {
+		o.inheritedEnvs = append(o.inheritedEnvs, entries...)
 	}
 }
 
@@ -398,16 +411,20 @@ func NewContext(
 	profileSelected := stringutil.KeyValuesToMap(options.profileSelected)
 	profileSelectedSecrets := stringutil.KeyValuesToMap(options.profileSelectedSec)
 
-	baseForDAGEnv := make(map[string]string)
-	maps.Copy(baseForDAGEnv, profileDefaults)
-	maps.Copy(baseForDAGEnv, profileDefaultSecrets)
-	maps.Copy(baseForDAGEnv, defaultEnvs)
-	maps.Copy(baseForDAGEnv, defaultSecretEnvs)
+	// Run-scoped values exist only once the run is set up, so loading never saw them.
+	runScoped := make(map[string]string)
+	maps.Copy(runScoped, profileDefaults)
+	maps.Copy(runScoped, profileDefaultSecrets)
+	maps.Copy(runScoped, defaultEnvs)
+	maps.Copy(runScoped, defaultSecretEnvs)
+	maps.Copy(runScoped, managedEnvs)
+
+	baseForDAGEnv := maps.Clone(runScoped)
 	maps.Copy(baseForDAGEnv, params)
 	maps.Copy(baseForDAGEnv, managedEnvs)
 
 	runBuiltinContext := buildDAGRunBuiltinContext(dag, dagRunID, managedEnvs, options)
-	evaluatedDAGEnvs := evaluateDAGEnvRuntime(ctx, dag, params, baseForDAGEnv, managedEnvs, runBuiltinContext)
+	evaluatedDAGEnvs := evaluateDAGEnvRuntime(ctx, dag, params, baseForDAGEnv, runScoped, managedEnvs, runBuiltinContext)
 
 	secretEnvs := stringutil.KeyValuesToMap(options.secretEnvs)
 
@@ -416,11 +433,17 @@ func NewContext(
 	// subprocesses stay isolated from arbitrary host env inherited by parent-
 	// spawned dagu start/retry/restart commands.
 	// Precedence (highest to lowest): secrets > managed run env >
-	// execution env > DAG env > params > defaults > BaseEnv.
+	// execution env > DAG env > params > defaults > inherited parent env >
+	// BaseEnv.
 	scope := cmnvalue.NewEnvScope(nil, false)
 	if baseEnv := config.GetBaseEnv(ctx); baseEnv != nil {
 		scope = scope.WithEntries(stringutil.KeyValuesToMap(baseEnv.AsSlice()), cmnvalue.EnvSourceOS)
 	}
+	// An in-process child run observes the parent run scope as its ambient
+	// environment. The layer sits just above the process environment so the
+	// values the step passed as the child's own params, and everything else
+	// the child declares or resolves, win on conflict.
+	scope = scope.WithEnvEntries(options.inheritedEnvs)
 	scope = scope.WithEntriesOrigin(profileDefaults, cmnvalue.EnvSourceDAGEnv, runtimeProfileOrigin)
 	scope = scope.WithEntriesOrigin(profileDefaultSecrets, cmnvalue.EnvSourceSecret, runtimeProfileOrigin)
 	scope = scope.WithEntries(defaultEnvs, cmnvalue.EnvSourceDAGEnv)
@@ -454,6 +477,7 @@ func evaluateDAGEnvRuntime(
 	dag *ir.DAG,
 	runtimeParams map[string]string,
 	base map[string]string,
+	runScoped map[string]string,
 	protected map[string]string,
 	runBuiltinContext cmnvalue.BuiltinContext,
 ) map[string]string {
@@ -477,16 +501,23 @@ func evaluateDAGEnvRuntime(
 		return nil
 	}
 
-	// DAG env is primarily evaluated during DAG loading. This runtime pass only
-	// resolves values that depend on run-scoped variables unavailable at load time.
+	// Loading already resolved the DAG's own root env entries, so they only
+	// complete references to run-scoped values; their inserted text stays literal.
+	// Base-config entries before them and entries added for the run after them
+	// get the full runtime pass.
+	span := dag.RootEnvSpan
+	if span.Start < 0 || span.End > len(envList) || span.Start > span.End {
+		span = ir.EnvSpan{}
+	}
 	result := make(map[string]string, len(envList))
 	scope := cmnvalue.NewEnvScope(nil, false)
 	if baseEnv := config.GetBaseEnv(ctx); baseEnv != nil {
 		scope = scope.WithEntries(stringutil.KeyValuesToMap(baseEnv.AsSlice()), cmnvalue.EnvSourceOS)
 	}
 	scope = scope.WithEntries(base, cmnvalue.EnvSourceDAGEnv)
+	completionScope := cmnvalue.NewEnvScope(nil, false).WithEntries(runScoped, cmnvalue.EnvSourceDAGEnv)
 
-	for _, entry := range envList {
+	for i, entry := range envList {
 		key, value, found := strings.Cut(entry, "=")
 		if !found {
 			continue
@@ -495,13 +526,28 @@ func evaluateDAGEnvRuntime(
 			continue
 		}
 
-		resolver := cmnvalue.NewResolver(
-			cmnvalue.StaticScope{Params: paramDeclarations},
-			cmnvalue.RuntimeScope{Params: params, ParamsJSON: paramsJSON, Env: scope, BuiltinContext: runBuiltinContext},
-		)
-		evaluated, err := resolver.String(ctx, value, cmnvalue.RuntimeDAGEnvField("env."+key))
+		var resolver cmnvalue.Resolver
+		var field cmnvalue.Field
+		if i >= span.Start && i < span.End {
+			resolver = cmnvalue.NewResolver(
+				cmnvalue.StaticScope{},
+				cmnvalue.RuntimeScope{Env: completionScope, BuiltinContext: runBuiltinContext},
+			)
+			field = cmnvalue.DAGEnvCompletionField("env." + key)
+		} else {
+			resolver = cmnvalue.NewResolver(
+				cmnvalue.StaticScope{Params: paramDeclarations},
+				cmnvalue.RuntimeScope{Params: params, ParamsJSON: paramsJSON, Env: scope, BuiltinContext: runBuiltinContext},
+			)
+			field = cmnvalue.RuntimeDAGEnvField("env." + key)
+		}
+		evaluated, err := resolver.String(ctx, value, field)
 		if err != nil {
 			evaluated = value
+		}
+		// Loading did not see base-config entries, so the DAG's own entries may still refer to them.
+		if i < span.Start {
+			completionScope = completionScope.WithEntry(key, evaluated, cmnvalue.EnvSourceDAGEnv)
 		}
 		result[key] = evaluated
 		scope = scope.WithEntry(key, evaluated, cmnvalue.EnvSourceDAGEnv)

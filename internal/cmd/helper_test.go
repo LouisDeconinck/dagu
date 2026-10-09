@@ -98,6 +98,36 @@ func TestRestoreDAGFromStatus_SMTP(t *testing.T) {
 	}
 }
 
+// TestExtractDAGNameYAMLCase verifies mixed-case YAML paths return authored DAG metadata names.
+func TestExtractDAGNameYAMLCase(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		file string
+		dag  string
+	}{
+		{name: "YAML", file: "FLOW.YAML", dag: "authored-yaml"},
+		{name: "Yml", file: "flow.Yml", dag: "authored-yml"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dagsDir := t.TempDir()
+			path := filepath.Join(dagsDir, tc.file)
+			require.NoError(t, os.WriteFile(path, []byte(fmt.Sprintf("name: %s\nsteps: []\n", tc.dag)), 0600))
+
+			cfg := &config.Config{}
+			cfg.Paths.DAGsDir = dagsDir
+			ctx := &Context{Context: context.Background(), Config: cfg}
+
+			name, err := extractDAGName(ctx, path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.dag, name)
+		})
+	}
+}
+
 func TestRestoreLegacyChildSMTP(t *testing.T) {
 	t.Parallel()
 

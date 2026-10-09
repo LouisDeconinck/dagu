@@ -11,9 +11,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 
 	"github.com/dagucloud/dagu/v2/internal/llm"
+	"github.com/dagucloud/dagu/v2/internal/llm/claudemodel"
 )
 
 const (
@@ -73,8 +75,19 @@ func (p *Provider) Chat(ctx context.Context, req *llm.ChatRequest) (*llm.ChatRes
 	}
 	defer func() { _ = respBody.Close() }()
 
+	data, err := io.ReadAll(respBody)
+	if err != nil {
+		return nil, llm.WrapError(providerName, fmt.Errorf("failed to read response: %w", err))
+	}
 	var resp messagesResponse
-	if err := json.NewDecoder(respBody).Decode(&resp); err != nil {
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, llm.WrapError(providerName, fmt.Errorf("failed to decode response: %w", err))
+	}
+	// The raw content array is kept so the turn can be sent back unchanged.
+	var raw struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, llm.WrapError(providerName, fmt.Errorf("failed to decode response: %w", err))
 	}
 
@@ -111,6 +124,9 @@ func (p *Provider) Chat(ctx context.Context, req *llm.ChatRequest) (*llm.ChatRes
 			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
 		},
 		ToolCalls: toolCalls,
+	}
+	if len(resp.Content) > 0 {
+		result.ProviderState = &llm.ProviderState{Provider: llm.ProviderAnthropic, Data: raw.Content}
 	}
 
 	return result, nil
@@ -192,14 +208,17 @@ func (p *Provider) buildRequestBody(req *llm.ChatRequest, stream bool) ([]byte, 
 
 	// Add tool choice if specified
 	if req.ToolChoice != "" {
-		switch req.ToolChoice {
-		case "auto":
+		forced := forcedToolChoiceSupported(req)
+		switch {
+		case req.ToolChoice == "auto":
 			chatReq.ToolChoice = map[string]string{"type": "auto"}
-		case "required":
-			chatReq.ToolChoice = map[string]string{"type": "any"}
-		case "none":
+		case req.ToolChoice == "none":
 			// Don't include tools
 			chatReq.Tools = nil
+		case !forced:
+			chatReq.ToolChoice = map[string]string{"type": "auto"}
+		case req.ToolChoice == "required":
+			chatReq.ToolChoice = map[string]string{"type": "any"}
 		default:
 			// Specific tool name
 			chatReq.ToolChoice = map[string]string{"type": "tool", "name": req.ToolChoice}
@@ -250,7 +269,7 @@ func (p *Provider) processMessages(reqMessages []llm.Message) (string, []message
 	var systemContent string
 	messages := make([]message, 0, len(reqMessages))
 
-	for _, m := range reqMessages {
+	for i, m := range reqMessages {
 		switch m.Role {
 		case llm.RoleSystem:
 			// Concatenate system messages
@@ -264,6 +283,12 @@ func (p *Provider) processMessages(reqMessages []llm.Message) (string, []message
 				Content: userContent(m),
 			})
 		case llm.RoleAssistant:
+			if state := m.ProviderState; state != nil && state.Provider == llm.ProviderAnthropic {
+				// The turn goes back as produced, keeping thinking blocks
+				// and their order intact.
+				messages = append(messages, message{Role: "assistant", Content: state.Data})
+				continue
+			}
 			// Check if this assistant message has tool calls
 			if len(m.ToolCalls) > 0 {
 				// Convert to content blocks with tool_use
@@ -301,16 +326,20 @@ func (p *Provider) processMessages(reqMessages []llm.Message) (string, []message
 			}
 		case llm.RoleTool:
 			// Tool results in Anthropic are sent as user messages with tool_result content blocks
-			contentBlocks := []any{
-				map[string]any{
-					"type":        "tool_result",
-					"tool_use_id": m.ToolCallID,
-					"content":     m.Content,
-				},
+			result := map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": m.ToolCallID,
+				"content":     m.Content,
+			}
+			// Results of one turn's calls share a single user message.
+			if i > 0 && reqMessages[i-1].Role == llm.RoleTool {
+				last := &messages[len(messages)-1]
+				last.Content = append(last.Content.([]any), result)
+				continue
 			}
 			messages = append(messages, message{
 				Role:    "user",
-				Content: contentBlocks,
+				Content: []any{result},
 			})
 		}
 	}
@@ -351,33 +380,32 @@ func (p *Provider) convertTools(tools []llm.Tool) []any {
 
 	result := make([]any, len(tools))
 	for i, t := range tools {
-		// Extract properties and required from the Parameters schema
-		var props map[string]any
-		var required []string
-		if t.Function.Parameters != nil {
-			if p, ok := t.Function.Parameters["properties"].(map[string]any); ok {
-				props = p
-			}
-			if r, ok := t.Function.Parameters["required"].([]any); ok {
-				required = make([]string, len(r))
-				for j, v := range r {
-					if s, ok := v.(string); ok {
-						required[j] = s
-					}
-				}
-			}
-		}
 		result[i] = tool{
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
-			InputSchema: inputSchema{
-				Type:       "object",
-				Properties: props,
-				Required:   required,
-			},
+			InputSchema: inputSchema(t.Function.Parameters),
 		}
 	}
 	return result
+}
+
+// inputSchema returns a tool's parameter schema as an object schema, the only
+// kind the API accepts, without modifying the caller's map.
+func inputSchema(parameters map[string]any) map[string]any {
+	schema := maps.Clone(parameters)
+	if schema == nil {
+		schema = make(map[string]any, 1)
+	}
+	schema["type"] = "object"
+	return schema
+}
+
+// forcedToolChoiceSupported reports whether a request may force tool use.
+// The API rejects a forced choice while thinking is enabled, and on models
+// that do not accept one at all.
+func forcedToolChoiceSupported(req *llm.ChatRequest) bool {
+	thinking := req.Thinking != nil && req.Thinking.Enabled
+	return !thinking && claudemodel.ForcedToolChoiceSupported(req.Model)
 }
 
 // getThinkingBudget determines the token budget for thinking mode.
@@ -419,6 +447,7 @@ func (p *Provider) streamResponse(ctx context.Context, body io.ReadCloser, event
 	defer func() { _ = body.Close() }()
 
 	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	var usage *llm.Usage
 
 	for scanner.Scan() {
@@ -505,15 +534,9 @@ type message struct {
 
 // Tool calling types
 type tool struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description,omitempty"`
-	InputSchema inputSchema `json:"input_schema"`
-}
-
-type inputSchema struct {
-	Type       string         `json:"type"` // always "object"
-	Properties map[string]any `json:"properties,omitempty"`
-	Required   []string       `json:"required,omitempty"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	InputSchema map[string]any `json:"input_schema"`
 }
 
 type messagesRequest struct {

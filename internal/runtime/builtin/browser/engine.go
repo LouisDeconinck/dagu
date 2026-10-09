@@ -6,8 +6,13 @@ package browser
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
+
+// errPageSessionLost reports an operation whose connection to the page went
+// away before it reported back, as when a click loads a new document.
+var errPageSessionLost = errors.New("the browser lost its connection to the page")
 
 // launcher starts or reattaches browser sessions.
 type launcher interface {
@@ -20,10 +25,19 @@ type launcher interface {
 // engine drives one browser session.
 type engine interface {
 	Goto(ctx context.Context, url string, timeout time.Duration) error
+	// Act performs one action described in natural language. Its error wraps
+	// errPageSessionLost when the connection to the page went away before
+	// the act reported back; the act may or may not have taken effect.
 	Act(ctx context.Context, instruction string, variables map[string]string, timeout time.Duration) (actOutcome, error)
-	// Replay performs recorded actions without a model call and reports
-	// whether every action succeeded.
-	Replay(ctx context.Context, actions []recordedAction, variables map[string]string, timeout time.Duration) (bool, error)
+	// Replay performs one recorded action without a model call and reports
+	// whether it succeeded. An action whose element is not visible is not
+	// performed and does not succeed. Its error wraps errPageSessionLost when
+	// the connection to the page went away before the action reported back;
+	// the action may or may not have taken effect.
+	Replay(ctx context.Context, action recordedAction, variables map[string]string, timeout time.Duration) (bool, error)
+	// DocumentID identifies the document the active page shows. It changes
+	// whenever the page loads a new document.
+	DocumentID(ctx context.Context) (string, error)
 	Extract(ctx context.Context, instruction string, schema json.RawMessage, timeout time.Duration) (json.RawMessage, error)
 	WaitForSelector(ctx context.Context, selector string, timeout time.Duration) error
 	Screenshot(ctx context.Context) ([]byte, error)
@@ -33,6 +47,9 @@ type engine interface {
 	// SelectorVisible reports whether a CSS selector matches a visible
 	// element.
 	SelectorVisible(ctx context.Context, selector string) (bool, error)
+	// Snapshot returns the active page's accessibility tree, the one an act
+	// shows the model, without a model call.
+	Snapshot(ctx context.Context) (pageSnapshot, error)
 	// WaitForDownloads returns the names of downloads completed since the
 	// previous call, after allowing grace for one to begin and waiting up to
 	// timeout for running ones to finish.
@@ -72,6 +89,24 @@ type browserHandle struct {
 	ExtensionDir string
 	// BrowserPID is the browser process ID, or zero when it is unknown.
 	BrowserPID int
+	// BrowserStartedAt is the browser process start time in Unix
+	// milliseconds, or zero when it is unknown. With BrowserPID it tells the
+	// browser apart from a later process that reuses its ID.
+	BrowserStartedAt int64
+}
+
+// pageSnapshot is the accessibility tree of a page.
+type pageSnapshot struct {
+	// Tree has one node per line, "[id] role: name", indented two spaces
+	// per level.
+	Tree string
+	// URLs maps the IDs of link nodes to the absolute addresses they link
+	// to.
+	URLs map[string]string
+	// XPaths maps the IDs of nodes to the XPaths that find them on the page.
+	XPaths map[string]string
+	URL    string
+	Title  string
 }
 
 // dialog is a JavaScript dialog the browser accepted.

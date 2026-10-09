@@ -30,8 +30,8 @@ Flags:
       --dry-run       Preview what would be deleted without deleting
 
 Active runs are never deleted from history. Deleting all history also clears
-the replay cache of the DAG's browser steps on this host. Definition deletion
-is refused while the DAG has alive processes.
+the replay caches of the DAG's browser and computer steps on this host.
+Definition deletion is refused while the DAG has alive processes.
 
 With --definition, identify the DAG by filename, stem, or configured path.
 
@@ -240,10 +240,14 @@ func previewRm(ctx *Context, opts rmOptions) error {
 	return nil
 }
 
-// removesReplayCaches reports whether rm deletes all of the DAG's history,
-// which also clears the replay caches of its browser and computer steps.
+// removesReplayCaches reports whether the command deletes all of the DAG's
+// history, which also clears the replay caches of its browser and computer
+// steps. A nil retention (rm) and a retention of zero days (cleanup's
+// default) both mean all history. A positive retention or an older-than
+// filter keeps the caches.
 func removesReplayCaches(opts rmOptions) bool {
-	return opts.deleteHist && opts.retentionDays == nil && opts.olderThan == ""
+	allHistory := opts.retentionDays == nil || *opts.retentionDays == 0
+	return opts.deleteHist && opts.olderThan == "" && allHistory
 }
 
 func removeHistory(ctx *Context, opts rmOptions) ([]string, error) {

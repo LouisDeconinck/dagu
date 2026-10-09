@@ -348,9 +348,10 @@ func TestLoad_Env(t *testing.T) {
 			HealthPort: 50101,
 		},
 		Worker: Worker{
-			ID:            "test-worker-123",
-			MaxActiveRuns: 200,
-			HealthPort:    50102,
+			ID:              "test-worker-123",
+			MaxActiveRuns:   200,
+			HealthPort:      50102,
+			ShutdownTimeout: 60 * time.Second,
 			PostgresPool: PostgresPoolConfig{
 				MaxOpenConns:    25,
 				MaxIdleConns:    5,
@@ -427,6 +428,55 @@ worker:
 
 	assert.Zero(t, cfg.Coordinator.HealthPort)
 	assert.Zero(t, cfg.Worker.HealthPort)
+}
+
+func TestLoad_WorkerShutdownTimeout(t *testing.T) {
+	t.Run("Default", func(t *testing.T) {
+		cfg := loadFromYAML(t, "# empty")
+		assert.Equal(t, 60*time.Second, cfg.Worker.ShutdownTimeout)
+	})
+
+	t.Run("FromYAML", func(t *testing.T) {
+		cfg := loadFromYAML(t, `
+worker:
+  shutdown_timeout: 5m
+`)
+		assert.Equal(t, 5*time.Minute, cfg.Worker.ShutdownTimeout)
+	})
+
+	t.Run("ZeroDisablesBound", func(t *testing.T) {
+		cfg := loadFromYAML(t, `
+worker:
+  shutdown_timeout: 0
+`)
+		assert.Zero(t, cfg.Worker.ShutdownTimeout)
+	})
+
+	t.Run("FromEnv", func(t *testing.T) {
+		cfg := loadWithEnv(t, "# empty", map[string]string{
+			"DAGU_WORKER_SHUTDOWN_TIMEOUT": "45s",
+		})
+		assert.Equal(t, 45*time.Second, cfg.Worker.ShutdownTimeout)
+	})
+
+	t.Run("InvalidFallsBackToDefault", func(t *testing.T) {
+		cfg := loadFromYAML(t, `
+worker:
+  shutdown_timeout: soon
+`)
+		assert.Equal(t, 60*time.Second, cfg.Worker.ShutdownTimeout)
+		require.NotEmpty(t, cfg.Warnings)
+		assert.Contains(t, cfg.Warnings[len(cfg.Warnings)-1], "Invalid worker.shutdown_timeout value: soon")
+	})
+
+	t.Run("NegativeIsRejected", func(t *testing.T) {
+		err := loadWithErrorFromYAML(t, `
+worker:
+  shutdown_timeout: -1s
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "worker.shutdown_timeout must be >= 0")
+	})
 }
 
 func TestLoad_WithAppHomeDir(t *testing.T) {
@@ -855,9 +905,10 @@ scheduler:
 			HealthPort: 8091,
 		},
 		Worker: Worker{
-			ID:            "worker-1",
-			MaxActiveRuns: 50,
-			HealthPort:    8092,
+			ID:              "worker-1",
+			MaxActiveRuns:   50,
+			HealthPort:      8092,
+			ShutdownTimeout: 60 * time.Second,
 			Labels: map[string]string{
 				"env":    "production",
 				"region": "us-west-2",
@@ -2680,5 +2731,80 @@ default_execution_mode: invalid
 `)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "invalid default_execution_mode")
+	})
+}
+
+func TestLoad_SignalHandling(t *testing.T) {
+	t.Run("DefaultDisabled", func(t *testing.T) {
+		cfg := testLoad(t)
+		assert.False(t, cfg.SignalHandling.EnablePropagation)
+	})
+
+	t.Run("YAML", func(t *testing.T) {
+		cfg := loadFromYAML(t, `
+signal_handling:
+  enable_propagation: true
+`)
+		assert.True(t, cfg.SignalHandling.EnablePropagation)
+	})
+
+	t.Run("Environment", func(t *testing.T) {
+		cfg := loadWithEnv(t, "# empty", map[string]string{
+			"DAGU_SIGNAL_PROPAGATION": "true",
+		})
+		assert.True(t, cfg.SignalHandling.EnablePropagation)
+	})
+
+	t.Run("EnvironmentOverridesYAML", func(t *testing.T) {
+		cfg := loadWithEnv(t, `
+signal_handling:
+  enable_propagation: false
+`, map[string]string{
+			"DAGU_SIGNAL_PROPAGATION": "true",
+		})
+		assert.True(t, cfg.SignalHandling.EnablePropagation)
+	})
+
+	// The camelCase spelling is rejected in config.yaml like every other
+	// legacy key, but remains accepted in admin.yaml for compatibility.
+	t.Run("CamelCaseYAMLRejected", func(t *testing.T) {
+		err := loadWithErrorFromYAML(t, `
+signalHandling:
+  enablePropagation: true
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "signal_handling.enable_propagation")
+	})
+
+	t.Run("CamelCaseAdminYAML", func(t *testing.T) {
+		homeDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(homeDir, "admin.yaml"), []byte(`
+signalHandling:
+  enablePropagation: true
+`), 0600))
+		cfg := testLoad(t, WithAppHomeDir(homeDir))
+		assert.True(t, cfg.SignalHandling.EnablePropagation)
+	})
+
+	for _, camelCase := range []bool{false, true} {
+		t.Run(fmt.Sprintf("EnvironmentDisablesAdmin/%t", camelCase), func(t *testing.T) {
+			homeDir := t.TempDir()
+			yaml := "signal_handling:\n  enable_propagation: true\n"
+			if camelCase {
+				yaml = "signalHandling:\n  enablePropagation: true\n"
+			}
+			require.NoError(t, os.WriteFile(filepath.Join(homeDir, "admin.yaml"), []byte(yaml), 0600))
+			t.Setenv("DAGU_SIGNAL_PROPAGATION", "false")
+			cfg := testLoad(t, WithAppHomeDir(homeDir))
+			assert.False(t, cfg.SignalHandling.EnablePropagation)
+		})
+	}
+
+	t.Run("CanonicalDisablesLegacy", func(t *testing.T) {
+		homeDir := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(homeDir, "admin.yaml"), []byte("signalHandling:\n  enablePropagation: true\n"), 0600))
+		require.NoError(t, os.WriteFile(filepath.Join(homeDir, "config.yaml"), []byte("signal_handling:\n  enable_propagation: false\n"), 0600))
+		cfg := testLoad(t, WithAppHomeDir(homeDir))
+		assert.False(t, cfg.SignalHandling.EnablePropagation)
 	})
 }

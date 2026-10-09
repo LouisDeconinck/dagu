@@ -39,6 +39,16 @@ func (c *condition) UnmarshalJSON(data []byte) error {
 	return json.Unmarshal(data, (*plain)(c))
 }
 
+// MarshalJSON writes a statement as a string and a fixed check as an
+// object, the forms a condition is written in.
+func (c condition) MarshalJSON() ([]byte, error) {
+	if c.Statement != "" {
+		return json.Marshal(c.Statement)
+	}
+	type plain condition
+	return json.Marshal(plain(c))
+}
+
 // judged reports whether the model evaluates the condition.
 func (c condition) judged() bool {
 	return c.Statement != ""

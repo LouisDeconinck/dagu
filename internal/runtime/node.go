@@ -251,6 +251,12 @@ func (n *Node) clearExecCancel() {
 	n.execCancel = nil
 }
 
+func (n *Node) isExecuting() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.execCancel != nil
+}
+
 // flusherControl coordinates shutdown of the output flusher goroutine.
 type flusherControl struct {
 	done     chan struct{} // Signals the flusher to stop
@@ -1062,7 +1068,7 @@ func evalTemplateConfig(ctx context.Context, config map[string]any) (map[string]
 }
 
 func scriptField(ctx context.Context, step ir.Step) cmnvalue.Field {
-	if step.ExecutorConfig.Type == "template" {
+	if step.ExecutorConfig.IsVerbatimScript() {
 		return cmnvalue.TemplateScriptField("run")
 	}
 	command := registry.ScriptResolution(ctx, step)
@@ -1216,7 +1222,8 @@ func (n *Node) Signal(ctx context.Context, sig os.Signal, allowOverride bool) {
 func (n *Node) Stop(ctx context.Context, intent cmdutil.TerminationIntent, allowOverride bool) {
 	n.mu.Lock()
 	status := n.Status()
-	if status != ir.NodeRunning {
+	// Cleanup receives forced termination only after its graceful stop.
+	if status != ir.NodeRunning && (status != ir.NodeAborted || n.execCancel == nil || !intent.IsForce()) {
 		n.mu.Unlock()
 		return
 	}

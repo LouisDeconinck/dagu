@@ -143,6 +143,44 @@ describe('Graph', () => {
     expect(runningNode).toHaveAttribute('stroke-width', '2.5px');
   });
 
+  it('labels a step with its name when it also has an id', async () => {
+    mermaidRenderMock.mockResolvedValueOnce({
+      svg: '<svg></svg>',
+      bindFunctions: vi.fn(),
+    });
+
+    render(
+      <Graph
+        type="config"
+        steps={[
+          { name: 'Get Date', id: 'date' },
+          { name: 'Use Date', depends: ['Get Date'] },
+        ]}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mermaidRenderMock).toHaveBeenCalled();
+    });
+
+    const firstCall = mermaidRenderMock.mock.calls[0];
+    if (!firstCall) {
+      throw new Error('Expected mermaid.render to be called');
+    }
+    const definition = firstCall[1] as string;
+    expect(definition).toContain('["Get Date"]');
+    expect(definition).not.toContain('["date"]');
+  });
+
+  it('labels a fallback step with its name when it also has an id', async () => {
+    mermaidRenderMock.mockRejectedValueOnce(new TypeError('render exploded'));
+
+    render(<Graph type="config" steps={[{ name: 'Get Date', id: 'date' }]} />);
+
+    const fallback = await screen.findByTestId('graph-fallback');
+    expect(fallback).toHaveTextContent('Get Date');
+  });
+
   it('renders an interactive fallback when Mermaid rendering fails', async () => {
     mermaidRenderMock.mockRejectedValueOnce(new TypeError('render exploded'));
     const onClickNode = vi.fn();
@@ -258,5 +296,47 @@ describe('Graph', () => {
     );
 
     expect(container.querySelector('.custom-scrollbar')).toHaveClass('pt-14');
+  });
+  it('draws inferred dependencies as dashed arrows after explicit ones', async () => {
+    mermaidRenderMock.mockResolvedValueOnce({
+      svg: '<svg></svg>',
+      bindFunctions: vi.fn(),
+    });
+
+    const consumer = node('deploy', NodeStatus.Success, ['prepare']);
+    consumer.step.inferredDepends = ['build'];
+
+    render(
+      <Graph
+        type="status"
+        steps={[
+          node('prepare', NodeStatus.Success),
+          node('build', NodeStatus.Success),
+          consumer,
+        ]}
+      />
+    );
+
+    await waitFor(() => {
+      expect(mermaidRenderMock).toHaveBeenCalled();
+    });
+
+    const firstCall = mermaidRenderMock.mock.calls[0];
+    if (!firstCall) {
+      throw new Error('Expected mermaid.render to be called');
+    }
+    const definition = firstCall[1] as string;
+    expect(definition).toContain(
+      `${toMermaidNodeId('prepare')} --> ${toMermaidNodeId('deploy')};`
+    );
+    expect(definition).toContain(
+      `${toMermaidNodeId('build')} -.-> ${toMermaidNodeId('deploy')};`
+    );
+    expect(definition).toContain(
+      'linkStyle 0 stroke:#3fa76b,stroke-width:1.8px'
+    );
+    expect(definition).toContain(
+      'linkStyle 1 stroke:#3fa76b,stroke-width:1.8px,stroke-dasharray:6 3'
+    );
   });
 });

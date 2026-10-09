@@ -20,6 +20,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/dirlock"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
+	"github.com/dagucloud/dagu/v2/internal/cmn/signalctx"
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/dagsettings"
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
@@ -840,9 +841,17 @@ func (s *Scheduler) cronLoop(ctx context.Context, sig chan os.Signal) {
 func (s *Scheduler) waitForTick(ctx context.Context, sig chan os.Signal, timer *time.Timer) bool {
 	select {
 	case <-ctx.Done():
+		signal.Stop(sig)
+		var received os.Signal
+		_ = errors.As(context.Cause(ctx), &received)
+		<-launcher.PropagateSignal(ctx, received)
 		return false
-	case <-sig:
+	case received := <-sig:
+		signalctx.AbsorbRepeatedTerminate(ctx)
+		signal.Stop(sig)
+		runsDone := launcher.PropagateSignal(ctx, received)
 		s.Stop(ctx)
+		<-runsDone
 		return false
 	case <-s.quit:
 		return false
