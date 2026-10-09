@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -173,12 +174,22 @@ func TestLoadSchemaFromURL(t *testing.T) {
 		assert.Contains(t, err.Error(), "unsupported URL scheme")
 	})
 
-	t.Run("CredentialsInURL", func(t *testing.T) {
+	t.Run("CredentialsSentAsBasicAuth", func(t *testing.T) {
 		t.Parallel()
 
-		_, err := loadSchemaFromURL("https://user:pass@example.com/schema.json")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "credentials")
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if user, pass, ok := r.BasicAuth(); !ok || user != "user" || pass != "s3cret" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			_, _ = w.Write([]byte(`{"type":"object"}`))
+		}))
+		defer server.Close()
+
+		schemaURL := strings.Replace(server.URL, "http://", "http://user:s3cret@", 1) + "/schema.json"
+		data, err := loadSchemaFromURL(schemaURL)
+		require.NoError(t, err)
+		assert.Equal(t, `{"type":"object"}`, string(data))
 	})
 
 	t.Run("ConnectionRefused", func(t *testing.T) {
@@ -438,6 +449,49 @@ func TestGetSchemaFromRef(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to load schema")
 		assert.True(t, IsSourceUnavailable(err))
+	})
+
+	// Load errors reach the API and UI, so URL credentials must not appear in
+	// them regardless of which stage of the fetch fails.
+	t.Run("RedactsCredentials", func(t *testing.T) {
+		t.Parallel()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		t.Cleanup(server.Close)
+
+		tests := []struct {
+			name   string
+			ref    string
+			secret string
+		}{
+			{
+				name:   "HTTPError",
+				ref:    strings.Replace(server.URL, "http://", "http://user:s3cret@", 1) + "/missing.json",
+				secret: "s3cret",
+			},
+			{
+				name:   "ConnectionError",
+				ref:    "http://ghp_token@127.0.0.1:59999/schema.json",
+				secret: "ghp_token",
+			},
+			{
+				name:   "InvalidURL",
+				ref:    "http://user:s3cret%zz@127.0.0.1/schema.json",
+				secret: "s3cret",
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
+
+				_, err := getSchemaFromRef("", "", tt.ref)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "failed to load schema from")
+				assert.NotContains(t, err.Error(), tt.secret)
+			})
+		}
 	})
 }
 

@@ -85,16 +85,18 @@ func resolveSchemaData(schemaData []byte) (*jsonschema.Resolved, error) {
 func getSchemaFromRef(workingDir string, dagLocation string, schemaRef string) (*jsonschema.Resolved, error) {
 	var schemaData []byte
 	var err error
+	source := schemaRef
 
 	// Check if it's a URL or file path
 	if strings.HasPrefix(schemaRef, "http://") || strings.HasPrefix(schemaRef, "https://") {
+		source = redactURLUserinfo(schemaRef)
 		schemaData, err = loadSchemaFromURL(schemaRef)
 	} else {
 		schemaData, err = loadSchemaFromFile(workingDir, dagLocation, schemaRef)
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to load schema from %s: %w", schemaRef, err)
+		return nil, fmt.Errorf("failed to load schema from %s: %w", source, err)
 	}
 
 	resolvedSchema, err := resolveSchemaData(schemaData)
@@ -110,13 +112,11 @@ func loadSchemaFromURL(schemaURL string) (data []byte, err error) {
 	// Validate URL to prevent potential security issues (and satisfy linter :P)
 	parsedURL, err := url.Parse(schemaURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid URL: %w", err)
+		// The *url.Error repeats the raw URL, which may carry credentials.
+		return nil, fmt.Errorf("invalid URL: %w", errors.Unwrap(err))
 	}
 	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
 		return nil, fmt.Errorf("unsupported URL scheme: %s", parsedURL.Scheme)
-	}
-	if parsedURL.User != nil {
-		return nil, fmt.Errorf("schema URL must not contain credentials")
 	}
 
 	req, err := http.NewRequest("GET", schemaURL, nil)
@@ -129,6 +129,10 @@ func loadSchemaFromURL(schemaURL string) (data []byte, err error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
+		// net/http masks only the password, not a token passed as the user.
+		if urlErr, ok := errors.AsType[*url.Error](err); ok {
+			urlErr.URL = redactURLUserinfo(urlErr.URL)
+		}
 		return nil, fmt.Errorf("%w: %w", errSchemaUnavailable, err)
 	}
 	defer func() {
@@ -149,6 +153,19 @@ func loadSchemaFromURL(schemaURL string) (data []byte, err error) {
 		return nil, fmt.Errorf("schema exceeds the %d MiB size limit", schemaMaxResponseBytes/(1<<20))
 	}
 	return data, nil
+}
+
+// redactURLUserinfo returns rawURL with any user info masked, for use in
+// messages.
+func redactURLUserinfo(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<invalid URL>"
+	}
+	if u.User != nil {
+		u.User = url.User("xxxxx")
+	}
+	return u.String()
 }
 
 func newSchemaHTTPClient() *http.Client {
