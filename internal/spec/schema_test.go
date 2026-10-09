@@ -400,6 +400,21 @@ func TestGetSchemaFromRef(t *testing.T) {
 		assert.NotNil(t, resolved)
 	})
 
+	t.Run("UppercaseScheme", func(t *testing.T) {
+		t.Parallel()
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(validSchemaContent))
+		}))
+		defer server.Close()
+
+		ref := strings.Replace(server.URL, "http://", "HTTP://", 1) + "/schema.json"
+		resolved, err := getSchemaFromRef("", "", ref)
+		require.NoError(t, err)
+		assert.NotNil(t, resolved)
+	})
+
 	t.Run("HTTPSSchemaReference", func(t *testing.T) {
 		t.Parallel()
 

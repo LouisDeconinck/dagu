@@ -87,8 +87,9 @@ func getSchemaFromRef(workingDir string, dagLocation string, schemaRef string) (
 	var err error
 	source := schemaRef
 
-	// Check if it's a URL or file path
-	if strings.HasPrefix(schemaRef, "http://") || strings.HasPrefix(schemaRef, "https://") {
+	// Check if it's a URL or file path. URL schemes are case-insensitive.
+	lowerRef := strings.ToLower(schemaRef)
+	if strings.HasPrefix(lowerRef, "http://") || strings.HasPrefix(lowerRef, "https://") {
 		source = redactURLUserinfo(schemaRef)
 		schemaData, err = loadSchemaFromURL(schemaRef)
 	} else {
