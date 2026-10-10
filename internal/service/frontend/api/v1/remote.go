@@ -339,15 +339,19 @@ func doRemoteNodeProxyRequest(client *http.Client, req *http.Request) (*http.Res
 }
 
 // flushWriter flushes after every write so a proxied log download reaches the
-// client while the remote transfer is still in progress.
+// client while the remote transfer is still in progress. Writers that cannot
+// flush are written to without flushing.
 type flushWriter struct {
 	w http.ResponseWriter
 }
 
 func (f flushWriter) Write(p []byte) (int, error) {
 	n, err := f.w.Write(p)
-	if err == nil {
-		err = http.NewResponseController(f.w).Flush()
+	if err != nil {
+		return n, err
 	}
-	return n, err
+	if err := http.NewResponseController(f.w).Flush(); !errors.Is(err, http.ErrNotSupported) {
+		return n, err
+	}
+	return n, nil
 }

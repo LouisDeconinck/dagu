@@ -332,6 +332,22 @@ func TestRemoteLogDownloadAbort(t *testing.T) {
 	}
 }
 
+// Writers that cannot flush still receive the whole log download.
+func TestRemoteLogDownloadWithoutFlush(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("log body"))
+	}))
+	defer remote.Close()
+	resolver := remotenode.NewResolver([]config.RemoteNode{{Name: "edge", APIBaseURL: remote.URL + "/api/v1"}}, nil)
+	handler := WithRemoteNode(resolver, "/api/v1")(http.NotFoundHandler())
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/dag-runs/example/run/log/download?remoteNode=edge", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(struct{ http.ResponseWriter }{recorder}, request)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "log body", recorder.Body.String())
+}
+
 func TestIsLogDownload(t *testing.T) {
 	for _, suffix := range []string{
 		"/log/download",
