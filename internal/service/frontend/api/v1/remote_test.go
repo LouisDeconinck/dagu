@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -392,6 +393,30 @@ func TestRemoteLogDownloadWithoutFlush(t *testing.T) {
 	handler.ServeHTTP(struct{ http.ResponseWriter }{recorder}, request)
 	require.Equal(t, http.StatusOK, recorder.Code)
 	require.Equal(t, "log body", recorder.Body.String())
+}
+
+// A remote that stops sending mid-download fails the transfer instead of
+// holding the client connection open.
+func TestRemoteLogDownloadIdleTimeout(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("partial"))
+		_ = http.NewResponseController(w).Flush()
+		<-r.Context().Done()
+	}))
+	defer remote.Close()
+	proxy := remoteNodeProxy{
+		remoteNode:     &remotenode.RemoteNode{APIBaseURL: remote.URL + "/api/v1"},
+		apiBasePath:    "/api/v1",
+		logIdleTimeout: 50 * time.Millisecond,
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/dag-runs/example/run/log/download?remoteNode=edge", nil)
+	resp, err := proxy.proxy(request)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	require.ErrorIs(t, err, os.ErrDeadlineExceeded)
+	require.Equal(t, "partial", string(body))
 }
 
 func TestIsLogDownload(t *testing.T) {

@@ -6,6 +6,7 @@ package api
 import (
 	"compress/flate"
 	"compress/gzip"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -68,8 +69,9 @@ func WithRemoteNode(resolver *remotenode.Resolver, apiBasePath string) func(next
 			// If the parameter is present, we need to handle the request differently
 			// Call the handleRemoteNodeProxy function to proxy the request
 			remoteNodeHandler := &remoteNodeProxy{
-				remoteNode:  node,
-				apiBasePath: apiBasePath,
+				remoteNode:     node,
+				apiBasePath:    apiBasePath,
+				logIdleTimeout: remoteProxyTimeout,
 			}
 			resp, err := remoteNodeHandler.proxy(r)
 			if err != nil {
@@ -166,6 +168,9 @@ func WithRemoteNode(resolver *remotenode.Resolver, apiBasePath string) func(next
 type remoteNodeProxy struct {
 	remoteNode  *remotenode.RemoteNode
 	apiBasePath string
+	// logIdleTimeout bounds each wait for log download bytes from the remote
+	// node. Zero disables it.
+	logIdleTimeout time.Duration
 }
 
 // handleRemoteNodeProxy checks if 'remoteNode' is present in the query parameters.
@@ -306,9 +311,17 @@ func (h *remoteNodeProxy) doRequest(body io.Reader, r *http.Request) (*http.Resp
 		} else {
 			req.Header.Set("Accept-Encoding", "identity")
 		}
-		// Log downloads have no total duration limit; connection setup remains bounded.
+		// Log downloads have no total duration limit; connection setup and
+		// stalled transfers remain bounded.
 		client.Timeout = 0
-		transport.DialContext = (&net.Dialer{Timeout: remoteProxyTimeout}).DialContext
+		dialer := &net.Dialer{Timeout: remoteProxyTimeout}
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err != nil || h.logIdleTimeout <= 0 {
+				return conn, err
+			}
+			return idleTimeoutConn{Conn: conn, timeout: h.logIdleTimeout}, nil
+		}
 		transport.TLSHandshakeTimeout = remoteProxyTimeout
 		transport.ResponseHeaderTimeout = remoteProxyTimeout
 	}
@@ -343,6 +356,19 @@ func buildRemoteNodeProxyURL(baseURL, requestPath, apiBasePath string, query url
 
 func doRemoteNodeProxyRequest(client *http.Client, req *http.Request) (*http.Response, error) {
 	return client.Do(req) //nolint:gosec // request URL is constrained by buildRemoteNodeProxyURL.
+}
+
+// idleTimeoutConn fails a read that waits longer than timeout for data.
+type idleTimeoutConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c idleTimeoutConn) Read(p []byte) (int, error) {
+	if err := c.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(p)
 }
 
 // flushWriter flushes after every write so a proxied log download reaches the
