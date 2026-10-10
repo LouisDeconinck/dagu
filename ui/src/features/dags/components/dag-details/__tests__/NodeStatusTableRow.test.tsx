@@ -201,6 +201,53 @@ describe('NodeStatusTableRow', () => {
     expect(screen.getByText('stdout')).toBeInTheDocument();
   });
 
+  it('shows every alternative of an unmet any-of precondition', () => {
+    const node = {
+      step: {
+        name: 'process',
+        preconditions: [
+          {
+            condition: '${MODE}',
+            expectedAny: ['full', 'minimal'],
+            error: 'condition was not met',
+          },
+        ],
+      },
+      status: NodeStatus.Skipped,
+      statusLabel: NodeStatusLabel.skipped,
+      stdout: '',
+      stderr: '',
+      startedAt: '',
+      finishedAt: '',
+      retryCount: 0,
+      doneCount: 0,
+    } as components['schemas']['Node'];
+
+    render(
+      <MemoryRouter>
+        <AppBarContext.Provider value={appBarValue}>
+          <DAGContext.Provider
+            value={{
+              refresh: vi.fn(),
+              name: 'example',
+              fileName: 'example.yaml',
+            }}
+          >
+            <NodeStatusTableRow
+              rownum={1}
+              node={node}
+              name="example.yaml"
+              dagRun={dagRun}
+              view="mobile"
+            />
+          </DAGContext.Provider>
+        </AppBarContext.Provider>
+      </MemoryRouter>
+    );
+
+    expect(screen.getByText(/full \| minimal/)).toBeInTheDocument();
+  });
+
   it('falls back to the configured log message when stdout cannot be loaded', () => {
     mockedUseQuery.mockImplementation((path, init) => ({
       data: undefined,
@@ -614,6 +661,143 @@ describe('NodeStatusTableRow', () => {
     });
     expect(await screen.findByText('Step retry started')).toBeVisible();
     expect(refresh).toHaveBeenCalled();
+  });
+
+  it('sends bypassPreconditions when the checkbox is checked', async () => {
+    const user = userEvent.setup();
+    postMock.mockResolvedValueOnce({});
+    const refresh = vi.fn();
+    const node = {
+      step: { name: 'build' },
+      status: NodeStatus.Success,
+      statusLabel: NodeStatusLabel.succeeded,
+      stdout: '',
+      stderr: '',
+      startedAt: '',
+      finishedAt: '',
+      retryCount: 0,
+      doneCount: 1,
+    } as components['schemas']['Node'];
+
+    render(
+      <MemoryRouter>
+        <ToastProvider>
+          <AppBarContext.Provider value={appBarValue}>
+            <DAGContext.Provider
+              value={{
+                refresh,
+                name: 'example',
+                fileName: 'example.yaml',
+              }}
+            >
+              <table>
+                <tbody>
+                  <NodeStatusTableRow
+                    rownum={1}
+                    node={node}
+                    name="example.yaml"
+                    dagRun={dagRun}
+                    view="desktop"
+                  />
+                </tbody>
+              </table>
+            </DAGContext.Provider>
+          </AppBarContext.Provider>
+        </ToastProvider>
+      </MemoryRouter>
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Step actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Retry step' }));
+    const dialog = screen.getByRole('dialog');
+    const checkbox = within(dialog).getByRole('checkbox', {
+      name: /Bypass step preconditions/i,
+    });
+    expect(checkbox).not.toBeChecked();
+    await user.click(checkbox);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Retry' }));
+
+    await vi.waitFor(() => {
+      expect(postMock).toHaveBeenCalledWith(
+        '/dag-runs/{name}/{dagRunId}/retry',
+        {
+          params: {
+            path: { name: 'example', dagRunId: 'run-1' },
+            query: { remoteNode: 'local' },
+          },
+          body: {
+            dagRunId: 'run-1',
+            stepName: 'build',
+            bypassPreconditions: true,
+          },
+        }
+      );
+    });
+    expect(await screen.findByText('Step retry started')).toBeVisible();
+    expect(refresh).toHaveBeenCalled();
+  });
+
+  it('resets the bypass preconditions checkbox each time the dialog opens', async () => {
+    const user = userEvent.setup();
+    const node = {
+      step: { name: 'build' },
+      status: NodeStatus.Success,
+      statusLabel: NodeStatusLabel.succeeded,
+      stdout: '',
+      stderr: '',
+      startedAt: '',
+      finishedAt: '',
+      retryCount: 0,
+      doneCount: 1,
+    } as components['schemas']['Node'];
+
+    render(
+      <MemoryRouter>
+        <AppBarContext.Provider value={appBarValue}>
+          <DAGContext.Provider
+            value={{
+              refresh: vi.fn(),
+              name: 'example',
+              fileName: 'example.yaml',
+            }}
+          >
+            <table>
+              <tbody>
+                <NodeStatusTableRow
+                  rownum={1}
+                  node={node}
+                  name="example.yaml"
+                  dagRun={dagRun}
+                  view="desktop"
+                />
+              </tbody>
+            </table>
+          </DAGContext.Provider>
+        </AppBarContext.Provider>
+      </MemoryRouter>
+    );
+
+    const openDialog = async () => {
+      await user.click(screen.getByRole('button', { name: 'Step actions' }));
+      await user.click(screen.getByRole('menuitem', { name: 'Retry step' }));
+    };
+
+    await openDialog();
+    let dialog = screen.getByRole('dialog');
+    await user.click(
+      within(dialog).getByRole('checkbox', {
+        name: /Bypass step preconditions/i,
+      })
+    );
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    await openDialog();
+    dialog = screen.getByRole('dialog');
+    expect(
+      within(dialog).getByRole('checkbox', {
+        name: /Bypass step preconditions/i,
+      })
+    ).not.toBeChecked();
   });
 
   it.each(['desktop', 'mobile'] as const)(

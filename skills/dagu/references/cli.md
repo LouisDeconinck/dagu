@@ -191,7 +191,7 @@ Flags:
 
 ### dagu rm
 
-Remove DAG run history and/or the DAG YAML definition. At least one of `--history` or `--definition` is required. Active runs are never deleted from history; definition deletion is refused while the DAG has alive processes. With `--definition`, identify the DAG by filename, stem, or configured path. Deleting all history (no `--older-than`) also clears the browser replay cache of the DAG on this host.
+Remove DAG run history and/or the DAG YAML definition. At least one of `--history` or `--definition` is required. Active runs are never deleted from history; definition deletion is refused while the DAG has alive processes. With `--definition`, identify the DAG by filename, stem, or configured path. Deleting all history (no `--older-than`) also clears the browser and computer replay caches of the DAG on this host.
 
 ```sh
 dagu rm [--history|-H] [--definition|-d] [-t <duration>] [-f] [--dry-run] <dag>
@@ -213,6 +213,60 @@ Clear the recorded `act` operations that browser steps replay, so the next run a
 dagu browser cache clear <dag> [--step <id>]
 ```
 
+### dagu browser session
+
+Work a site in a browser kept open between commands, then turn what worked into a `browser.run` step. Each `do` runs one operation, read from stdin in the form of a `with.do` item, exactly as a step would, and reports what it did, the actions an act performed, what an extract read, and the page next with its outline. `describe` outlines the page without a model: fields with their labels, selects with their options, buttons, links with their addresses, tables and lists, each element with an ID that `do` can act on without a model: `{"click": ID}`, `{"type": {"into": ID, "text": TEXT}}`, `{"select": {"in": ID, "option": OPTION}}`, kept as the act a step writes, with its recording. `export` builds the step from the operations that succeeded and writes their act recordings to the step's replay cache, so its first run on this host replays them without a model request. Variable values go on stdin under `variables`; `{"env": NAME}` is read from the environment on every command and masked, a plain string serves one command. Every command prints one JSON object; a failure prints `{"error": {"code", "message"}}` and exits 1. A session closes its browser when idle past `--idle-timeout` (default `30m`); its history can be exported for a day after. `close --keep` ends it the same way at once, freeing its profile for a step.
+
+```sh
+dagu browser session open [URL] [--provider P --model M | --llm '<llm block>'] [--profile N] [--headed] [--viewport WxH] [--allowed-domain D]... [--idle-timeout 30m]
+echo '{"act": "Click Sign in"}' | dagu browser session do <id>
+echo '{"click": "0-131"}' | dagu browser session do <id>
+dagu browser session describe <id> [--find TEXT] [--format text] [--screenshot NAME]
+dagu browser session export <id> --dag <name|file> --step <id> [--skip N]... [--dry-run] [--close] [--format yaml]
+dagu browser session close <id> [--force] [--keep]
+dagu browser session list
+```
+
+### dagu computer check
+
+Check that computer steps can capture the screen and send input in the current session. Run it as the user and in the session of the worker that runs computer steps. On macOS it also asks macOS to show the Screen Recording and Accessibility prompts for missing permissions. Exits nonzero and lists the problems when the desktop cannot be automated. `--format json` prints `{os, width, height, ready, problems}`, each problem with a `code` (such as `screen_recording`, `accessibility`, or `screen_locked`) and a `message`.
+
+```sh
+dagu computer check [--format json]
+```
+
+### dagu computer elements
+
+List the accessible elements of the window in front on 64-bit Windows: each with `role`, `name`, `id`, `value`, `label`, `bounds` in display pixels, `window`, and `path` from the window down. `--at-pointer` reports the element under the pointer after `--after`; `--watch` reports it whenever it changes, one JSON object per line, until stdin closes; `--match` reports the elements a selector matches and succeeds only on exactly one, with `-` reading the selector from stdin. A selector is JSON with `role` and `name`, `id`, or `near` (`{label, side}`), optionally `app`, `window`, `in`, and `nth`; names take `*`. `--format json` prints one object; a failure prints `{"error": {"code", "message"}}` and exits 1, with `invalid_input`, `unsupported`, `load_failed`, `no_elements`, `not_found`, `ambiguous`, `failed`, or a `check` problem code.
+
+```sh
+dagu computer elements [--format json] [--limit N] [--at-pointer [--after 3s] | --watch | --match '<selector JSON>' | --match -]
+```
+
+### dagu computer cache clear
+
+Clear the recorded `act` operations that computer steps replay, so the next run asks the model again. Without `--step`, every step of the DAG is cleared. The cache lives on the host that ran the step; in distributed mode, run it on the worker.
+
+```sh
+dagu computer cache clear <dag> [--step <id>]
+```
+
+### dagu xlsx inspect
+
+Describe every sheet of an `.xlsx` workbook: used range, detected data block, header row, column names and types, a profile of each column, row count, tables, and a few typed sample rows, plus the workbook's named ranges and date system. Types and the profile cover every data row up to 5000: filled and blank counts, distinct count, the values when a few repeat, min and max of number and date columns, and the cells that do not read as the column's type. The text format shows them after each column, as in `状態 (string: 済, 未; 40 blank), 数量 (number; 1..250; 1 odd: D300 "未定")`. It reads the file directly, needs no configuration or engine, and creates no run. `--sheet` describes one sheet only and `--rows` sets the sample size. A hidden sheet is marked `(hidden)` and rows hidden by a filter or by hand are counted, as in `300 rows, 12 hidden`. A protected workbook takes its password from `DAGU_XLSX_PASSWORD`, which keeps it out of the process list; `--password` is a convenience that wins when both are set. `--format json` prints one object: `path`, `date_system`, `sheets` (each with `name`, `hidden`, `used_range`, `range`, `header_row`, `headers`, `types`, `row_count`, `hidden_rows`, `columns`, `profile_truncated`, `tables`, `sample`), `named_ranges`, and `warnings`.
+
+```sh
+dagu xlsx inspect <path> [--sheet <name>] [--rows <n>] [--password <password>] [--format json]
+```
+
+### dagu xlsx read
+
+Print the typed rows of a sheet the way `xlsx.read` publishes them: numbers stay numbers, dates become ISO 8601 text, text keeps its leading zeros, and each row carries `_row`. The flags mirror the action's fields: `--sheet`, `--range`, `--header` (`true`, `false`, a row number, or `3,4`), `--columns` (comma-separated, with `name:alias` renames), `--max-rows`, `--skip-hidden` (leave out rows hidden by a filter or by hand), and `--password` (a protected workbook; prefer `DAGU_XLSX_PASSWORD`, which keeps it out of the process list, and the flag wins when both are set). The text format is tab-separated, with tabs, line breaks, and backslashes inside a cell escaped as `\t`, `\n`, `\r`, and `\\` so one cell stays in one column; `--format json` prints `rows`, `count`, `headers`, `sheet`, `range`, `warnings`, and `truncated`.
+
+```sh
+dagu xlsx read <path> [--sheet <name>] [--range A2:F] [--header false] [--columns "a,b:c"] [--max-rows <n>] [--skip-hidden] [--password <password>] [--format json]
+```
+
 ### dagu ps
 
 List running DAG processes.
@@ -232,6 +286,21 @@ Deprecated: prefer `dagu rm --history`.
 ```sh
 dagu cleanup <dag-name> [--retention-days <n>] [--dry-run] [--yes/-y]
 ```
+
+### dagu prune-artifacts
+
+Remove artifact directories and index records that no surviving DAG run points to. Orphans appear when a run record is deleted by a route other than `dagu rm`, or when the artifact root moved. Only the artifact layout is examined: `<root>/YYYY/MM/DD/<run>` directories with their index records, and pre-date `<root>/<dag>/dag-run_<ts>_<id>` directories. Liveness is decided by name: an entry is removed only when no run in the current history tree could still claim it, and only when it is older than `--older-than`. A minimum age of 1h is always enforced because a run's artifact directory exists before its record does. Without `--yes`, the command reports how many entries it found before asking to delete them.
+
+```sh
+dagu prune-artifacts [--older-than|-t <duration>] [--root <dir>] [--dry-run] [--yes/-y]
+```
+
+Flags:
+
+- `--older-than/-t` — Only remove entries older than a duration (e.g. `10d`, `24h`, `1w`). Default `24h`; a minimum of 1h is enforced
+- `--root` — Artifact root to prune (default: configured `paths.artifact_dir`). Pass a previous artifacts directory (e.g. `<old data_dir>/artifacts`) or a DAG's `artifacts.dir`. A root that holds the run history or the log directory is refused
+- `--dry-run` — Preview removals without deleting
+- `--yes/-y` — Skip confirmation prompt
 
 ### dagu schema
 
@@ -318,5 +387,5 @@ Start distributed worker: `dagu worker --worker.coordinators <host:port,...> [--
 - `dagu example [id]` — Show built-in example DAGs
 - `dagu version` — Show version
 - `dagu upgrade [--check] [--version/-v <ver>] [--dry-run] [--yes/-y]` — Self-update binary
-- `dagu license <activate|deactivate|check>` — Manage license
+- `dagu license <activate [key]|deactivate|check>` — Manage license; `activate` without a key prints a Dagu Console approval URL and waits for an owner to approve this server
 - `dagu secret resolve <ref> [--workspace <name>]` — Print a registry secret's plaintext value to stdout, without a trailing newline; a workspace falls back to global like a DAG's `secrets:` entry, and an unknown workspace fails. Each read is recorded in the audit log. Local context only

@@ -314,6 +314,7 @@ func (l *ConfigLoader) buildConfig(def Definition) (*Config, error) {
 		{SectionGitSync, func() { l.loadGitSyncConfig(&cfg, def) }},
 		{SectionTunnel, func() { l.loadTunnelConfig(&cfg, def) }},
 		{SectionLicense, func() { l.loadLicenseConfig(&cfg, def) }},
+		{SectionLicense, func() { l.loadCloudConfig(&cfg, def) }},
 	}
 
 	for _, sl := range sectionLoaders {
@@ -325,6 +326,7 @@ func (l *ConfigLoader) buildConfig(def Definition) (*Config, error) {
 	l.loadCacheConfig(&cfg, def)
 	l.loadWebhooksConfig(&cfg, def)
 	l.loadExecutionModeConfig(&cfg, def)
+	l.loadSignalHandlingConfig(&cfg, def)
 
 	if err := l.LoadLegacyFields(&cfg, def); err != nil {
 		return nil, err
@@ -1342,7 +1344,28 @@ func (l *ConfigLoader) loadWorkerConfig(cfg *Config, def Definition) {
 	}
 
 	l.setWorkerDefaults(cfg)
+	l.loadWorkerShutdownTimeout(cfg, def)
 	l.setPostgresPoolDefaults(&cfg.Worker.PostgresPool)
+}
+
+// defaultWorkerShutdownTimeout sits under the 90s systemd TimeoutStopSec
+// default with room for the worker's post-deadline cleanup.
+const defaultWorkerShutdownTimeout = 60 * time.Second
+
+// loadWorkerShutdownTimeout sets worker.shutdown_timeout. It defaults to
+// defaultWorkerShutdownTimeout, also when the value is not a valid duration,
+// and 0 disables the bound.
+func (l *ConfigLoader) loadWorkerShutdownTimeout(cfg *Config, def Definition) {
+	cfg.Worker.ShutdownTimeout = defaultWorkerShutdownTimeout
+	if def.Worker == nil || def.Worker.ShutdownTimeout == "" {
+		return
+	}
+	timeout, err := time.ParseDuration(def.Worker.ShutdownTimeout)
+	if err != nil {
+		l.warnings = append(l.warnings, fmt.Sprintf("Invalid worker.shutdown_timeout value: %s", def.Worker.ShutdownTimeout))
+		return
+	}
+	cfg.Worker.ShutdownTimeout = timeout
 }
 
 func (l *ConfigLoader) setCoordinatorDefaults(cfg *Config) {
@@ -1707,6 +1730,14 @@ func (l *ConfigLoader) loadLicenseConfig(cfg *Config, def Definition) {
 	}
 	cfg.License.Key = def.License.Key
 	cfg.License.CloudURL = def.License.CloudURL
+	cfg.License.ServerName = def.License.ServerName
+}
+
+func (l *ConfigLoader) loadCloudConfig(cfg *Config, def Definition) {
+	cfg.Cloud.Report = true
+	if def.Cloud != nil && def.Cloud.Report != nil {
+		cfg.Cloud.Report = *def.Cloud.Report
+	}
 }
 
 func (l *ConfigLoader) loadExecutionModeConfig(cfg *Config, _ Definition) {
@@ -1715,6 +1746,17 @@ func (l *ConfigLoader) loadExecutionModeConfig(cfg *Config, _ Definition) {
 		mode = ExecutionModeLocal
 	}
 	cfg.DefaultExecMode = mode
+}
+
+// loadSignalHandlingConfig loads signal handling options. The legacy camelCase
+// spelling "signalHandling.enablePropagation" is still accepted when it comes
+// from admin.yaml, which bypasses the legacy key check for compatibility.
+func (l *ConfigLoader) loadSignalHandlingConfig(cfg *Config, _ Definition) {
+	if l.v.IsSet("signal_handling.enable_propagation") {
+		cfg.SignalHandling.EnablePropagation = l.v.GetBool("signal_handling.enable_propagation")
+		return
+	}
+	cfg.SignalHandling.EnablePropagation = l.v.GetBool("signalhandling.enablepropagation")
 }
 
 func (l *ConfigLoader) loadCacheConfig(cfg *Config, def Definition) {
@@ -2059,6 +2101,9 @@ func (l *ConfigLoader) setViperDefaultValues(paths Paths) {
 	// Webhooks
 	l.v.SetDefault("webhooks.max_payload_size", DefaultWebhookMaxPayloadSize)
 
+	// Dagu Console
+	l.v.SetDefault("cloud.report", true)
+
 	// Terminal
 	l.v.SetDefault("terminal.max_sessions", 5)
 
@@ -2241,6 +2286,9 @@ var envBindings = []envBinding{
 	// Execution
 	{key: "default_execution_mode", env: "DEFAULT_EXECUTION_MODE"},
 
+	// Signal handling
+	{key: "signal_handling.enable_propagation", env: "SIGNAL_PROPAGATION"},
+
 	// Queues
 	{key: "queues.enabled", env: "QUEUE_ENABLED"},
 
@@ -2257,6 +2305,7 @@ var envBindings = []envBinding{
 	{key: "worker.labels", env: "WORKER_LABELS"},
 	{key: "worker.coordinators", env: "WORKER_COORDINATORS"},
 	{key: "worker.health_port", env: "WORKER_HEALTH_PORT"},
+	{key: "worker.shutdown_timeout", env: "WORKER_SHUTDOWN_TIMEOUT"},
 
 	// Peer
 	{key: "peer.cert_file", env: "PEER_CERT_FILE"},
@@ -2293,6 +2342,10 @@ var envBindings = []envBinding{
 	// License
 	{key: "license.key", env: "LICENSE_KEY"},
 	{key: "license.cloud_url", env: "LICENSE_CLOUD_URL"},
+	{key: "license.server_name", env: "LICENSE_SERVER_NAME"},
+
+	// Dagu Console
+	{key: "cloud.report", env: "CLOUD_REPORT"},
 
 	// GitSync
 	{key: "git_sync.enabled", env: "GITSYNC_ENABLED"},

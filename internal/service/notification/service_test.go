@@ -23,6 +23,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/dirlock"
 	"github.com/dagucloud/dagu/v2/internal/eventstore"
@@ -828,6 +830,32 @@ func TestTeamsPayloadForEventsSummarizesBatch(t *testing.T) {
 	assert.Equal(t, "daily-report: 2 notifications", payload["title"])
 }
 
+func TestMarshalTeamsPayloadFitsLimit(t *testing.T) {
+	t.Parallel()
+
+	short := map[string]any{"title": "daily-report failed", "text": "fetch: exit status 1"}
+	want, err := json.Marshal(short)
+	require.NoError(t, err)
+	got, err := marshalTeamsPayload(short)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+
+	// "é" is two UTF-8 bytes. The leading "a" makes the byte cut land inside
+	// a rune, so the cut must move back to a rune boundary and leave room for
+	// the ellipsis.
+	long := map[string]any{"title": "daily-report failed", "text": "a" + strings.Repeat("é", teamsMaxPayloadBytes)}
+	body, err := marshalTeamsPayload(long)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(body), teamsMaxPayloadBytes)
+	var decoded struct {
+		Text string `json:"text"`
+	}
+	require.NoError(t, json.Unmarshal(body, &decoded))
+	// JSON encoding replaces a split rune with U+FFFD.
+	assert.NotContains(t, decoded.Text, string(utf8.RuneError))
+	assert.True(t, strings.HasSuffix(decoded.Text, "…"))
+}
+
 func TestService_SendTestWebhookIncludesRunLinks(t *testing.T) {
 	t.Parallel()
 
@@ -1017,6 +1045,95 @@ func TestNotificationTemplateRunPathSupportsSubDAGRun(t *testing.T) {
 	assert.Contains(t, rendered, "subDAGRunId=child+run")
 	assert.Contains(t, rendered, "https://dagu.example.com/workflows/dag-runs/root%20dag/root%20run?")
 	assert.Contains(t, rendered, "Run: https://dagu.example.com/workflows/dag-runs/root%20dag/root%20run?")
+}
+
+// A step failure leaves the run-level error empty; every error output must
+// fall back to the failed step's error instead of rendering blank.
+func TestNotificationRunErrorFromFailedStep(t *testing.T) {
+	t.Parallel()
+
+	event := chatbridge.NotificationEvent{
+		Type: eventstore.TypeDAGRunFailed,
+		Status: &ir.DAGRunStatus{
+			Name:     "daily-report",
+			DAGRunID: "run-1",
+			Status:   ir.Failed,
+			Nodes: []*ir.Node{{
+				Step:   ir.Step{Name: "fetch"},
+				Status: ir.NodeFailed,
+				Error:  "exit status 11\nrecent stderr (tail):\n\x1b[31mfatal: no such file\x1b[0m",
+			}},
+		},
+	}
+	const wantError = "fetch: exit status 11\nrecent stderr (tail):\nfatal: no such file"
+
+	rendered := renderNotificationTemplate(
+		"Error: {{run.error}}\n{{error}}\nFailed steps: {{run.failed_steps}}",
+		event,
+		"",
+	)
+	assert.Equal(t, "Error: "+wantError+"\n"+wantError+"\nFailed steps: fetch", rendered)
+
+	assert.Contains(t, bodyForEvents([]chatbridge.NotificationEvent{event}, ""), "Error: "+wantError+"\n")
+
+	payload := webhookPayloadForEvents([]chatbridge.NotificationEvent{event}, "")
+	items, ok := payload["events"].([]map[string]any)
+	require.True(t, ok)
+	require.Len(t, items, 1)
+	assert.Equal(t, wantError, items[0]["error"])
+}
+
+// Step errors carry stderr, which email reads as HTML and Slack reads as
+// mentions and links. Token values must show as written, while markup in the
+// template itself is kept.
+func TestMarkupMessagesEscapeTokenValues(t *testing.T) {
+	t.Parallel()
+
+	event := notificationEventForRun(t, "run-1")
+	event.Status.Nodes = []*ir.Node{{
+		Step:   ir.Step{Name: "fetch"},
+		Status: ir.NodeFailed,
+		Error:  "in <module> & <!channel>",
+	}}
+	events := []chatbridge.NotificationEvent{event}
+	const escapedError = "fetch: in &lt;module&gt; &amp; &lt;!channel&gt;"
+
+	tests := []struct {
+		name     string
+		render   func(template string, events []chatbridge.NotificationEvent, publicURL string) string
+		template string
+		want     string
+	}{
+		{name: "EmailTemplate", render: emailBodyForEvents, template: "<b>{{dag.name}}</b> {{run.error}}", want: "<b>daily-report</b> " + escapedError},
+		{name: "EmailDefaultBody", render: emailBodyForEvents, want: "Error: " + escapedError + "\n"},
+		{name: "SlackTemplate", render: slackTextForEvents, template: "<!here> {{run.error}}", want: "<!here> " + escapedError},
+		{name: "SlackDefaultBody", render: slackTextForEvents, want: "Error: " + escapedError + "\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Contains(t, tt.render(tt.template, events, ""), tt.want)
+		})
+	}
+}
+
+func TestTruncateTelegramText(t *testing.T) {
+	t.Parallel()
+
+	atLimit := strings.Repeat("a", telegramMaxMessageLength)
+	assert.Equal(t, "short", truncateTelegramText("short"))
+	assert.Equal(t, atLimit, truncateTelegramText(atLimit))
+	assert.Equal(t,
+		strings.Repeat("a", telegramMaxMessageLength-1)+"…",
+		truncateTelegramText(atLimit+"b"),
+	)
+
+	// An emoji is two UTF-16 units; the cut must not split it.
+	emoji := strings.Repeat("a", telegramMaxMessageLength-2) + "😀b"
+	got := truncateTelegramText(emoji)
+	assert.Equal(t, strings.Repeat("a", telegramMaxMessageLength-2)+"…", got)
+	assert.LessOrEqual(t, len(utf16.Encode([]rune(got))), telegramMaxMessageLength)
 }
 
 func TestNotificationTemplateIncludesStepStatusLists(t *testing.T) {

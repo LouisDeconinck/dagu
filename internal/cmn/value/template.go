@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/dagucloud/dagu/v2/internal/cmn/jsonutil"
 )
 
 var (
@@ -84,37 +86,68 @@ var legacyBuiltinContextAliasesByCanonical = func() map[string]string {
 
 type template struct{ source string }
 
+type protectedReferencesKey struct{}
+
+// protectedReferences maps the placeholders that stand in for references while
+// a field is evaluated.
+type protectedReferences struct {
+	all         *strings.Replacer // placeholder to inserted text or original reference
+	toCommand   *strings.Replacer // placeholder to the text a substituted command receives
+	fromCommand *strings.Replacer // command token back to its unresolved placeholder
+}
+
 func resolveBindings(
 	ctx context.Context,
 	input string,
 	scope RuntimeScope,
 	field string,
 	notices ValueReferenceNoticeSink,
-) (string, map[string]string, error) {
-	protected := make(map[string]string)
-	seed := input
+) (string, protectedReferences, error) {
+	var all, toCommand, fromCommand []string
+	// Tokens come from one process-wide counter and all contain "DAGU_", so they
+	// only need checking against input that contains it.
+	taken := input
+	if !strings.Contains(input, "DAGU_") {
+		taken = ""
+	}
+	// A leading non-identifier rune keeps an adjacent $NAME from absorbing a placeholder.
 	resolved, err := walkBindings(input, func(token string, path string) (string, error) {
 		value, err := bindingValue(ctx, path, scope, true)
 		if err != nil {
 			addUnresolvedReferenceNotice(notices, field, token, err)
-			placeholder := uniqueToken(seed, "__DAGU_UNRESOLVED_REF__")
-			seed += placeholder
-			protected[placeholder] = token
+			placeholder := uniqueToken(taken, "\uE000DAGU_UNRESOLVED_REF_")
+			// Shells get an ASCII token because Windows substitution output may not keep other runes.
+			commandToken := uniqueToken(taken, "__DAGU_UNRESOLVED_REF__")
+			all = append(all, placeholder, token)
+			toCommand = append(toCommand, placeholder, commandToken)
+			fromCommand = append(fromCommand, commandToken, placeholder)
 			return placeholder, nil
 		}
-		return formatBindingValue(value), nil
+		placeholder := uniqueToken(taken, "\uE000DAGU_RESOLVED_REF_")
+		text := formatBindingValue(value)
+		all = append(all, placeholder, text)
+		toCommand = append(toCommand, placeholder, text)
+		return placeholder, nil
 	})
-	return resolved, protected, err
+	return resolved, protectedReferences{
+		all:         newReferenceReplacer(all),
+		toCommand:   newReferenceReplacer(toCommand),
+		fromCommand: newReferenceReplacer(fromCommand),
+	}, err
 }
 
-func restoreProtectedReferences(input string, protected map[string]string) string {
-	if len(protected) == 0 {
+func newReferenceReplacer(replacements []string) *strings.Replacer {
+	if len(replacements) == 0 {
+		return nil
+	}
+	return strings.NewReplacer(replacements...)
+}
+
+func restoreProtectedReferences(input string, protected *strings.Replacer) string {
+	if protected == nil {
 		return input
 	}
-	for placeholder, token := range protected {
-		input = strings.ReplaceAll(input, placeholder, token)
-	}
-	return input
+	return protected.Replace(input)
 }
 
 func (t template) resolveReferences(ctx context.Context, r *resolver) string {
@@ -521,7 +554,7 @@ func foreachObjectField(value any, field string) (any, bool) {
 func formatForeachItemValue(value any) any {
 	switch value.(type) {
 	case map[string]any, map[string]string, []any, []string:
-		data, err := marshalUnescaped(value)
+		data, err := jsonutil.MarshalUnescaped(value)
 		if err != nil {
 			return value
 		}
@@ -570,12 +603,12 @@ func supportedStrictBinding(segments []string) bool {
 		if len(segments) != 2 && len(segments) != 3 {
 			return false
 		}
-		for _, segment := range segments[1:] {
-			if !bindingNamePattern.MatchString(segment) {
-				return false
-			}
+		if !bindingNamePattern.MatchString(segments[1]) {
+			return false
 		}
-		return true
+		// An item field is a data key, so it may start with an underscore,
+		// as the _row a workbook reader attaches to each row does.
+		return len(segments) == 2 || validOutputPathSegment(segments[2])
 	case "inputs", "outputs":
 		return len(segments) == 2 && bindingNamePattern.MatchString(segments[1])
 	case "context":

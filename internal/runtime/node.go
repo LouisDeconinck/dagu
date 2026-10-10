@@ -5,7 +5,6 @@ package runtime
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,6 +28,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/cmdutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/datapath"
 	"github.com/dagucloud/dagu/v2/internal/cmn/fileutil"
+	"github.com/dagucloud/dagu/v2/internal/cmn/jsonutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	"github.com/dagucloud/dagu/v2/internal/cmn/signal"
@@ -61,6 +61,8 @@ type Node struct {
 	// bypassPreconditions skips step precondition evaluation for this node.
 	// Step-retry plans set it when the retry asks to bypass preconditions.
 	bypassPreconditions bool
+	// preconditionCancel interrupts the running precondition check.
+	preconditionCancel context.CancelFunc
 
 	outputSchemaOnce sync.Once
 	outputSchema     *jsonschema.Resolved
@@ -217,6 +219,26 @@ func (n *Node) setupContextWithTimeout(ctx context.Context) (context.Context, co
 	}, 0
 }
 
+// watchPreconditionStop returns a context for the precondition check that Stop
+// cancels, including a stop that aborted the node before the check started.
+// The returned func ends the watch and must be called once the check returns.
+func (n *Node) watchPreconditionStop(ctx context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	n.mu.Lock()
+	n.preconditionCancel = cancel
+	aborted := n.Status() == ir.NodeAborted
+	n.mu.Unlock()
+	if aborted {
+		cancel()
+	}
+	return ctx, func() {
+		n.mu.Lock()
+		n.preconditionCancel = nil
+		n.mu.Unlock()
+		cancel()
+	}
+}
+
 func (n *Node) setExecCancel(cancel context.CancelFunc) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -227,6 +249,12 @@ func (n *Node) clearExecCancel() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.execCancel = nil
+}
+
+func (n *Node) isExecuting() bool {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	return n.execCancel != nil
 }
 
 // flusherControl coordinates shutdown of the output flusher goroutine.
@@ -457,7 +485,7 @@ func (n *Node) evaluateOutputSchema(ctx context.Context, raw string) (string, er
 	if err := decodeOutputJSON(trimmed, &decoded); err != nil {
 		return "", fmt.Errorf("failed to decode stdout JSON for output_schema: %w", err)
 	}
-	data, err := marshalCaptured(decoded)
+	data, err := jsonutil.MarshalUnescaped(decoded)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize validated output_schema value: %w", err)
 	}
@@ -516,7 +544,7 @@ func (n *Node) evaluateStructuredOutput(ctx context.Context, stdout string, stdo
 		result[key] = value
 	}
 
-	data, err := marshalCaptured(result)
+	data, err := jsonutil.MarshalUnescaped(result)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize structured output: %w", err)
 	}
@@ -610,7 +638,7 @@ func (n *Node) resolveStructuredOutputEntry(ctx context.Context, key string, ent
 }
 
 func serializeOutputsValue(ctx context.Context, values any) (string, error) {
-	data, err := marshalCaptured(values)
+	data, err := jsonutil.MarshalUnescaped(values)
 	if err != nil {
 		return "", fmt.Errorf("failed to serialize outputs: %w", err)
 	}
@@ -675,18 +703,6 @@ func (n *Node) readStructuredOutputSource(ctx context.Context, key string, entry
 	default:
 		return "", fmt.Errorf("%s: unsupported output source %q", key, entry.From)
 	}
-}
-
-// marshalCaptured serializes captured output, leaving the characters a step
-// produced intact instead of escaping <, > and & as JSON escape sequences.
-func marshalCaptured(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 func decodeOutputJSON(raw string, target any) error {
@@ -1052,7 +1068,7 @@ func evalTemplateConfig(ctx context.Context, config map[string]any) (map[string]
 }
 
 func scriptField(ctx context.Context, step ir.Step) cmnvalue.Field {
-	if step.ExecutorConfig.Type == "template" {
+	if step.ExecutorConfig.IsVerbatimScript() {
 		return cmnvalue.TemplateScriptField("run")
 	}
 	command := registry.ScriptResolution(ctx, step)
@@ -1206,7 +1222,8 @@ func (n *Node) Signal(ctx context.Context, sig os.Signal, allowOverride bool) {
 func (n *Node) Stop(ctx context.Context, intent cmdutil.TerminationIntent, allowOverride bool) {
 	n.mu.Lock()
 	status := n.Status()
-	if status != ir.NodeRunning {
+	// Cleanup receives forced termination only after its graceful stop.
+	if status != ir.NodeRunning && (status != ir.NodeAborted || n.execCancel == nil || !intent.IsForce()) {
 		n.mu.Unlock()
 		return
 	}
@@ -1217,9 +1234,13 @@ func (n *Node) Stop(ctx context.Context, intent cmdutil.TerminationIntent, allow
 		n.SetStatus(ir.NodeAborted)
 	}
 	cancel := n.execCancel
+	cancelCheck := n.preconditionCancel
 	cmd := n.cmd
 	n.mu.Unlock()
 
+	if isTermination && cancelCheck != nil {
+		cancelCheck()
+	}
 	if isTermination && cancel != nil && cmd == nil {
 		cancel()
 	}
@@ -1874,7 +1895,9 @@ func (node *Node) evalPreconditions(ctx context.Context) error {
 	logger.Infof(ctx, "Checking preconditions for \"%s\"", node.Name())
 	env := GetEnv(ctx)
 	shell := env.Shell(ctx)
-	results, err := EvaluateConditions(ctx, shell, conditions)
+	checkCtx, stopCheck := node.watchPreconditionStop(ctx)
+	results, err := EvaluateConditions(checkCtx, shell, conditions)
+	stopCheck()
 	node.SetPreconditionResults(results)
 	if err != nil {
 		logger.Infof(ctx, "Preconditions failed for \"%s\"", node.Name())

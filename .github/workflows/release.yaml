@@ -15,6 +15,12 @@ jobs:
   # Build release binaries
   goreleaser:
     runs-on: ubuntu-latest
+    # id-token and attestations let the attest step below record build
+    # provenance for the archives this job produces.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Check out code
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -53,6 +59,55 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{secrets.DAGU_GITHUB_TOKEN}}
+
+      # Attest the archives here, from the bytes GoReleaser just built, so the
+      # packslip job below links this provenance instead of attesting copies it
+      # downloads back from the release. The release is already public here, so
+      # a Sigstore outage must not skip the jobs that need this one.
+      - name: Attest release archives
+        continue-on-error: true
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/checksums.txt
+
+  # The packslip is this release's signed inventory: every archive's digest and
+  # the executable inside it, plus the completions and the dagu skill that match
+  # this version, signed with this workflow's identity rather than a key. It
+  # lets installers such as mise verify a download against dagucloud/dagu.
+  # See https://packslip.dev.
+  packslip:
+    name: Publish packslip
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      # The action checks the packslip binary only against jdx/packslip as a
+      # whole, and release assets can be replaced, so pin the bytes here.
+      # Bump PACKSLIP_VERSION and PACKSLIP_SHA256 with the action pin.
+      - name: Install packslip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKSLIP_VERSION: 1.4.0
+          PACKSLIP_SHA256: a3b0038562695545109d697642035c0fe23ab3aeed28c5142136468d24020177
+        run: |
+          dir="${RUNNER_TEMP}/packslip-pinned"
+          asset="packslip-v${PACKSLIP_VERSION}-linux-x64.tar.xz"
+          gh release download "v${PACKSLIP_VERSION}" --repo jdx/packslip \
+            --pattern "$asset" --dir "$dir"
+          echo "${PACKSLIP_SHA256}  ${dir}/${asset}" | sha256sum --check -
+          tar -xJf "${dir}/${asset}" -C "$dir" --strip-components=1
+
+      - uses: jdx/packslip@87479dfc6443253dff69601cace5fc6ea07e6df5 # v1.4.0
+        with:
+          packslip-path: ${{ runner.temp }}/packslip-pinned/packslip
+          download: dagu_*.tar.gz
+          bin: dagu
+          attest: link
+          resources: |
+            completion/bash,zsh,fish,powershell=exec:dagu completion {shell}
+            skill/dagu=repo:skills/dagu
 
   # The Inno Setup compiler is Windows-only, so the installer cannot be produced
   # in the GoReleaser job. It wraps the amd64 binary that job already published,

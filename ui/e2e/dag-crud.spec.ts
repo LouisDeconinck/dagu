@@ -19,6 +19,12 @@ function dagDefinitionsEntry(page: Page, dagName: string) {
     .first();
 }
 
+function specViewButton(page: Page, name: string) {
+  return page
+    .getByRole('group', { name: 'View mode' })
+    .getByRole('button', { name, exact: true });
+}
+
 function localScopedURL(baseURL: string, path: string) {
   const url = new URL(path, baseURL);
   url.searchParams.set('remoteNode', 'local');
@@ -84,6 +90,10 @@ steps:
       await expect(saveButton).toBeDisabled();
     };
     await expect(warning).toBeVisible();
+    // The default viewport is too narrow for Split, so the tab opens on the
+    // graph; the YAML view also shows the warnings.
+    await specViewButton(page, 'YAML').click();
+    await expect(warning).toBeVisible();
     const editor = page.locator('.monaco-editor textarea').first();
     await editor.focus();
     await page.keyboard.press('ControlOrMeta+End');
@@ -98,9 +108,83 @@ steps:
     await expect(page.getByText('Valid', { exact: true })).toBeVisible();
     await expect(warning).toHaveCount(0);
     await saveSpec();
+    // The chosen view survives a reload.
     await page.reload();
     await expect(page.locator('.monaco-editor')).toBeVisible();
     await expect(warning).toHaveCount(0);
+  });
+
+  // Live validation redraws the graph and errors beside the editor. None of
+  // that may move the editor while the user types.
+  test('keeps the spec editor in place while the split preview updates', async ({ page, request }) => {
+    const stack = await loadStack();
+    const token = await loginViaAPI(
+      request,
+      stack.auth.adminUsername,
+      stack.auth.adminPassword
+    );
+    const dagName = uniqueName('e2e-spec-anchor');
+    const definition = `name: ${dagName}
+steps:
+  - name: first
+    run: echo first
+`;
+    const fileName = await writeLocalDAG(dagName, definition);
+    await waitForDAGAvailable(request, token, fileName);
+    // Wide enough for the graph to sit beside the editor.
+    await page.setViewportSize({ width: 1600, height: 900 });
+    await page.goto(`/dags/${encodeURIComponent(fileName)}/spec`);
+
+    const graph = page.locator('.mermaid svg');
+    const monaco = page.locator('.monaco-editor').first();
+    await expect(specViewButton(page, 'Split')).toHaveAttribute(
+      'aria-pressed',
+      'true'
+    );
+    await expect(graph.getByText('first', { exact: true })).toBeInViewport();
+    await expect(monaco).toBeInViewport();
+    const editorTop = async () => (await monaco.boundingBox())?.y ?? NaN;
+    const initialTop = await editorTop();
+    // Scroll positions snap to whole pixels while preview heights do not.
+    const expectEditorInPlace = async () =>
+      expect(Math.abs((await editorTop()) - initialTop)).toBeLessThan(2);
+
+    // Single-line flow YAML sidesteps Monaco's auto-indent on typed newlines.
+    // Brackets Monaco auto-closes and does not overtype end up after the
+    // cursor, so the rest of the line is dropped. Select-all right after
+    // focusing is occasionally lost, so the replacement is retried until the
+    // buffer is that single line.
+    const replaceSpec = async (spec: string) => {
+      await expect(async () => {
+        await page.keyboard.press('ControlOrMeta+A');
+        await page.keyboard.insertText(spec);
+        await page.keyboard.press('Shift+End');
+        await page.keyboard.press('Delete');
+        await expect(monaco.locator('.view-line')).toHaveCount(1, {
+          timeout: 500,
+        });
+      }).toPass();
+    };
+    const step = (name: string, extra = '') =>
+      `{name: ${name}, run: echo ${name}${extra}}`;
+    await page.locator('.monaco-editor textarea').first().focus();
+    await expect(monaco).toHaveClass(/\bfocused\b/);
+
+    await replaceSpec('steps: []');
+    await expect(page.getByText('No steps to render')).toBeVisible();
+    await expectEditorInPlace();
+
+    await replaceSpec(`steps: [${step('first')}, ${step('second')}, ${step('third')}]`);
+    await expect(page.getByText('Valid', { exact: true })).toBeVisible();
+    await expect(graph.getByText('third', { exact: true })).toBeVisible();
+    await expectEditorInPlace();
+
+    await replaceSpec(
+      `steps: [${step('first')}, ${step('second')}, ` +
+        `${step('third', ', depends: [missing]')}]`
+    );
+    await expect(page.getByText(/^\d+ issues?$/)).toBeVisible();
+    await expectEditorInPlace();
   });
 
   test('renames a DAG from the UI', async ({ page, request }) => {
@@ -192,6 +276,62 @@ steps:
       }
     );
     expect(response.ok()).toBeFalsy();
+  });
+
+  // Pins are shared by every user of the server, so the test always unpins.
+  test('pins and unpins a workflow', async ({ page, request }) => {
+    const stack = await loadStack();
+    const token = await loginViaAPI(
+      request,
+      stack.auth.adminUsername,
+      stack.auth.adminPassword
+    );
+    const headers = { Authorization: `Bearer ${token}` };
+
+    const dagName = uniqueName('e2e-pin');
+    const fileName = await writeLocalDAG(
+      dagName,
+      `
+name: ${dagName}
+steps:
+  - name: echo
+    run: echo "pin test"
+`
+    );
+    await waitForDAGAvailable(request, token, fileName);
+    const isPinned = async () => {
+      const resp = await request.get(
+        `/api/v1/dags/${encodeURIComponent(fileName)}?remoteNode=local`,
+        { headers }
+      );
+      return ((await resp.json()) as { pinned: boolean }).pinned;
+    };
+
+    try {
+      await page.goto('/dags/');
+      const dagEntry = dagDefinitionsEntry(page, dagName);
+      await expect(dagEntry).toBeVisible();
+      await dagEntry
+        .getByRole('button', { name: `Pin workflow ${dagName}` })
+        .click();
+      await expect.poll(isPinned, { timeout: 15_000 }).toBe(true);
+      await expect(
+        page.getByText('Pinned', { exact: true }).first()
+      ).toBeVisible();
+
+      await page.goto(`/dags/${encodeURIComponent(fileName)}`);
+      const headerPin = page.getByRole('button', {
+        name: `Pin workflow ${dagName}`,
+      });
+      await expect(headerPin).toHaveAttribute('aria-pressed', 'true');
+      await headerPin.click();
+      await expect.poll(isPinned, { timeout: 15_000 }).toBe(false);
+    } finally {
+      await request.delete(
+        `/api/v1/dags/${encodeURIComponent(fileName)}/pin?remoteNode=local`,
+        { headers }
+      );
+    }
   });
 
   test('suspends and resumes a DAG schedule', async ({ page, request }) => {

@@ -4,28 +4,29 @@
 package cmd
 
 import (
-	"fmt"
 	"path/filepath"
 
 	"github.com/dagucloud/dagu/v2/internal/browserhost"
+	"github.com/dagucloud/dagu/v2/internal/cmn/replaycache"
 	"github.com/spf13/cobra"
 )
 
-var browserCacheStepFlag = commandLineFlag{
+var replayCacheStepFlag = commandLineFlag{
 	name:  "step",
 	usage: "Clear only this step (step ID, or step name when the step has no ID)",
 }
 
-// Browser returns the command group for browser step state.
+// Browser returns the command group for browser sessions and browser step
+// state.
 func Browser() *cobra.Command {
 	cmd := NewCommand(&cobra.Command{
 		Use:   "browser",
-		Short: "Manage state kept by browser steps",
+		Short: "Work sites in browser sessions and manage state kept by browser steps",
 	}, nil, func(ctx *Context, _ []string) error {
 		return ctx.Command.Help()
 	})
 
-	cmd.AddCommand(browserCacheCommand())
+	cmd.AddCommand(browserCacheCommand(), browserSessionCommand())
 	return cmd
 }
 
@@ -60,44 +61,13 @@ Examples:
   dagu browser cache clear billing --step login    # Clear one step
 `,
 		Args: cobra.ExactArgs(1),
-	}, []commandLineFlag{browserCacheStepFlag}, runBrowserCacheClear)
+	}, []commandLineFlag{replayCacheStepFlag}, runBrowserCacheClear)
 }
 
 func runBrowserCacheClear(ctx *Context, args []string) error {
-	dagName, err := extractDAGName(ctx, args[0])
-	if err != nil {
-		return fmt.Errorf("failed to extract DAG name: %w", err)
-	}
-	step, err := ctx.StringParam(browserCacheStepFlag.name)
-	if err != nil {
-		return err
-	}
-
-	removed, err := browserReplayCache(ctx).Clear(dagName, step)
-	if err != nil {
-		return fmt.Errorf("failed to clear browser replay cache for %q: %w", dagName, err)
-	}
-	if ctx.Quiet {
-		return nil
-	}
-
-	out := ctx.Command.OutOrStdout()
-	if len(removed) == 0 {
-		if step != "" {
-			_, err = fmt.Fprintf(out, "No browser replay cache for step %q of DAG %q\n", step, dagName)
-		} else {
-			_, err = fmt.Fprintf(out, "No browser replay cache for DAG %q\n", dagName)
-		}
-		return err
-	}
-	for _, s := range removed {
-		if _, err := fmt.Fprintf(out, "Removed browser replay cache for step %q of DAG %q\n", s, dagName); err != nil {
-			return err
-		}
-	}
-	return nil
+	return clearReplayCache(ctx, args[0], namedReplayCache{kind: browserhost.AgentProvider, store: browserReplayCache(ctx)})
 }
 
-func browserReplayCache(ctx *Context) *browserhost.ReplayCache {
-	return browserhost.NewReplayCache(filepath.Join(ctx.Config.Paths.DataDir, browserhost.DataDirName))
+func browserReplayCache(ctx *Context) *replaycache.Store {
+	return replaycache.New(filepath.Join(ctx.Config.Paths.DataDir, browserhost.DataDirName))
 }

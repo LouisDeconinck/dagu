@@ -15,7 +15,9 @@ Load only the reference file that matches the task.
 - Prefer `id` on every step. Omit `name` unless the display label must differ from the step ID.
 - Prefer `dagu schema ...` and `dagu validate ...` over guessing field names or shapes.
 - Prefer `action: template.render` when generating text files, prompts, or artifacts instead of assembling them with shell `echo` or heredocs.
+- Prefer `action: js.run` for transforming data between steps (parsing, filtering, reshaping, extracting with regular expressions, computing values) instead of `python -c`, Python or Node heredocs, or `awk`, `sed`, and `jq` pipelines in `run:`. It needs no interpreter on the host or worker, Dagu passes its script as written so `${...}` and `$` need no escaping, syntax errors fail validation before a run, and its returned value is clean stdout for `output:`. Pass data in with `with.input` or `with.input_file`. Keep `run:` for invoking CLIs and for work that needs the network, the filesystem, environment variables, or a library; `js.run` has none of these. A single jq path such as `.items[].id` is fine in `jq.filter`.
 - Prefer `file.*` actions for local file operations such as stat, read, write, copy, move, delete, mkdir, and list instead of shelling out to `cp`, `mv`, `rm`, or `mkdir`.
+- Prefer `xlsx.*` actions for `.xlsx` workbooks: `xlsx.read` for rows, `xlsx.validate` before acting on them, `xlsx.write` or `xlsx.append` for reports, `xlsx.update_rows` to write per-row results back, `xlsx.write_cells` to fill a template, `xlsx.sheet` to manage sheets, `xlsx.convert` to hand a sheet to a tool that reads CSV, and `xlsx.extract` to read named fields out of a form-like sheet whose layout differs by sender, instead of a Python or PowerShell script. Inspect a workbook first with `dagu xlsx inspect` or the MCP `workbook` read target.
 - Prefer `git.worktree.add` and `git.worktree.remove` when steps need isolated branches inside an existing local Git repository. Add an explicit remove step when the workflow should delete the worktree.
 - Prefer `stdout.artifact` / `stderr.artifact` when a command stream should become a DAG-run artifact, especially for large reports, JSON, Markdown, logs, or generated files.
 - Prefer `artifact.*` actions for explicit artifact reads/writes/lists. Use `DAG_RUN_ARTIFACTS_DIR` only when a tool truly needs a filesystem path inside the step.
@@ -205,9 +207,9 @@ Complete the task from a local CLI context with `dagu human-task complete --run-
 
 Load only the file you need:
 
-- `references/steptypes.md` when choosing an action or checking action-specific behavior such as `human.task`, `dag.run`, `parallel`, `git.worktree.*`, `jq.filter`, `file.*`, `state.*`, `template.render`, or `browser.*`
+- `references/steptypes.md` when choosing an action or checking action-specific behavior such as `human.task`, `dag.run`, `parallel`, `git.worktree.*`, `jq.filter`, `js.run`, `file.*`, `xlsx.*`, `state.*`, `template.render`, `chat.completion`, `browser.*`, or `computer.*`
 - `references/dagu-action.md` when creating a reusable `dagu-action.yaml` package or checking action input/output schema behavior
-- `references/cli.md` when choosing or using Dagu CLI commands, including workflow inspection, execution, and cleanup operations
+- `references/cli.md` when choosing or using Dagu CLI commands, including workflow inspection, execution, and cleanup operations, and browser sessions for building a browser step on a site you have not seen
 - `references/context.md` when using `${context.*}` metadata references or declared step `outputs:`
 - `references/build.md` when creating or troubleshooting a `type: build` file workflow, path references, reuse decisions, or `--no-reuse`
 - `references/file-dependencies.md` when a DAG needs scripts, configuration, or other files from its working directory

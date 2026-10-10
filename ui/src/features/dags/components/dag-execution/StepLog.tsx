@@ -14,7 +14,7 @@ import React, {
   useState,
 } from 'react';
 import { ChevronDown, ChevronUp, Download, Search, X } from 'lucide-react';
-import { components, Stream } from '../../../../api/v1/schema';
+import { components, NodeStatus, Stream } from '../../../../api/v1/schema';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ReloadButton } from '@/components/ui/reload-button';
@@ -23,12 +23,17 @@ import { downloadFromUrl } from '@/lib/download';
 import { useConfig } from '../../../../contexts/ConfigContext';
 import { useRemoteNode } from '../../../../contexts/RemoteNodeContext';
 import { useUserPreferences } from '../../../../contexts/UserPreference';
-import { useQuery } from '../../../../hooks/api';
-import { whenEnabled } from '../../../../hooks/queryUtils';
 import { useStepLogSSE } from '../../../../hooks/useStepLogSSE';
+import {
+  type ForeachLogTarget,
+  isSubDAGRun as isSubDAGRunDetails,
+  stepLogDownloadPath,
+  useStepLogQuery,
+} from '../../hooks/useStepLogQuery';
 import { AnsiLine, stripAnsi } from '@/lib/ansi';
 import { isActiveNodeStatus } from '../../../../lib/status-utils';
 import LoadingIndicator from '@/components/ui/loading-indicator';
+import LogPageSizeSelect from './LogPageSizeSelect';
 import { I18nText } from '@/i18n/I18nText';
 import { I18nProps } from '@/i18n/I18nProps';
 import { useI18n } from '@/i18n/I18nProvider';
@@ -65,6 +70,10 @@ type Props = {
   stream?: Stream;
   /** Node information (optional) - contains repeated log files */
   node?: components['schemas']['Node'];
+  /** Status of the step whose log is shown, when no node describes it */
+  status?: NodeStatus;
+  /** Reads a body step log of a foreach item; stepName is then the body step */
+  foreach?: ForeachLogTarget;
   followTail?: boolean;
   onFollowTailChange?: (following: boolean) => void;
   onSettled?: (stepName: string) => void;
@@ -85,6 +94,8 @@ function StepLog(props: Props) {
     props.stream,
     props.dagRun?.rootDAGRunName,
     props.dagRun?.rootDAGRunId,
+    props.foreach?.stepName,
+    props.foreach?.item,
   ]);
   return <StepLogContent key={identity} {...props} />;
 }
@@ -96,6 +107,8 @@ function StepLogContent({
   dagRun,
   stream = Stream.stdout,
   node,
+  status,
+  foreach,
   followTail,
   onFollowTailChange,
   onSettled,
@@ -107,13 +120,14 @@ function StepLogContent({
   const [viewMode, setViewMode] = useState<'tail' | 'head' | 'page'>('tail');
   const [pageSize, setPageSize] = useState(SSE_TAIL_LINES);
   const [currentPage, setCurrentPage] = useState(1);
+  const [pageInput, setPageInput] = useState<number | ''>(1);
   const [jumpToLine, setJumpToLine] = useState<number | ''>('');
   const [searchTerm, setSearchTerm] = useState('');
   const [activeMatch, setActiveMatch] = useState(0);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const controlledFollowTail = followTail !== undefined;
   const showNavigation = !controlledFollowTail || navigationOpen;
-  const isActive = isActiveNodeStatus(node?.status);
+  const isActive = isActiveNodeStatus(status ?? node?.status);
 
   const [localLiveMode, setLocalLiveMode] = useState(isActive);
   const [localFollowing, setLocalFollowing] = useState(true);
@@ -136,18 +150,16 @@ function StepLogContent({
   const navigationTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const logContainerRef = useRef<HTMLDivElement>(null);
 
-  const isSubDAGRun =
-    dagRun &&
-    dagRun.rootDAGRunId &&
-    dagRun.rootDAGRunName &&
-    dagRun.rootDAGRunId !== dagRun.dagRunId;
+  const isSubDAGRun = isSubDAGRunDetails(dagRun);
 
   // SSE supplies a fixed tail with stdout counts; other views use REST.
+  // Foreach body logs have no SSE topic and always poll.
   const shouldUseSSE =
     viewMode === 'tail' &&
     liveMode &&
     isActive &&
     !isSubDAGRun &&
+    !foreach &&
     stream === Stream.stdout &&
     pageSize === SSE_TAIL_LINES;
   const sseResult = useStepLogSSE(
@@ -180,54 +192,11 @@ function StepLogContent({
     [isActive, liveMode, usePolling]
   );
 
-  const subDAGQuery = useQuery(
-    '/dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/{stepName}/log',
-    whenEnabled(!!isSubDAGRun, {
-      params: {
-        query: {
-          remoteNode,
-          stream,
-          tail,
-          head,
-          offset,
-          limit,
-        },
-        path: {
-          name: dagRun?.rootDAGRunName as string,
-          dagRunId: dagRun?.rootDAGRunId as string,
-          subDAGRunId: dagRun?.dagRunId as string,
-          stepName,
-        },
-      },
-    }),
+  const { data, isLoading, error, mutate } = useStepLogQuery(
+    { dagName, dagRunId, stepName, dagRun, foreach },
+    { stream, tail, head, offset, limit },
     swrOptions
   );
-
-  const dagRunQuery = useQuery(
-    '/dag-runs/{name}/{dagRunId}/steps/{stepName}/log',
-    whenEnabled(!isSubDAGRun, {
-      params: {
-        query: {
-          remoteNode,
-          stream,
-          tail,
-          head,
-          offset,
-          limit,
-        },
-        path: {
-          name: dagName,
-          dagRunId,
-          stepName,
-        },
-      },
-    }),
-    swrOptions
-  );
-
-  const { data, isLoading, error, mutate } = isSubDAGRun
-    ? subDAGQuery
-    : dagRunQuery;
 
   useEffect(() => {
     const finished = !isActive && (wasActive.current || !!onSettled);
@@ -366,6 +335,11 @@ function StepLogContent({
     };
   }, [viewMode, currentPage, pageSize]);
 
+  // Keep the page-jump input in sync with the applied page
+  useEffect(() => {
+    setPageInput(currentPage);
+  }, [currentPage]);
+
   function handleViewModeChange(mode: 'tail' | 'head' | 'page'): void {
     if (mode === 'tail') {
       resumeFollowing();
@@ -429,19 +403,23 @@ function StepLogContent({
   }
 
   const handleDownload = useCallback(async () => {
-    const endpoint = isSubDAGRun
-      ? `${config.apiURL}/dag-runs/${dagRun?.rootDAGRunName}/${dagRun?.rootDAGRunId}/sub-dag-runs/${dagRun?.dagRunId}/steps/${stepName}/log/download`
-      : `${config.apiURL}/dag-runs/${dagName}/${dagRunId}/steps/${stepName}/log/download`;
+    const endpoint = stepLogDownloadPath(config.apiURL, {
+      dagName,
+      dagRunId,
+      stepName,
+      dagRun,
+      foreach,
+    });
 
     const url = new URL(endpoint, window.location.origin);
     url.searchParams.set('remoteNode', remoteNode);
     url.searchParams.set('stream', stream);
 
+    const fileStem = foreach
+      ? `${dagName}-${dagRunId}-${foreach.stepName}-${foreach.item}-${stepName}`
+      : `${dagName}-${dagRunId}-${stepName}`;
     try {
-      await downloadFromUrl(
-        url.toString(),
-        `${dagName}-${dagRunId}-${stepName}-${stream}.log`
-      );
+      await downloadFromUrl(url.toString(), `${fileStem}-${stream}.log`);
     } catch (err) {
       console.error('Download failed:', err);
     }
@@ -452,7 +430,7 @@ function StepLogContent({
     stepName,
     stream,
     dagRun,
-    isSubDAGRun,
+    foreach,
     remoteNode,
   ]);
 
@@ -525,6 +503,15 @@ function StepLogContent({
     scrollToMatch(next);
   }
 
+  function handlePageJump(): void {
+    if (pageInput === '' || !Number.isFinite(pageInput)) {
+      return;
+    }
+    const page = Math.min(Math.max(Math.floor(pageInput), 1), totalPages);
+    setPageInput(page);
+    handlePageChange(page);
+  }
+
   function getLineNumber(index: number): number {
     switch (viewMode) {
       case 'tail':
@@ -572,35 +559,18 @@ function StepLogContent({
           )}
 
           {showNavigation && (
-            <select
-              aria-label={ts('Lines per page')}
-              className="h-7 px-2 text-xs border border-border rounded-md bg-surface text-foreground flex-shrink-0 focus:outline-none focus:border-ring"
-              value={pageSize}
-              onChange={(e) => {
+            <LogPageSizeSelect
+              pageSize={pageSize}
+              disabled={isNavigating}
+              onPageSizeChange={(size) => {
                 setPausedData(null);
                 if (viewMode === 'tail') {
                   resumeFollowing();
                 }
-                setPageSize(Number(e.target.value));
+                setPageSize(size);
+                setCurrentPage(1);
               }}
-              disabled={isNavigating}
-            >
-              <option value="100">
-                <I18nText text={'100 lines'} />
-              </option>
-              <option value="500">
-                <I18nText text={'500 lines'} />
-              </option>
-              <option value="1000">
-                <I18nText text={'1000 lines'} />
-              </option>
-              <option value="5000">
-                <I18nText text={'5000 lines'} />
-              </option>
-              <option value="10000">
-                <I18nText text={'10000 lines'} />
-              </option>
-            </select>
+            />
           )}
 
           {controlledFollowTail && (
@@ -713,12 +683,41 @@ function StepLogContent({
             >
               <I18nText text="Previous page" />
             </Button>
-            <span className="text-xs">
-              <I18nText
-                text="Page {current} of {total}"
-                values={{ current: currentPage, total: totalPages }}
+            <span className="flex items-center gap-1 text-xs">
+              <I18nText text={'Page'} />
+              <Input
+                aria-label={ts('Page')}
+                type="number"
+                min={1}
+                max={totalPages}
+                value={pageInput}
+                onChange={(e) =>
+                  setPageInput(
+                    e.target.value === '' ? '' : Number(e.target.value)
+                  )
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !isNavigating) {
+                    handlePageJump();
+                  }
+                }}
+                className="w-16 h-6 px-1 text-xs"
+                disabled={isNavigating}
               />
+              <I18nText text="of {total}" values={{ total: totalPages }} />
             </span>
+            <Button
+              size="sm"
+              onClick={handlePageJump}
+              disabled={
+                isNavigating ||
+                pageInput === '' ||
+                (pageInput as number) < 1 ||
+                (pageInput as number) > totalPages
+              }
+            >
+              <I18nText text={'Go'} />
+            </Button>
             <Button
               size="sm"
               onClick={() =>

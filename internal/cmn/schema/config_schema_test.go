@@ -122,6 +122,34 @@ ip_access:
 	}
 }
 
+func TestConfigSchemaLicenseServerName(t *testing.T) {
+	t.Parallel()
+
+	resolved := mustResolveConfigSchema(t)
+	require.NoError(t, resolved.Validate(mustParseYAMLDocument(t, `
+license:
+  server_name: build-01
+`)))
+	require.Error(t, resolved.Validate(mustParseYAMLDocument(t, `
+license:
+  server_name: ""
+`)))
+}
+
+func TestConfigSchemaCloudReport(t *testing.T) {
+	t.Parallel()
+
+	resolved := mustResolveConfigSchema(t)
+	require.NoError(t, resolved.Validate(mustParseYAMLDocument(t, `
+cloud:
+  report: false
+`)))
+	require.Error(t, resolved.Validate(mustParseYAMLDocument(t, `
+cloud:
+  report: "no"
+`)))
+}
+
 func TestConfigSchemaOIDCWorkspaceMappings(t *testing.T) {
 	t.Parallel()
 

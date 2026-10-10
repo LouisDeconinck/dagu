@@ -6,6 +6,7 @@ import React from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import dayjs from '@/lib/dayjs';
 import { Status, ViewSpecType } from '../../api/v1/schema';
+import { AutocompleteInput } from '@/components/ui/autocomplete-input';
 import { Button } from '@/components/ui/button';
 import { DateRangePicker } from '@/components/ui/date-range-picker';
 import { Input } from '@/components/ui/input';
@@ -41,6 +42,7 @@ import {
 } from '../../features/views/viewScope';
 import { useViews, type View } from '../../hooks/useViews';
 import { useQuery } from '../../hooks/api';
+import { useDebouncedValue } from '../../hooks/useDebouncedValue';
 import { useBulkDAGRunSelection } from '../../features/dag-runs/hooks/useBulkDAGRunSelection';
 import {
   withoutWorkspaceLabels,
@@ -178,6 +180,9 @@ function useAutoLoadMore(
 function supportsIntersectionObserver(): boolean {
   return typeof IntersectionObserver !== 'undefined';
 }
+
+const NAME_SUGGESTION_DEBOUNCE_MS = 300;
+const NAME_SUGGESTION_LIMIT = 50;
 
 function DAGRuns() {
   const location = useLocation();
@@ -342,8 +347,8 @@ function DAGRuns() {
     const dagRunId = params.get('selectedRunId');
     return name && dagRunId ? { name, dagRunId } : null;
   });
-  const [selectedDAGRunTab, setSelectedDAGRunTab] = React.useState<StatusTab>(() =>
-    readSelectedRunTab(location.search)
+  const [selectedDAGRunTab, setSelectedDAGRunTab] = React.useState<StatusTab>(
+    () => readSelectedRunTab(location.search)
   );
   const updateSelectedDAGRun = React.useCallback(
     (
@@ -502,21 +507,21 @@ function DAGRuns() {
           const date = dayjs(value);
           return {
             from: date.startOf('day').format('YYYY-MM-DDTHH:mm'),
-            to: date.endOf('day').format('YYYY-MM-DDTHH:mm'),
+            to: date.startOf('day').add(1, 'day').format('YYYY-MM-DDTHH:mm'),
           };
         }
         case 'month': {
           const date = dayjs(value);
           return {
             from: date.startOf('month').format('YYYY-MM-DDTHH:mm'),
-            to: date.endOf('month').format('YYYY-MM-DDTHH:mm'),
+            to: date.startOf('month').add(1, 'month').format('YYYY-MM-DDTHH:mm'),
           };
         }
         case 'year': {
           const date = dayjs(value);
           return {
             from: date.startOf('year').format('YYYY-MM-DDTHH:mm'),
-            to: date.endOf('year').format('YYYY-MM-DDTHH:mm'),
+            to: date.startOf('year').add(1, 'year').format('YYYY-MM-DDTHH:mm'),
           };
         }
       }
@@ -785,6 +790,33 @@ function DAGRuns() {
     [labelsData?.labels]
   );
 
+  // Match DAG names server-side to feed the name filter autocomplete, so DAGs
+  // without loaded runs are suggested too.
+  const debouncedSearchText = useDebouncedValue(
+    searchText,
+    NAME_SUGGESTION_DEBOUNCE_MS
+  );
+  const dagNameQuery = debouncedSearchText.trim();
+  const { data: dagListData } = useQuery(
+    '/dags',
+    dagNameQuery
+      ? {
+          params: {
+            query: {
+              remoteNode: appBarContext.selectedRemoteNode || 'local',
+              name: dagNameQuery,
+              perPage: NAME_SUGGESTION_LIMIT,
+              ...workspaceQuery,
+            },
+          },
+        }
+      : null,
+    {
+      revalidateOnFocus: false,
+      revalidateIfStale: false,
+    }
+  );
+
   const dagRunQuery = React.useMemo(
     () => ({
       remoteNode: appBarContext.selectedRemoteNode || 'local',
@@ -819,6 +851,34 @@ function DAGRuns() {
   } = usePaginatedDAGRuns({
     query: dagRunQuery,
   });
+
+  // DAG name suggestions combine name matches with names of runs already
+  // loaded, so runs whose DAG is no longer listed are still suggested.
+  const dagNameSuggestions = React.useMemo(() => {
+    const names = new Set<string>();
+    for (const item of dagListData?.dags ?? []) {
+      if (item.dag.name) {
+        names.add(item.dag.name);
+      }
+    }
+    for (const run of dagRuns) {
+      if (run.name) {
+        names.add(run.name);
+      }
+    }
+    return [...names];
+  }, [dagListData?.dags, dagRuns]);
+
+  const dagRunIdSuggestions = React.useMemo(() => {
+    const ids = new Set<string>();
+    for (const run of dagRuns) {
+      if (run.dagRunId) {
+        ids.add(run.dagRunId);
+      }
+    }
+    return [...ids];
+  }, [dagRuns]);
+
   const navigateGroupedRunHistory = React.useCallback(
     (direction: 'up' | 'down') => {
       if (!selectedDAGRun) {
@@ -1156,16 +1216,6 @@ function DAGRuns() {
     }
   };
 
-  const handleNameInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setSearchText(e.target.value);
-  };
-
-  const handleDagRunIdInputChange = (
-    e: React.ChangeEvent<HTMLInputElement>
-  ) => {
-    setDagRunId(e.target.value);
-  };
-
   const handleStatusChange = (value: string) => {
     setStatus(value);
     // Automatically trigger search when status changes
@@ -1276,12 +1326,6 @@ function DAGRuns() {
     }
   };
 
-  const handleInputKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      handleSearch();
-    }
-  };
-
   // Format timezone offset for display
   const formatTimezoneOffset = (): string => {
     if (config.tzOffsetInSec === undefined) return '';
@@ -1372,20 +1416,22 @@ function DAGRuns() {
         <div className="mb-3 space-y-3 rounded-lg border border-border bg-card/50 p-3">
           <div className="flex flex-wrap items-center gap-2">
             <I18nProps>
-              <Input
+              <AutocompleteInput
                 placeholder="Filter by DAG name..."
                 value={searchText}
-                onChange={handleNameInputChange}
-                onKeyDown={handleInputKeyPress}
+                onValueChange={setSearchText}
+                onEnterPress={() => handleSearch()}
+                suggestions={dagNameSuggestions}
                 className="w-[200px]"
               />
             </I18nProps>
             <I18nProps>
-              <Input
+              <AutocompleteInput
                 placeholder="Filter by Run ID..."
                 value={dagRunId}
-                onChange={handleDagRunIdInputChange}
-                onKeyDown={handleInputKeyPress}
+                onValueChange={setDagRunId}
+                onEnterPress={() => handleSearch()}
+                suggestions={dagRunIdSuggestions}
                 className="w-[180px]"
               />
             </I18nProps>

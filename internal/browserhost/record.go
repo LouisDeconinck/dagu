@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dagucloud/dagu/v2/internal/cmn/dirlock"
 	"github.com/dagucloud/dagu/v2/internal/cmn/fileutil"
 )
 
@@ -29,18 +30,31 @@ const (
 type State string
 
 const (
-	// StateRunning means a step execution is driving the browser.
+	// StateRunning means a step execution, or a browser session command, is
+	// driving the browser.
 	StateRunning State = "running"
 	// StateDetached means the browser waits for a step to resume it.
 	StateDetached State = "detached"
+	// StateInteractive means a browser session's browser waits for the
+	// session's next command.
+	StateInteractive State = "interactive"
+	// StateEnded means a browser session's browser is closed. Its record
+	// keeps the session's history until its deadline.
+	StateEnded State = "ended"
 )
 
 const (
-	recordsDirName = "sessions"
-	recordFileExt  = ".json"
-	recordFileMode = 0o600
-	recordDirMode  = 0o700
+	recordsDirName     = "sessions"
+	interactiveDirName = "interactive"
+	recordFileExt      = ".json"
+	recordFileMode     = 0o600
+	recordDirMode      = 0o700
+	sessionLockSuffix  = ".lock"
 )
+
+// SessionRetention is how long a browser session's history is kept after
+// its browser closed on its own.
+const SessionRetention = 24 * time.Hour
 
 // Record is the durable description of one browser session kept by a step.
 type Record struct {
@@ -77,10 +91,18 @@ type Record struct {
 	// Outputs holds values extracted before the step detached.
 	Outputs map[string]any `json:"outputs,omitempty"`
 	// ReplayPending and ReplayUsed carry the step's replay cache changes
-	// across the wait: the act operations it recorded, kept only if the
-	// step succeeds, and the recordings it replayed, as they were read.
+	// across the wait: the act operations it recorded or dropped, applied
+	// only if the step succeeds, and the recordings it replayed, as they
+	// were read.
 	ReplayPending map[string]json.RawMessage `json:"replayPending,omitempty"`
 	ReplayUsed    map[string]json.RawMessage `json:"replayUsed,omitempty"`
+
+	// WorkDir holds the files a browser session owns, such as its
+	// screenshots and downloads. It is removed with the browser.
+	WorkDir string `json:"workDir,omitempty"`
+	// Interactive is a browser session's own state, which the browser
+	// runtime defines.
+	Interactive json.RawMessage `json:"interactive,omitempty"`
 }
 
 // RecordID returns the record identifier for a step of a DAG run.
@@ -94,9 +116,37 @@ type Store struct {
 	dir string
 }
 
-// NewStore returns a store rooted under the browser data directory.
+// NewStore returns the store of the browsers steps keep, rooted under the
+// browser data directory.
 func NewStore(browserDataDir string) *Store {
 	return &Store{dir: filepath.Join(browserDataDir, recordsDirName)}
+}
+
+// NewInteractiveStore returns the store of browser sessions, rooted under
+// the browser data directory. It is kept apart from the steps' store, whose
+// sweeps release records in states they do not know.
+func NewInteractiveStore(browserDataDir string) *Store {
+	return &Store{dir: filepath.Join(browserDataDir, interactiveDirName)}
+}
+
+// WorkDir returns the directory for the files the session id owns.
+func (s *Store) WorkDir(id string) string {
+	return filepath.Join(s.dir, id)
+}
+
+// SessionLock returns the lock held by whatever uses the browser of the
+// session id: one of its commands, or a sweep closing it.
+func (s *Store) SessionLock(id string) dirlock.DirLock {
+	return dirlock.New(s.lockDir(id), nil)
+}
+
+// Purge removes the record of id with its work and lock directories.
+func (s *Store) Purge(id string) error {
+	return errors.Join(os.RemoveAll(s.WorkDir(id)), os.RemoveAll(s.lockDir(id)), s.Delete(id))
+}
+
+func (s *Store) lockDir(id string) string {
+	return filepath.Join(s.dir, id+sessionLockSuffix)
 }
 
 // Save writes the record, replacing any previous version.

@@ -27,10 +27,14 @@ mail_accounts:
       provider: microsoft_refresh
       client_id: client
       refresh_token: ${SUPPORT_TOKEN}
+      scopes: [https://outlook.office.com/IMAP.AccessAsUser.All]
   team@gmail.com:
     provider: google
     smtp: {security: starttls}
     password: app-password
+  me@gmail.com:
+    provider: google
+    oauth: {provider: google_refresh, client_id: c, client_secret: s, refresh_token: r}
   billing@example.com:
     username: billing
     imap: {host: imap.example.com, skip_tls_verify: true}
@@ -49,6 +53,7 @@ steps:
 			Username: "support@example.com",
 			OAuth: &oauthconfig.Config{
 				Provider: oauthconfig.ProviderMicrosoftRefresh, ClientID: "client", RefreshToken: "${SUPPORT_TOKEN}",
+				Scopes: []string{"https://outlook.office.com/IMAP.AccessAsUser.All"},
 			},
 		},
 		"team@gmail.com": {
@@ -58,6 +63,14 @@ steps:
 			SMTP:     &ir.MailServer{Host: "smtp.gmail.com", Port: "587", Security: ir.MailSecurityStartTLS},
 			Username: "team@gmail.com",
 			Password: "app-password",
+		},
+		// An OAuth sign-in reaches Gmail through its API, so it has no servers.
+		"me@gmail.com": {
+			Provider: ir.MailProviderGoogle,
+			Username: "me@gmail.com",
+			OAuth: &oauthconfig.Config{
+				Provider: oauthconfig.ProviderGoogleRefresh, ClientID: "c", ClientSecret: "s", RefreshToken: "r",
+			},
 		},
 		"billing@example.com": {
 			Provider: ir.MailProviderIMAP,
@@ -117,6 +130,26 @@ func TestMailAccountsErrors(t *testing.T) {
 			name:    "ReferencedSecurityWithoutPort",
 			account: "{imap: {host: h, security: '${IMAP_SECURITY}'}, password: p}",
 			wantErr: `mail account "ops@example.com": imap.port is required when imap.security is a value reference`,
+		},
+		{
+			name:    "ScopesOnGoogleRefresh",
+			account: "{provider: google, oauth: {provider: google_refresh, client_id: c, client_secret: s, refresh_token: r, scopes: [x]}}",
+			wantErr: `mail account "ops@example.com": oauth.scopes is not valid for provider "google_refresh"`,
+		},
+		{
+			name:    "ServerOnGmailAPIAccount",
+			account: "{provider: google, imap: {host: imap.gmail.com}, oauth: {provider: google_refresh, client_id: c, client_secret: s, refresh_token: r}}",
+			wantErr: `mail account "ops@example.com": imap is not used by a google account with oauth, which uses the Gmail API`,
+		},
+		{
+			name:    "SMTPOnGmailAPIAccount",
+			account: "{provider: google, smtp: {security: starttls}, oauth: {provider: google_refresh, client_id: c, client_secret: s, refresh_token: r}}",
+			wantErr: `mail account "ops@example.com": smtp is not used by a google account with oauth, which uses the Gmail API`,
+		},
+		{
+			name:    "UsernameOnGmailAPIAccount",
+			account: "{provider: google, username: me, oauth: {provider: google_refresh, client_id: c, client_secret: s, refresh_token: r}}",
+			wantErr: `mail account "ops@example.com": username is not used by a google account with oauth, which uses the Gmail API`,
 		},
 		{
 			name:    "UnknownField",

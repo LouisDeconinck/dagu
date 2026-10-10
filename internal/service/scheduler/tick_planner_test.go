@@ -4,6 +4,7 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/schedulerstate"
 	"github.com/stretchr/testify/assert"
@@ -516,6 +518,54 @@ func TestTickPlanner_PlanLiveRun(t *testing.T) {
 	assert.Len(t, runs, 1)
 	assert.Equal(t, "live-dag", runs[0].DAG.Name)
 	assert.Equal(t, ir.TriggerTypeScheduler, runs[0].TriggerType)
+}
+
+func TestTickPlanner_PlanEveryInterval(t *testing.T) {
+	t.Parallel()
+
+	start := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
+	eventCh := make(chan DAGChangeEvent, 256)
+	tp := NewTickPlanner(TickPlannerConfig{
+		IsSuspended: func(_ context.Context, _ string) (bool, error) {
+			return false, nil
+		},
+		GetLatestStatus: func(_ context.Context, _ *ir.DAG) (ir.DAGRunStatus, error) {
+			return ir.DAGRunStatus{}, nil
+		},
+		Dispatch: func(_ context.Context, _ DAGEntry, _ string, _ ir.TriggerType, _ time.Time) error {
+			return nil
+		},
+		GenRunID: func(_ context.Context) (string, error) {
+			return "every-run-id", nil
+		},
+		IsRunning: func(_ context.Context, _ *ir.DAG) (bool, error) {
+			return false, nil
+		},
+		Clock: func() time.Time {
+			return start
+		},
+		Events: eventCh,
+	})
+
+	schedule, err := ir.NewCronSchedule("@every 2m")
+	require.NoError(t, err)
+	dag := &ir.DAG{
+		Name:     "every-dag",
+		Schedule: []ir.Schedule{schedule},
+	}
+	require.NoError(t, tp.Init(context.Background(), testDAGEntries(dag)))
+
+	// The epoch-aligned two-minute grid lands on every other minute tick.
+	for i, wantRun := range []bool{true, false, true} {
+		tick := start.Add(time.Duration(i) * time.Minute)
+		runs := tp.Plan(context.Background(), tick)
+		if !wantRun {
+			assert.Empty(t, runs, "tick %s", tick)
+			continue
+		}
+		require.Len(t, runs, 1, "tick %s", tick)
+		assert.True(t, tick.Equal(runs[0].ScheduledTime), "tick %s: got %s", tick, runs[0].ScheduledTime)
+	}
 }
 
 func TestTickPlanner_PlanSuspendedDAGSkipped(t *testing.T) {
@@ -1024,6 +1074,44 @@ func TestTickPlanner_ShouldRunGuardRunning(t *testing.T) {
 	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
 	runs := tp.Plan(context.Background(), now)
 	assert.Len(t, runs, 0, "should not plan run when DAG is already running")
+}
+
+// A slot skipped because its DAG is busy is logged with the DAG and the slot,
+// so the missing run can be traced.
+func TestPlanLogsBusySkip(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 7, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		running bool
+		queued  bool
+		want    string
+	}{
+		{"Running", true, false, "Skipping job because the DAG is running"},
+		{"Queued", false, true, "Skipping job because a run of the DAG is queued"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			logs := &syncBuffer{buf: new(bytes.Buffer)}
+			ctx := logger.WithFixedLogger(t.Context(), logger.NewLogger(
+				logger.WithFormat("text"), logger.WithWriter(logs),
+			))
+			tp, _ := newTestTickPlanner(&mockStateStore{state: newMockState(now.Add(-time.Minute))})
+			tp.cfg.IsRunning = func(context.Context, *ir.DAG) (bool, error) { return tt.running, nil }
+			tp.cfg.IsQueued = func(context.Context, *ir.DAG) (bool, error) { return tt.queued, nil }
+			dag := &ir.DAG{Name: "busy-dag", Schedule: []ir.Schedule{mustParseSchedule(t, "0 * * * *")}}
+			require.NoError(t, tp.Init(ctx, testDAGEntries(dag)))
+
+			require.Empty(t, tp.Plan(ctx, now))
+			out := logs.String()
+			assert.Contains(t, out, tt.want)
+			assert.Contains(t, out, "dag=busy-dag")
+			assert.Contains(t, out, "scheduled-time=2026-02-07T12:00:00")
+		})
+	}
 }
 
 func TestTickPlanner_PlanStopSchedule(t *testing.T) {

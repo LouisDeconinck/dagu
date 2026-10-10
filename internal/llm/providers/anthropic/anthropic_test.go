@@ -4,7 +4,9 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 
@@ -309,4 +311,188 @@ func TestBuildRequestBody_ThinkingTokens(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBuildRequestBody_Images(t *testing.T) {
+	t.Parallel()
+
+	provider := &Provider{config: llm.Config{APIKey: "test-key"}}
+	body, err := provider.buildRequestBody(&llm.ChatRequest{
+		Model: "claude-opus-5",
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: "plain"},
+			{Role: llm.RoleUser, Content: "describe", Images: []llm.Image{{MediaType: "image/png", Data: []byte{1, 2}}}},
+		},
+	}, false)
+	require.NoError(t, err)
+
+	var parsed struct {
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(body, &parsed))
+	require.Len(t, parsed.Messages, 2)
+	assert.JSONEq(t, `"plain"`, string(parsed.Messages[0].Content))
+	assert.JSONEq(t, `[
+		{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AQI="}},
+		{"type":"text","text":"describe"}
+	]`, string(parsed.Messages[1].Content))
+}
+
+// A tool's parameter schema reaches the API whole, so references, nested
+// definitions, and constraints keep their meaning.
+func TestBuildRequestBody_ToolInputSchema(t *testing.T) {
+	t.Parallel()
+
+	provider := &Provider{config: llm.Config{APIKey: "test-key"}}
+	parameters := map[string]any{
+		"type":                 "object",
+		"description":          "A classified note",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"category": map[string]any{"$ref": "#/$defs/category"},
+		},
+		"required": []any{"category"},
+		"$defs": map[string]any{
+			"category": map[string]any{"type": "string", "enum": []any{"refund", "question"}},
+		},
+	}
+	req := &llm.ChatRequest{
+		Model:    "claude-sonnet-4-6",
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "Hello"}},
+		Tools: []llm.Tool{{
+			Type:     "function",
+			Function: llm.ToolFunction{Name: "respond", Parameters: parameters},
+		}},
+	}
+	body, err := provider.buildRequestBody(req, false)
+	require.NoError(t, err)
+
+	var parsed struct {
+		Tools []struct {
+			InputSchema map[string]any `json:"input_schema"`
+		} `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal(body, &parsed))
+	require.Len(t, parsed.Tools, 1)
+
+	expected, err := json.Marshal(parameters)
+	require.NoError(t, err)
+	actual, err := json.Marshal(parsed.Tools[0].InputSchema)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(expected), string(actual))
+}
+
+// A schema without a type is sent as an object, which the API requires.
+func TestBuildRequestBody_ToolInputSchemaType(t *testing.T) {
+	t.Parallel()
+
+	provider := &Provider{config: llm.Config{APIKey: "test-key"}}
+	parameters := map[string]any{"properties": map[string]any{"q": map[string]any{"type": "string"}}}
+	req := &llm.ChatRequest{
+		Model:    "claude-sonnet-4-6",
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "Hello"}},
+		Tools: []llm.Tool{
+			{Type: "function", Function: llm.ToolFunction{Name: "search", Parameters: parameters}},
+			{Type: "function", Function: llm.ToolFunction{Name: "ping"}},
+		},
+	}
+	body, err := provider.buildRequestBody(req, false)
+	require.NoError(t, err)
+
+	var parsed struct {
+		Tools []struct {
+			InputSchema map[string]any `json:"input_schema"`
+		} `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal(body, &parsed))
+	require.Len(t, parsed.Tools, 2)
+	assert.Equal(t, "object", parsed.Tools[0].InputSchema["type"])
+	assert.Contains(t, parsed.Tools[0].InputSchema, "properties")
+	assert.Equal(t, map[string]any{"type": "object"}, parsed.Tools[1].InputSchema)
+	assert.NotContains(t, parameters, "type", "the caller's schema must not be modified")
+}
+
+// Forced tool use is sent only to models that accept it: models before
+// Claude 5 with thinking off. Every other request asks for auto, so the
+// API does not reject it.
+func TestBuildRequestBody_ToolChoice(t *testing.T) {
+	t.Parallel()
+
+	provider := &Provider{config: llm.Config{APIKey: "test-key"}}
+	auto := map[string]any{"type": "auto"}
+	anyTool := map[string]any{"type": "any"}
+	namedTool := map[string]any{"type": "tool", "name": "respond"}
+
+	tests := []struct {
+		name     string
+		model    string
+		choice   string
+		thinking bool
+		expected map[string]any
+	}{
+		{name: "RequiredOnSonnet46", model: "claude-sonnet-4-6", choice: "required", expected: anyTool},
+		{name: "NamedOnHaiku45", model: "claude-haiku-4-5", choice: "respond", expected: namedTool},
+		{name: "RequiredOnClaude3", model: "claude-3-5-sonnet-20241022", choice: "required", expected: anyTool},
+		{name: "RequiredOnBedrockOpus48", model: "anthropic.claude-opus-4-8", choice: "required", expected: anyTool},
+		{name: "RequiredWithThinking", model: "claude-sonnet-4-6", choice: "required", thinking: true, expected: auto},
+		{name: "NamedWithThinking", model: "claude-opus-4-6", choice: "respond", thinking: true, expected: auto},
+		{name: "RequiredOnOpus55", model: "claude-opus-5-5", choice: "required", expected: auto},
+		{name: "RequiredOnSonnet5", model: "claude-sonnet-5", choice: "required", expected: auto},
+		{name: "NamedOnFable51", model: "claude-fable-5-1", choice: "respond", expected: auto},
+		{name: "RequiredOnMythos", model: "claude-mythos-5-1", choice: "required", expected: auto},
+		{name: "RequiredOnUnknownModel", model: "my-deployment", choice: "required", expected: auto},
+		{name: "Auto", model: "claude-sonnet-4-6", choice: "auto", expected: auto},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			req := &llm.ChatRequest{
+				Model:    tt.model,
+				Messages: []llm.Message{{Role: llm.RoleUser, Content: "Hello"}},
+				Tools: []llm.Tool{{
+					Type:     "function",
+					Function: llm.ToolFunction{Name: "respond", Parameters: map[string]any{"type": "object"}},
+				}},
+				ToolChoice: tt.choice,
+			}
+			if tt.thinking {
+				req.Thinking = &llm.ThinkingRequest{Enabled: true}
+			}
+			body, err := provider.buildRequestBody(req, false)
+			require.NoError(t, err)
+
+			var parsed map[string]any
+			require.NoError(t, json.Unmarshal(body, &parsed))
+			assert.Equal(t, tt.expected, parsed["tool_choice"])
+		})
+	}
+}
+
+// A single SSE data line larger than bufio.Scanner's default 64 KiB limit must
+// not terminate the stream.
+func TestStreamResponse_LargeEvent(t *testing.T) {
+	t.Parallel()
+
+	big := strings.Repeat("a", 200*1024)
+	stream := "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"" + big + "\"}}\n\n" +
+		"data: {\"type\":\"message_stop\"}\n\n"
+
+	provider := &Provider{}
+	events := make(chan llm.StreamEvent)
+	go provider.streamResponse(context.Background(), io.NopCloser(strings.NewReader(stream)), events)
+
+	var deltas []string
+	done := false
+	for event := range events {
+		require.NoError(t, event.Error)
+		if event.Done {
+			done = true
+			continue
+		}
+		deltas = append(deltas, event.Delta)
+	}
+	require.True(t, done)
+	require.Equal(t, []string{big}, deltas)
 }

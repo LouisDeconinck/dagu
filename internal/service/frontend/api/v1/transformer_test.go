@@ -42,6 +42,21 @@ func TestToStepIncludesHarnessPrompt(t *testing.T) {
 	assert.Nil(t, (*step.Commands)[0].Args)
 }
 
+func TestToStepIncludesExpectedAny(t *testing.T) {
+	step := toStep(ir.Step{
+		Preconditions: []*ir.Condition{
+			{Condition: "${MODE}", ExpectedAny: []string{"full", "minimal"}},
+		},
+	})
+
+	require.NotNil(t, step.Preconditions)
+	require.Len(t, *step.Preconditions, 1)
+	precondition := (*step.Preconditions)[0]
+	require.NotNil(t, precondition.ExpectedAny)
+	assert.Equal(t, []string{"full", "minimal"}, *precondition.ExpectedAny)
+	assert.Nil(t, precondition.Expected)
+}
+
 func TestToDAGRunSummaryIncludesScheduleTime(t *testing.T) {
 	status := ir.DAGRunStatus{
 		Name:           "test-dag",
@@ -209,6 +224,30 @@ func TestToDAGRunDetailsTreatsHumanTaskFormWithTrailingDataAsAbsent(t *testing.T
 	assert.Nil(t, details.Nodes[0].Step.HumanTask.Form)
 }
 
+func TestToDAGRunDetailsIncludesError(t *testing.T) {
+	status := ir.DAGRunStatus{
+		Name:     "test-dag",
+		DAGRunID: "run-1",
+		Status:   ir.Failed,
+		Error:    "field 'actions.broken_action.input_schema': failed to parse schema JSON",
+	}
+
+	details := ToDAGRunDetails(status)
+	require.NotNil(t, details.Error)
+	assert.Equal(t, status.Error, *details.Error)
+}
+
+func TestToDAGRunDetailsOmitsErrorWhenEmpty(t *testing.T) {
+	status := ir.DAGRunStatus{
+		Name:     "test-dag",
+		DAGRunID: "run-1",
+		Status:   ir.Succeeded,
+	}
+
+	details := ToDAGRunDetails(status)
+	assert.Nil(t, details.Error)
+}
+
 func TestToDAGRunSummaryOmitsAutoRetryLimitWhenUnconfigured(t *testing.T) {
 	status := ir.DAGRunStatus{
 		Name:           "test-dag",
@@ -302,6 +341,12 @@ func TestToDAGDetailsIncludesParamDefDescriptions(t *testing.T) {
 	require.Len(t, *details.ParamDefs, 1)
 	require.NotNil(t, (*details.ParamDefs)[0].Description)
 	assert.Equal(t, "Free-form operator notes", *(*details.ParamDefs)[0].Description)
+}
+
+func TestToDAGDetailsIncludesQueue(t *testing.T) {
+	details := toDAGDetails(&ir.DAG{Name: "test-dag", Queue: "normal"})
+	require.NotNil(t, details.Queue)
+	assert.Equal(t, "normal", *details.Queue)
 }
 
 func TestToDAGDetailsIncludesHistoryRetentionRuns(t *testing.T) {
@@ -501,6 +546,10 @@ func TestToAgentSession(t *testing.T) {
 			{ID: "ask-1-1", Kind: ir.AgentInteractionQuestion, Status: ir.AgentInteractionPending, ExpiresAt: "2026-09-24T12:00:00Z"},
 			{ID: "perm-1", Kind: ir.AgentInteractionPermission, Status: ir.AgentInteractionPending},
 		},
+		Events: []ir.AgentSessionEvent{
+			{Sequence: 1, ID: "computer-1-1", Type: "tool", Name: "launch", DurationMs: 40},
+			{Sequence: 2, ID: "computer-1-2", Type: "tool", Name: "act", Via: "screen", DurationMs: 300, Tokens: 0},
+		},
 	})
 
 	require.NotNil(t, session.Interactions)
@@ -509,6 +558,18 @@ func TestToAgentSession(t *testing.T) {
 	require.NotNil(t, interactions[0].ExpiresAt)
 	assert.Equal(t, "2026-09-24T12:00:00Z", *interactions[0].ExpiresAt)
 	assert.Nil(t, interactions[1].ExpiresAt)
+
+	// An operation that decides nothing has no via, and a replay that used
+	// no tokens has none, as every zero-valued optional field is omitted.
+	require.NotNil(t, session.Events)
+	events := *session.Events
+	require.Len(t, events, 2)
+	assert.Nil(t, events[0].Via)
+	require.NotNil(t, events[1].Via)
+	assert.Equal(t, "screen", *events[1].Via)
+	assert.Nil(t, events[1].Tokens)
+	require.NotNil(t, events[1].DurationMs)
+	assert.Equal(t, int64(300), *events[1].DurationMs)
 }
 
 func TestToDAGIncludesTypedSchedules(t *testing.T) {

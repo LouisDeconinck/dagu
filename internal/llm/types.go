@@ -7,6 +7,8 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -88,6 +90,41 @@ type Message struct {
 	// ToolCalls contains tool calls made by the assistant.
 	// Only set when Role is "assistant" and the model requests tool calls.
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// Images are sent with a user message ahead of its text. Other roles
+	// do not carry images.
+	Images []Image `json:"images,omitempty"`
+	// ProviderState, when set on an assistant message, is the provider's own
+	// record of that turn, taken from ChatResponse.ProviderState.
+	ProviderState *ProviderState `json:"-"`
+}
+
+// ProviderState is a provider's own record of an assistant turn, such as
+// content that carries signed reasoning. The provider named by Provider sends
+// the turn back from it in place of Content and ToolCalls; other providers
+// ignore it. The record belongs to one conversation and is not persisted.
+type ProviderState struct {
+	// Provider is the provider that produced the record.
+	Provider ProviderType
+	// Data is the record in the provider's own format.
+	Data json.RawMessage
+}
+
+// Image is an encoded image attached to a message.
+type Image struct {
+	// MediaType is the image's IANA media type, such as "image/png".
+	MediaType string `json:"media_type"`
+	// Data holds the encoded image bytes.
+	Data []byte `json:"data"`
+}
+
+// Base64 returns the image data in standard base64 encoding.
+func (i Image) Base64() string {
+	return base64.StdEncoding.EncodeToString(i.Data)
+}
+
+// DataURL returns the image as a data URL.
+func (i Image) DataURL() string {
+	return "data:" + i.MediaType + ";base64," + i.Base64()
 }
 
 // Tool represents a function/tool available to the LLM.
@@ -276,6 +313,10 @@ type ChatResponse struct {
 	// ToolCalls contains tool calls requested by the model.
 	// Only populated when FinishReason is "tool_calls".
 	ToolCalls []ToolCall
+	// ProviderState is the provider's record of this turn, set by providers
+	// that need the turn sent back as received. Callers pass it on the
+	// assistant message that records the turn.
+	ProviderState *ProviderState
 }
 
 // StreamEvent represents a single event in a streaming response.

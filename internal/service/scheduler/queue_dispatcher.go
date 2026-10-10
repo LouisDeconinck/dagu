@@ -930,6 +930,19 @@ func (d *queueDispatcher) dispatchAndWaitForStartupWithConditions(
 			)
 			return true
 		}
+		// A definition that cannot be built can never be dispatched; fail the
+		// run with the build error instead of requeueing it forever behind a
+		// generic dispatch condition.
+		if defErr, ok := errors.AsType[*dispatch.DefinitionError](err); ok {
+			logger.Warn(ctx, "Queued DAG definition cannot be built; marking run failed",
+				tag.DAG(runRef.Name),
+				tag.Error(defErr),
+			)
+			if finalizeErr := d.failQueuedRunBeforeStartup(ctx, queueName, runRef, defErr, conditionStage); finalizeErr != nil {
+				logger.Error(ctx, "Failed to finalize queued DAG run after definition failure", tag.Error(finalizeErr))
+			}
+			return false
+		}
 		logger.Warn(ctx, "Failed to dispatch DAG; leaving it queued for the next scan", tag.Error(err))
 		if shouldRecordStartupCondition(err) {
 			conditionStage.observe(queuedDispatchCondition(err)...)
@@ -1439,7 +1452,7 @@ func workerAvailableInSnapshot(
 			return true, nil
 		}
 	}
-	if healthyWorkers == 0 {
+	if healthyWorkers == 0 && len(dag.WorkerSelector) == 0 && targetWorkerID == "" {
 		return false, noAvailableWorkerConditionDefs
 	}
 	return false, noMatchingWorkerConditionDefs

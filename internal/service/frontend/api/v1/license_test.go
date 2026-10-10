@@ -4,14 +4,19 @@
 package api_test
 
 import (
+	"crypto/ed25519"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/dagucloud/dagu/v2/api/v1"
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
+	"github.com/dagucloud/dagu/v2/internal/license"
 	"github.com/dagucloud/dagu/v2/internal/service/frontend"
 	"github.com/dagucloud/dagu/v2/internal/test"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -48,7 +53,226 @@ func TestGetLicenseStatus(t *testing.T) {
 		assert.Equal(t, "pro", status.Plan)
 		assert.ElementsMatch(t, []string{"rbac", "audit"}, status.Features)
 		assert.Empty(t, status.Error)
+		require.NotNil(t, status.ServerName)
+		assert.NotEmpty(t, *status.ServerName)
+		assert.Nil(t, status.ServerId, "a license that never checks in has no server ID")
 	})
+}
+
+// newCloudLicenseManager returns a license manager that talks to a fake Dagu
+// Console served by handler, and the key the console signs licenses with.
+func newCloudLicenseManager(t *testing.T, handler http.Handler) (*license.Manager, ed25519.PrivateKey) {
+	t.Helper()
+	cloud := httptest.NewServer(handler)
+	t.Cleanup(cloud.Close)
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	m := license.NewManager(license.ManagerConfig{
+		LicenseDir: t.TempDir(),
+		CloudURL:   cloud.URL,
+	}, pub, nil, nil)
+	t.Cleanup(m.Stop)
+	return m, priv
+}
+
+// signTestLicense signs a one-day Pro license with priv.
+func signTestLicense(t *testing.T, priv ed25519.PrivateKey) string {
+	t.Helper()
+	token, err := jwt.NewWithClaims(jwt.SigningMethodEdDSA, &license.LicenseClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        "lic-1",
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+		},
+		Plan:     "pro",
+		Features: []string{license.FeatureAudit},
+	}).SignedString(priv)
+	require.NoError(t, err)
+	return token
+}
+
+func TestActivateLicense_CloudRejection(t *testing.T) {
+	t.Parallel()
+
+	t.Run("shows Dagu Console's reason", func(t *testing.T) {
+		t.Parallel()
+
+		manager, _ := newCloudLicenseManager(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "All 3 servers in workspace \"acme\" are in use."})
+		}))
+		server := test.SetupServer(t, test.WithServerOptions(frontend.WithLicenseManager(manager)))
+
+		resp := server.Client().Post("/api/v1/license/activate", map[string]string{
+			"key": "DAGU-TEST-0000-0000-0000",
+		}).ExpectStatus(http.StatusBadRequest).Send(t)
+
+		var errResp api.Error
+		resp.Unmarshal(t, &errResp)
+		assert.Equal(t, `All 3 servers in workspace "acme" are in use.`, errResp.Message)
+	})
+
+	t.Run("unknown key", func(t *testing.T) {
+		t.Parallel()
+
+		for body, want := range map[string]string{
+			`{"error":"No license matches this key.","message":"No license matches this key."}`: "No license matches this key.",
+			``: "Dagu Console does not recognize this license key.",
+		} {
+			manager, _ := newCloudLicenseManager(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(body))
+			}))
+			server := test.SetupServer(t, test.WithServerOptions(frontend.WithLicenseManager(manager)))
+
+			resp := server.Client().Post("/api/v1/license/activate", map[string]string{
+				"key": "DAGU-TEST-0000-0000-0000",
+			}).ExpectStatus(http.StatusBadRequest).Send(t)
+
+			var errResp api.Error
+			resp.Unmarshal(t, &errResp)
+			assert.Equal(t, want, errResp.Message)
+		}
+	})
+
+	t.Run("server errors stay generic", func(t *testing.T) {
+		t.Parallel()
+
+		manager, _ := newCloudLicenseManager(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("<html>upstream failure</html>"))
+		}))
+		server := test.SetupServer(t, test.WithServerOptions(frontend.WithLicenseManager(manager)))
+
+		resp := server.Client().Post("/api/v1/license/activate", map[string]string{
+			"key": "DAGU-TEST-0000-0000-0000",
+		}).ExpectStatus(http.StatusBadRequest).Send(t)
+
+		var errResp api.Error
+		resp.Unmarshal(t, &errResp)
+		assert.Equal(t, "License activation failed. Please verify your license key and try again.", errResp.Message)
+	})
+}
+
+// pendingConsole answers every connection poll with "pending".
+func pendingConsole() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"pending"}`))
+	})
+}
+
+// Uses t.Setenv because a license set in the environment blocks connecting.
+func TestLicenseConnect(t *testing.T) {
+	t.Setenv("DAGU_LICENSE", "")
+	t.Setenv("DAGU_LICENSE_KEY", "")
+
+	manager, _ := newCloudLicenseManager(t, pendingConsole())
+	server := test.SetupServer(t, test.WithServerOptions(frontend.WithLicenseManager(manager)))
+
+	var started api.LicenseConnectStatus
+	server.Client().Post("/api/v1/license/connect", nil).ExpectStatus(http.StatusOK).Send(t).Unmarshal(t, &started)
+	assert.Equal(t, api.LicenseConnectStatusStatePending, started.State)
+	require.NotNil(t, started.ConnectUrl)
+	assert.Contains(t, *started.ConnectUrl, "/servers/connect?")
+	require.NotNil(t, started.Code)
+	assert.Len(t, *started.Code, 8)
+	assert.NotNil(t, started.ExpiresAt)
+
+	var current api.LicenseConnectStatus
+	server.Client().Get("/api/v1/license/connect").ExpectStatus(http.StatusOK).Send(t).Unmarshal(t, &current)
+	assert.Equal(t, started, current)
+
+	var cancelled api.LicenseConnectStatus
+	server.Client().Delete("/api/v1/license/connect").ExpectStatus(http.StatusOK).Send(t).Unmarshal(t, &cancelled)
+	assert.Equal(t, api.LicenseConnectStatusStateIdle, cancelled.State)
+	assert.Nil(t, cancelled.ConnectUrl)
+}
+
+func TestLicenseConnect_Conflicts(t *testing.T) {
+	t.Parallel()
+
+	t.Run("license key in the config", func(t *testing.T) {
+		t.Parallel()
+
+		pub, _, err := ed25519.GenerateKey(nil)
+		require.NoError(t, err)
+		manager := license.NewManager(license.ManagerConfig{LicenseDir: t.TempDir(), ConfigKey: "DAGU-KEY"}, pub, nil, nil)
+		server := test.SetupServer(t, test.WithServerOptions(frontend.WithLicenseManager(manager)))
+
+		server.Client().Post("/api/v1/license/connect", nil).ExpectStatus(http.StatusConflict).Send(t)
+	})
+
+	t.Run("already licensed", func(t *testing.T) {
+		t.Parallel()
+
+		server := test.SetupServer(t, test.WithServerOptions(frontend.WithLicenseManager(defaultTestLicenseManager())))
+
+		server.Client().Post("/api/v1/license/connect", nil).ExpectStatus(http.StatusConflict).Send(t)
+	})
+}
+
+func TestRefreshLicense(t *testing.T) {
+	t.Parallel()
+
+	t.Run("checks in and returns the status", func(t *testing.T) {
+		t.Parallel()
+
+		var token string
+		manager, priv := newCloudLicenseManager(t, fakeConsole(&token, http.StatusOK))
+		token = signTestLicense(t, priv)
+		server := test.SetupServer(t, test.WithServerOptions(frontend.WithLicenseManager(manager)))
+		server.Client().Post("/api/v1/license/activate", map[string]string{"key": "DAGU-TEST"}).
+			ExpectStatus(http.StatusOK).Send(t)
+
+		var status api.LicenseStatusResponse
+		server.Client().Post("/api/v1/license/refresh", nil).ExpectStatus(http.StatusOK).Send(t).Unmarshal(t, &status)
+
+		assert.True(t, status.Valid)
+		require.NotNil(t, status.LastCheckIn)
+		require.NotNil(t, status.ConnectedVia)
+		assert.Equal(t, api.LicenseStatusResponseConnectedViaKey, *status.ConnectedVia)
+	})
+
+	t.Run("license that never checks in", func(t *testing.T) {
+		t.Parallel()
+
+		server := test.SetupServer(t, test.WithServerOptions(frontend.WithLicenseManager(defaultTestLicenseManager())))
+
+		server.Client().Post("/api/v1/license/refresh", nil).ExpectStatus(http.StatusBadRequest).Send(t)
+	})
+}
+
+func TestLicenseEndpoints_RequireAdmin(t *testing.T) {
+	t.Parallel()
+
+	server := test.SetupServer(t,
+		test.WithConfigMutator(func(cfg *config.Config) {
+			cfg.Server.Auth.Mode = config.AuthModeBuiltin
+			cfg.Server.Auth.Builtin.Token.Secret = "jwt-secret-license-endpoints"
+			cfg.Server.Auth.Builtin.Token.TTL = 24 * time.Hour
+		}),
+		test.WithServerOptions(frontend.WithLicenseManager(defaultTestLicenseManager())),
+	)
+	server.Client().Post("/api/v1/auth/setup", api.SetupRequest{Username: "admin", Password: "adminpass"}).
+		ExpectStatus(http.StatusOK).Send(t)
+	adminToken := getAdminToken(t, server)
+	server.Client().Post("/api/v1/users", api.CreateUserRequest{
+		Username: "viewer-connect",
+		Password: "viewerpass1",
+		Role:     api.UserRoleViewer,
+	}).WithBearerToken(adminToken).ExpectStatus(http.StatusCreated).Send(t)
+	var viewer api.LoginResponse
+	server.Client().Post("/api/v1/auth/login", api.LoginRequest{Username: "viewer-connect", Password: "viewerpass1"}).
+		ExpectStatus(http.StatusOK).Send(t).Unmarshal(t, &viewer)
+
+	client := server.Client()
+	for _, req := range []*test.Request{
+		client.Post("/api/v1/license/connect", nil),
+		client.Get("/api/v1/license/connect"),
+		client.Delete("/api/v1/license/connect"),
+		client.Post("/api/v1/license/refresh", nil),
+	} {
+		req.WithBearerToken(viewer.Token).ExpectStatus(http.StatusForbidden).Send(t)
+	}
 }
 
 // TestActivateLicense_NoLicenseManager verifies that when no license manager is
@@ -252,6 +476,54 @@ func TestActivateLicense_AdminToken_NoLicenseManager(t *testing.T) {
 // ---------------------------------------------------------------------------
 // DeactivateLicense
 // ---------------------------------------------------------------------------
+
+// fakeConsole serves activation and heartbeats with token and answers release
+// requests with releaseStatus.
+func fakeConsole(token *string, releaseStatus int) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/licenses/activate", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": *token, "heartbeat_secret": "hb"})
+	})
+	mux.HandleFunc("/api/v1/licenses/heartbeat", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"token": *token})
+	})
+	mux.HandleFunc("/api/v1/licenses/release", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(releaseStatus)
+		_, _ = w.Write([]byte(`{"status":"released"}`))
+	})
+	return mux
+}
+
+func TestDeactivateLicense_ReleasesConsoleSlot(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		releaseStatus int
+		wantFailed    bool
+	}{
+		"released":       {releaseStatus: http.StatusOK},
+		"older console":  {releaseStatus: http.StatusNotFound, wantFailed: true},
+		"console outage": {releaseStatus: http.StatusBadGateway, wantFailed: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var token string
+			manager, priv := newCloudLicenseManager(t, fakeConsole(&token, tc.releaseStatus))
+			token = signTestLicense(t, priv)
+			server := test.SetupServer(t, test.WithServerOptions(frontend.WithLicenseManager(manager)))
+			server.Client().Post("/api/v1/license/activate", map[string]string{"key": "DAGU-TEST"}).
+				ExpectStatus(http.StatusOK).Send(t)
+
+			resp := server.Client().Post("/api/v1/license/deactivate", nil).ExpectStatus(http.StatusOK).Send(t)
+
+			var body api.DeactivateLicense200JSONResponse
+			resp.Unmarshal(t, &body)
+			require.NotNil(t, body.ReleaseFailed)
+			assert.Equal(t, tc.wantFailed, *body.ReleaseFailed)
+		})
+	}
+}
 
 // TestDeactivateLicense_NoLicenseManager verifies that when no license manager
 // is configured, the deactivate endpoint returns 400.

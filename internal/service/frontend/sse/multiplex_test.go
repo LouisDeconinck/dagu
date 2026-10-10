@@ -369,6 +369,69 @@ func TestMultiplexerMutateSessionPartialUnsupportedTopic(t *testing.T) {
 	assert.Equal(t, "unsupported_topic", mutation.response.Errors[0].Code)
 }
 
+func TestMultiplexerCreateSessionFiltersInvalidTopics(t *testing.T) {
+	mux := newInvalidDAGRunsTopicMultiplexer(t)
+
+	recorder := httptest.NewRecorder()
+	result, err := mux.createSession(
+		context.Background(),
+		recorder,
+		[]string{"dagruns:limit=10", "dagruns:fromDate=abc"},
+		0,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result.session)
+
+	assert.Equal(t, []string{"dagruns:limit=10"}, result.control.Subscribed)
+	require.Len(t, result.control.Errors, 1)
+	assert.Equal(t, "dagruns:fromDate=abc", result.control.Errors[0].Topic)
+	assert.Equal(t, "invalid_topic", result.control.Errors[0].Code)
+	assert.Equal(t, "invalid fromDate", result.control.Errors[0].Message)
+}
+
+func TestMultiplexerMutateSessionPartialInvalidTopic(t *testing.T) {
+	mux := newInvalidDAGRunsTopicMultiplexer(t)
+
+	recorder := httptest.NewRecorder()
+	result, err := mux.createSession(context.Background(), recorder, nil, 0)
+	require.NoError(t, err)
+	require.NotNil(t, result.session)
+
+	mutation, err := mux.mutateSession(
+		context.Background(),
+		result.session.id,
+		[]string{"dagruns:limit=10", "dagruns:fromDate=abc"},
+		nil,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, http.StatusForbidden, mutation.statusCode)
+	assert.Equal(t, []string{"dagruns:limit=10"}, mutation.response.Subscribed)
+	require.Len(t, mutation.response.Errors, 1)
+	assert.Equal(t, "dagruns:fromDate=abc", mutation.response.Errors[0].Topic)
+	assert.Equal(t, "invalid_topic", mutation.response.Errors[0].Code)
+}
+
+// newInvalidDAGRunsTopicMultiplexer serves dagruns topics but rejects the
+// identifier "fromDate=abc".
+func newInvalidDAGRunsTopicMultiplexer(t *testing.T) *Multiplexer {
+	t.Helper()
+
+	mux := NewMultiplexer(StreamConfig{}, nil)
+	t.Cleanup(mux.Shutdown)
+
+	mux.RegisterFetcher(TopicTypeDAGRuns, func(_ context.Context, identifier string) (any, error) {
+		return map[string]string{"id": identifier}, nil
+	})
+	mux.RegisterValidator(TopicTypeDAGRuns, func(_ context.Context, identifier string) error {
+		if identifier == "fromDate=abc" {
+			return errors.New("invalid fromDate")
+		}
+		return nil
+	})
+	return mux
+}
+
 func TestMultiplexerMutateSessionIsAtomicOnInvalidTopicFailure(t *testing.T) {
 	mux := NewMultiplexer(StreamConfig{}, nil)
 	t.Cleanup(mux.Shutdown)

@@ -85,6 +85,9 @@ type Definition struct {
 	// Execution
 	DefaultExecutionMode string `mapstructure:"default_execution_mode"`
 
+	// Signal handling
+	SignalHandling *SignalHandlingDef `mapstructure:"signal_handling"`
+
 	// Features
 	Monitoring *MonitoringDef `mapstructure:"monitoring"`
 	Metrics    *string        `mapstructure:"metrics"` // "public" or "private"
@@ -97,6 +100,7 @@ type Definition struct {
 	GitSync    *GitSyncDef    `mapstructure:"git_sync"`
 	Tunnel     *TunnelDef     `mapstructure:"tunnel"`
 	License    *LicenseDef    `mapstructure:"license"`
+	Cloud      *CloudDef      `mapstructure:"cloud"`
 }
 
 // OpenCodeDef configures the process-local managed OpenCode service.
@@ -382,6 +386,9 @@ type WorkerDef struct {
 	ID            string `mapstructure:"id"`
 	MaxActiveRuns int    `mapstructure:"max_active_runs"`
 	HealthPort    int    `mapstructure:"health_port"`
+	// ShutdownTimeout is a duration string such as "60s". Default: 60s; 0
+	// waits without a bound.
+	ShutdownTimeout string `mapstructure:"shutdown_timeout"`
 	// Labels accepts either a string "key=value,key2=value2,..." or map[string]string.
 	// When string, parsed as comma-separated key=value pairs.
 	Labels any `mapstructure:"labels"`
@@ -422,6 +429,13 @@ type SchedulerDef struct {
 type QueueConfigDef struct {
 	Enabled bool       `mapstructure:"enabled"`
 	Config  []QueueDef `mapstructure:"config"`
+}
+
+// SignalHandlingDef configures how supervising Dagu processes handle OS signals.
+type SignalHandlingDef struct {
+	// EnablePropagation forwards shutdown signals received by a supervising
+	// process (server, scheduler, start-all) to running DAG-run subprocesses.
+	EnablePropagation *bool `mapstructure:"enable_propagation"`
 }
 
 // QueueDef configures an individual queue.
@@ -546,6 +560,12 @@ type TunnelRateLimitDef struct {
 
 // LicenseDef configures license activation.
 type LicenseDef struct {
-	Key      string `mapstructure:"key"`
-	CloudURL string `mapstructure:"cloud_url"`
+	Key        string `mapstructure:"key"`
+	CloudURL   string `mapstructure:"cloud_url"`
+	ServerName string `mapstructure:"server_name"`
+}
+
+// CloudDef configures what a licensed server shares with Dagu Console.
+type CloudDef struct {
+	Report *bool `mapstructure:"report"` // Default: true
 }

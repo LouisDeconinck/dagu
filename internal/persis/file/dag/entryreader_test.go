@@ -429,6 +429,50 @@ func TestRecursiveEntryReaderWatchesNewDirectories(t *testing.T) {
 	}
 }
 
+// TestEntryReaderWatchesMixedCaseYAML covers a DAG file with an upper-case
+// .YAML extension end to end: it is discovered through the watcher's
+// extension filter and reloaded after a write event.
+func TestEntryReaderWatchesMixedCaseYAML(t *testing.T) {
+	tmpDir := t.TempDir()
+	store := newRepository(
+		tmpDir,
+		WithSkipExamples(true),
+	)
+	events := make(chan persis.DAGChangeEvent, 10)
+	er := NewFileEntryReader(tmpDir, store, false, "", "")
+	er.events = events
+
+	ctx, cancel := context.WithCancel(context.Background())
+	require.NoError(t, er.Init(ctx))
+	go er.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		er.Stop()
+	})
+
+	expect := func(kind persis.DAGChangeType, name string) {
+		t.Helper()
+		timeout := time.NewTimer(5 * time.Second)
+		defer timeout.Stop()
+		for {
+			select {
+			case event := <-events:
+				if event.Type == kind && event.DAG != nil && event.DAG.Name == name {
+					return
+				}
+			case <-timeout.C:
+				t.Fatalf("missing change %v for %q", kind, name)
+			}
+		}
+	}
+
+	writeDAGFile(t, tmpDir, "mixed.YAML", "mixed")
+	expect(persis.DAGChangeAdded, "mixed")
+
+	writeDAGFile(t, tmpDir, "mixed.YAML", "mixed")
+	expect(persis.DAGChangeUpdated, "mixed")
+}
+
 func TestBaseWatchLifecycle(t *testing.T) {
 	for _, scope := range []string{"global", "workspace"} {
 		t.Run(scope, func(t *testing.T) {
@@ -466,10 +510,20 @@ func TestBaseWatchLifecycle(t *testing.T) {
 					}
 				}
 			}
+			// On Windows a base file op fails while the reader still holds it
+			// open (Go file handles do not share delete access), and a
+			// just-deleted watched directory stays delete-pending until its
+			// watch handle closes; retry until both settle.
+			retryFileOp := func(op func() error) {
+				t.Helper()
+				require.EventuallyWithT(t, func(c *assert.CollectT) {
+					assert.NoError(c, op())
+				}, 5*time.Second, 10*time.Millisecond)
+			}
 			write := func(body string) {
 				t.Helper()
-				require.NoError(t, os.MkdirAll(filepath.Dir(base), 0750))
-				require.NoError(t, os.WriteFile(base, []byte(body), 0600))
+				retryFileOp(func() error { return os.MkdirAll(filepath.Dir(base), 0750) })
+				retryFileOp(func() error { return os.WriteFile(base, []byte(body), 0600) })
 			}
 			write("queue: pool\n")
 			expect(persis.DAGChangeUpdated, "pool")
@@ -477,13 +531,6 @@ func TestBaseWatchLifecycle(t *testing.T) {
 			expect(persis.DAGChangeDeleted, "")
 			write("queue: recovered\n")
 			expect(persis.DAGChangeAdded, "recovered")
-			// The reader may still hold base open on Windows while it reacts to
-			// the previous write; retry destructive ops until it releases it.
-			retryFileOp := func(op func() error) {
-				t.Helper()
-				require.Eventually(t, func() bool { return op() == nil },
-					3*time.Second, 10*time.Millisecond)
-			}
 			replacement := filepath.Join(filepath.Dir(base), "replacement.tmp")
 			require.NoError(t, os.WriteFile(replacement, []byte("queue: atomic\n"), 0600))
 			retryFileOp(func() error { return os.Rename(replacement, base) })

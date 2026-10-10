@@ -18,6 +18,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/buildenv"
 	"github.com/dagucloud/dagu/v2/internal/cmn/fileutil"
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
+	"github.com/dagucloud/dagu/v2/internal/cmn/yamlutil"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/spec/types"
 	"github.com/dagucloud/dagu/v2/internal/workspace"
@@ -540,6 +541,7 @@ func loadDAGsFromData(ctx buildContext, data []byte, filePath string, base *base
 
 // decodeDocuments splits a YAML stream into non-empty manifest documents.
 func decodeDocuments(data []byte) ([]dagDocument, error) {
+	data = yamlutil.ClearEmptyDocumentSeparators(data)
 	file, err := parser.ParseBytes(data, 0)
 	if err != nil {
 		return nil, err
@@ -1025,9 +1027,7 @@ func resolveYamlFilePath(ctx buildContext, file string) (string, error) {
 		file = filepath.Join(ctx.opts.DAGsDir, file)
 	}
 
-	if !strings.HasSuffix(file, ".yaml") && !strings.HasSuffix(file, ".yml") {
-		file += ".yaml"
-	}
+	file = fileutil.EnsureYAMLExtension(file)
 
 	return filepath.Abs(file)
 }

@@ -409,6 +409,29 @@ steps:
 	assert.JSONEq(t, `{"name":"Alice"}`, step.Script)
 }
 
+func TestStepSchemaV2_ActionJQFilterMultilineFilter(t *testing.T) {
+	t.Parallel()
+
+	dag, err := LoadYAML(context.Background(), []byte(`
+steps:
+  - id: late
+    action: jq.filter
+    with:
+      filter: |
+        map(select(.answered != .original))
+        | length
+      data:
+        - {original: "10/10", answered: "10/17"}
+`))
+	require.NoError(t, err)
+	require.Len(t, dag.Steps, 1)
+
+	step := dag.Steps[0]
+	require.Len(t, step.Commands, 1)
+	assert.Equal(t, "map(select(.answered != .original))\n| length\n", step.Commands[0].CmdWithArgs)
+	assert.JSONEq(t, `[{"original":"10/10","answered":"10/17"}]`, step.Script)
+}
+
 func TestStepSchemaV2_ActionJQFilterRejectsDataAndInput(t *testing.T) {
 	t.Parallel()
 
@@ -424,6 +447,56 @@ steps:
 `))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `jq.filter does not allow both with.data and with.input`)
+}
+
+func TestStepSchemaV2_ActionJSRun(t *testing.T) {
+	t.Parallel()
+
+	dag, err := LoadYAML(context.Background(), []byte(`
+steps:
+  - id: links
+    action: js.run
+    with:
+      input: {html: "<a href='/x'>"}
+      script: |
+        return `+"`${input.html}`"+`;
+`))
+	require.NoError(t, err)
+	require.Len(t, dag.Steps, 1)
+
+	step := dag.Steps[0]
+	assert.Equal(t, "js", step.ExecutorConfig.Type)
+	assert.Equal(t, "return `${input.html}`;", step.Script)
+	assert.Equal(t, map[string]any{"html": "<a href='/x'>"}, step.ExecutorConfig.Config["input"])
+	assert.NotContains(t, step.ExecutorConfig.Config, "script")
+}
+
+func TestStepSchemaV2_ActionJSRunErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		with string
+		err  string
+	}{
+		{name: "missing script", with: "input: 1", err: "with.script is required"},
+		{name: "blank script", with: "script: '  '", err: "with.script must be a non-empty string"},
+		{name: "both inputs", with: "script: return 1\n      input: 1\n      input_file: /tmp/x", err: "js.run does not allow both with.input and with.input_file"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := LoadYAML(context.Background(), []byte(`
+steps:
+  - id: s
+    action: js.run
+    with:
+      `+tt.with+`
+`))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.err)
+		})
+	}
 }
 
 func TestStepSchemaV2_ActionTemplateReference(t *testing.T) {

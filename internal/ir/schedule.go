@@ -15,7 +15,7 @@ import (
 
 var (
 	standardCronParser = cron.NewParser(
-		cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow,
+		cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 	)
 	rfc3339MinuteOffsetRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00(?:Z|[+-]\d{2}:\d{2})$`)
 	runtimeProfileNameRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
@@ -280,22 +280,38 @@ func parseScheduleMap(m map[string]any, opts ScheduleParseOptions) (Schedule, er
 
 func parseCronExpression(expr string) (cron.Schedule, string, error) {
 	normalized := strings.Join(strings.Fields(expr), " ")
-	// Canonical expressions keep equivalent schedules identical in durable state.
-	switch normalized {
-	case "@hourly":
-		normalized = "0 * * * *"
-	case "@daily":
-		normalized = "0 0 * * *"
-	case "@weekly":
-		normalized = "0 0 * * 0"
-	case "@monthly":
-		normalized = "0 0 1 * *"
-	case "@yearly":
-		normalized = "0 0 1 1 *"
-	}
-
 	if normalized == "" {
 		return nil, "", fmt.Errorf("cron expression must not be empty")
+	}
+
+	// "@every <duration>" has no calendar-time equivalent, so it keeps its
+	// descriptor form, with the shortest duration, as the canonical expression.
+	tzPrefix, body := splitTimezonePrefix(normalized)
+	if duration, ok := strings.CutPrefix(body, "@every "); ok {
+		// Interval boundaries are aligned to the Unix epoch in every zone, so
+		// a timezone prefix could not be honored.
+		if tzPrefix != "" {
+			return nil, "", fmt.Errorf("invalid cron expression %q: @every does not accept a timezone prefix", normalized)
+		}
+		parsed, err := newIntervalSchedule(duration)
+		if err != nil {
+			return nil, "", fmt.Errorf("invalid cron expression %q: %w", normalized, err)
+		}
+		return parsed, "@every " + formatInterval(parsed.delay), nil
+	}
+
+	// Canonical expressions keep equivalent schedules identical in durable state.
+	switch body {
+	case "@hourly":
+		normalized = tzPrefix + "0 * * * *"
+	case "@daily", "@midnight":
+		normalized = tzPrefix + "0 0 * * *"
+	case "@weekly":
+		normalized = tzPrefix + "0 0 * * 0"
+	case "@monthly":
+		normalized = tzPrefix + "0 0 1 * *"
+	case "@yearly", "@annually":
+		normalized = tzPrefix + "0 0 1 1 *"
 	}
 
 	parsed, err := standardCronParser.Parse(normalized)
@@ -303,6 +319,59 @@ func parseCronExpression(expr string) (cron.Schedule, string, error) {
 		return nil, "", fmt.Errorf("invalid cron expression %q: %w", normalized, err)
 	}
 	return parsed, normalized, nil
+}
+
+// splitTimezonePrefix separates a leading "TZ=" or "CRON_TZ=" field from the
+// rest of a whitespace-normalized cron expression. The prefix keeps its
+// trailing space so that prefix+body reproduces expr.
+func splitTimezonePrefix(expr string) (prefix, body string) {
+	if !strings.HasPrefix(expr, "TZ=") && !strings.HasPrefix(expr, "CRON_TZ=") {
+		return "", expr
+	}
+	i := strings.IndexByte(expr, ' ')
+	if i < 0 {
+		return "", expr
+	}
+	return expr[:i+1], expr[i+1:]
+}
+
+// intervalSchedule fires once every delay on a fixed grid aligned to the Unix
+// epoch. "@every <duration>" cannot use robfig's ConstantDelaySchedule, which
+// is relative to the evaluation instant; the scheduler asks which absolute
+// fire time falls inside the current tick, so a relative delay would never
+// be due.
+type intervalSchedule struct {
+	delay time.Duration // positive whole minutes
+}
+
+func newIntervalSchedule(arg string) (intervalSchedule, error) {
+	delay, err := time.ParseDuration(arg)
+	if err != nil {
+		return intervalSchedule{}, err
+	}
+	// The scheduler evaluates schedules on whole-minute ticks, so any other
+	// interval would fire on a coarser grid than configured.
+	if delay < time.Minute || delay%time.Minute != 0 {
+		return intervalSchedule{}, fmt.Errorf("interval must be a positive whole number of minutes")
+	}
+	return intervalSchedule{delay: delay}, nil
+}
+
+// formatInterval returns the shortest duration string for a whole-minute
+// interval, e.g. "1h" rather than "1h0m0s" or "60m".
+func formatInterval(d time.Duration) string {
+	s := strings.TrimSuffix(d.String(), "0s")
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}
+
+// Next returns the next interval boundary strictly after t.
+func (s intervalSchedule) Next(t time.Time) time.Time {
+	delaySec := int64(s.delay / time.Second)
+	next := (t.Unix()/delaySec + 1) * delaySec
+	return time.Unix(next, 0).In(t.Location())
 }
 
 func checkMisleadingStepValues(expr string) []string {

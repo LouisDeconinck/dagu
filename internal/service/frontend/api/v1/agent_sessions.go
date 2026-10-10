@@ -16,8 +16,10 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/audit"
 	"github.com/dagucloud/dagu/v2/internal/browserhost"
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
+	"github.com/dagucloud/dagu/v2/internal/computerhost"
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
+	"github.com/dagucloud/dagu/v2/internal/humantask"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/opencodehost"
 	"google.golang.org/grpc/codes"
@@ -170,6 +172,15 @@ func (a *API) loadAgentStatus(ctx context.Context, root ir.DAGRunRef, subDAGRunI
 	return mutationRef, status, attempt, nil
 }
 
+// requireAgentRunStopped rejects agent actions on a run that is still
+// executing; resuming it would start a second execution.
+func requireAgentRunStopped(status *ir.DAGRunStatus) error {
+	if status.Status == ir.Running {
+		return &agentSessionActionError{conflict: true, message: "DAG-run is still running; try again after its running steps finish"}
+	}
+	return nil
+}
+
 func (a *API) requireAgentOwnerAvailable(ctx context.Context, ref ir.DAGRunRef, status *ir.DAGRunStatus, stepName string) error {
 	node, err := agentSessionNode(status, stepName)
 	if err != nil {
@@ -179,8 +190,11 @@ func (a *API) requireAgentOwnerAvailable(ctx context.Context, ref ir.DAGRunRef, 
 	label := agentProviderLabel(session.Provider)
 	workerID := session.OwnerWorkerID
 	if workerID == "" || workerID == "local" {
-		if session.Provider == browserhost.AgentProvider {
+		switch session.Provider {
+		case browserhost.AgentProvider:
 			return a.requireLocalBrowserSession(ctx, ref, stepName)
+		case computerhost.AgentProvider:
+			return a.requireLocalComputerSession(ctx, ref, stepName)
 		}
 		message := "The server that owns this OpenCode session is unavailable; the interaction remains pending"
 		if a.openCodeHost != nil {
@@ -251,6 +265,35 @@ func browserSessionWaiting(ctx context.Context, dataDir, dagRunID, stepName stri
 	return err == nil, err
 }
 
+// requireLocalComputerSession verifies that a computer step paused on this
+// host can still be resumed.
+func (a *API) requireLocalComputerSession(ctx context.Context, ref ir.DAGRunRef, stepName string) error {
+	const message = "The computer step waiting for this answer can no longer be resumed; restart the session to run the step again"
+	waiting, err := computerSessionWaiting(a.config.Paths.DataDir, ref.ID, stepName, time.Now())
+	if err != nil {
+		return &agentSessionActionError{conflict: true, message: "The computer step waiting for this answer could not be verified; the interaction remains pending"}
+	}
+	if waiting {
+		return nil
+	}
+	_ = a.markAgentSessionUnavailable(ctx, ref, stepName, message)
+	return &agentSessionActionError{conflict: true, message: message}
+}
+
+// computerSessionWaiting reports whether a paused computer step can still
+// be resumed. An error means its state is unknown.
+func computerSessionWaiting(dataDir, dagRunID, stepName string, now time.Time) (bool, error) {
+	store := computerhost.NewStore(filepath.Join(dataDir, computerhost.DataDirName))
+	record, err := store.Load(dagRunID, stepName)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return record.Waiting(now), nil
+}
+
 // agentSessionProvider returns the provider of a step's agent session.
 func agentSessionProvider(status *ir.DAGRunStatus, stepName string) string {
 	node, err := agentSessionNode(status, stepName)
@@ -275,7 +318,7 @@ func agentProviderLabel(provider string) string {
 // agentProviderRestartable reports whether a provider's session can start
 // over in a new generation.
 func agentProviderRestartable(provider string) bool {
-	return provider == openCodeAgentProvider || provider == browserhost.AgentProvider
+	return provider == openCodeAgentProvider || provider == browserhost.AgentProvider || provider == computerhost.AgentProvider
 }
 
 func (a *API) markAgentSessionUnavailable(ctx context.Context, ref ir.DAGRunRef, stepName, message string) error {
@@ -322,6 +365,9 @@ func (a *API) respondAgentInteraction(ctx context.Context, root ir.DAGRunRef, su
 	if err != nil {
 		return api.AgentInteractionResponse{}, err
 	}
+	if err := requireAgentRunStopped(status); err != nil {
+		return api.AgentInteractionResponse{}, err
+	}
 	if err := a.requireAgentOwnerAvailable(ctx, mutationRef, status, stepName); err != nil {
 		return api.AgentInteractionResponse{}, err
 	}
@@ -346,10 +392,10 @@ func (a *API) respondAgentInteraction(ctx context.Context, root ir.DAGRunRef, su
 	if err != nil {
 		return api.AgentInteractionResponse{}, err
 	}
-	resumed := !hasWaitingSteps(updated.Nodes)
+	resumed := !hasWaitingSteps(updated.Nodes) || (subDAGRunID == "" && humantask.UnblockedNodeReady(updated))
 	if resumed {
 		if subDAGRunID == "" {
-			err = a.resumeDAGRun(ctx, root, root.ID)
+			err = a.resumeWaitingDAGRun(ctx, root, updated)
 		} else {
 			err = a.resumeSubDAGRun(ctx, root, subDAGRunID)
 		}
@@ -382,6 +428,9 @@ func (a *API) restartAgentSession(ctx context.Context, root ir.DAGRunRef, subDAG
 	if err != nil {
 		return api.AgentSessionRestartResponse{}, err
 	}
+	if err := requireAgentRunStopped(status); err != nil {
+		return api.AgentSessionRestartResponse{}, err
+	}
 	original, err := cloneManualStatus(status)
 	if err != nil {
 		return api.AgentSessionRestartResponse{}, err
@@ -408,7 +457,7 @@ func (a *API) restartAgentSession(ctx context.Context, root ir.DAGRunRef, subDAG
 		return api.AgentSessionRestartResponse{}, err
 	}
 	if subDAGRunID == "" {
-		err = a.resumeDAGRun(ctx, root, root.ID)
+		err = a.resumeWaitingDAGRun(ctx, root, updated)
 	} else {
 		err = a.resumeSubDAGRun(ctx, root, subDAGRunID)
 	}

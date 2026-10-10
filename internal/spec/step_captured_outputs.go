@@ -69,9 +69,10 @@ func capturedOutputs(step *ir.Step) capturedOutputContract {
 		}
 		// An open schema validates names it never lists, and a run publishes
 		// whatever it accepted, so the listed names are only a lower bound.
+		// A chat step prints only the listed names.
 		return capturedOutputContract{
 			declarations: outputSchemaDeclarations(properties),
-			dynamic:      !schemaForbidsExtraProperties(step.OutputSchema),
+			dynamic:      step.ExecutorConfig.Type != ir.ExecutorTypeChat && !schemaForbidsExtraProperties(step.OutputSchema),
 		}
 	case isOutputsWriteStep(step):
 		values, ok := step.ExecutorConfig.Config["values"].(map[string]any)
@@ -79,15 +80,49 @@ func capturedOutputs(step *ir.Step) capturedOutputContract {
 			return capturedOutputContract{dynamic: true}
 		}
 		return capturedOutputContract{declarations: capturedNames(sortedKeys(values))}
-	case step.ExecutorConfig.Type == ir.ExecutorTypeBrowser:
-		return browserExtractOutputs(step.ExecutorConfig.Config["do"])
+	case step.ExecutorConfig.Type == ir.ExecutorTypeBrowser, step.ExecutorConfig.Type == ir.ExecutorTypeComputer:
+		return extractOperationOutputs(step.ExecutorConfig.Config["do"])
+	case isXlsxExtractStep(step):
+		return xlsxExtractOutputs(step.ExecutorConfig.Config["schema"])
 	}
 	return capturedOutputContract{}
 }
 
-// browserExtractOutputs lists the fields a browser step extracts. Each
-// extract operation publishes the top-level properties its schema lists.
-func browserExtractOutputs(operations any) capturedOutputContract {
+// xlsxExtractOutputs lists what an xlsx.extract step publishes: the
+// top-level properties of its schema, each holding the value read from the
+// cell the model named, and the fixed outputs beside them.
+func xlsxExtractOutputs(schema any) capturedOutputContract {
+	contract := capturedOutputContract{declarations: []ir.StepOutputDeclaration{
+		{Name: "cells", Type: ir.StepDeclaredOutputTypeJSON, Source: ir.StepDeclaredOutputSourceCapture},
+		{Name: "sheet", Type: ir.StepDeclaredOutputTypeString, Source: ir.StepDeclaredOutputSourceCapture},
+		{Name: "source", Type: ir.StepDeclaredOutputTypeString, Source: ir.StepDeclaredOutputSourceCapture},
+		{Name: "warnings", Type: ir.StepDeclaredOutputTypeJSON, Source: ir.StepDeclaredOutputSourceCapture},
+	}}
+	// The names are unknown only while the schema cannot be read: a value
+	// reference resolved at run time, or properties that are not a map. A
+	// schema without properties publishes just the fixed outputs.
+	object, isObject := schema.(map[string]any)
+	if !isObject {
+		contract.dynamic = true
+		return contract
+	}
+	raw, present := object["properties"]
+	if !present {
+		return contract
+	}
+	properties, ok := raw.(map[string]any)
+	if !ok {
+		contract.dynamic = true
+		return contract
+	}
+	contract.declarations = append(outputSchemaDeclarations(properties), contract.declarations...)
+	return contract
+}
+
+// extractOperationOutputs lists the fields a browser or computer step
+// extracts. Each extract operation publishes the top-level properties its
+// schema lists.
+func extractOperationOutputs(operations any) capturedOutputContract {
 	items, ok := operations.([]any)
 	if !ok {
 		return capturedOutputContract{}

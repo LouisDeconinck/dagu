@@ -341,6 +341,7 @@ function NodeStatusTableRow({
   const [isExpanded, setIsExpanded] = useState(false);
   const [showDialog, setShowDialog] = useState(false);
   const [includeDownstream, setIncludeDownstream] = useState(false);
+  const [bypassPreconditions, setBypassPreconditions] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // State for inline log expansion
@@ -620,6 +621,7 @@ function NodeStatusTableRow({
             dagRunId: retryDAGRunId,
             stepName: node.step.name,
             ...(includeDownstream ? { includeDownstream: true } : {}),
+            ...(bypassPreconditions ? { bypassPreconditions: true } : {}),
             ...(isSubDAGRun ? { subDAGRunId: dagRun.dagRunId } : {}),
           },
         }
@@ -699,6 +701,7 @@ function NodeStatusTableRow({
     setError(null);
     if (open) {
       setIncludeDownstream(false);
+      setBypassPreconditions(false);
     }
   };
 
@@ -762,6 +765,26 @@ function NodeStatusTableRow({
               </span>
             </label>
           </fieldset>
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={bypassPreconditions}
+              onChange={(e) => setBypassPreconditions(e.target.checked)}
+            />
+            <span>
+              <span className="font-medium">
+                <I18nText text={'Bypass step preconditions'} />
+              </span>
+              <span className="block text-xs text-muted-foreground">
+                <I18nText
+                  text={
+                    'Skip precondition checks for the retried steps. Workflow-level preconditions still apply.'
+                  }
+                />
+              </span>
+            </span>
+          </label>
           {error && <div className="text-error mt-2">{error}</div>}
         </div>
         <DialogFooter>
@@ -1450,7 +1473,8 @@ function NodeStatusTableRow({
                       <I18nText text={'Condition:'} /> {cond.condition}
                     </div>
                     <div>
-                      <I18nText text={'Expected:'} /> {cond.expected}
+                      <I18nText text={'Expected:'} />{' '}
+                      {cond.expectedAny?.join(' | ') ?? cond.expected}
                     </div>
                     <div>
                       <I18nText text={'Error:'} /> {cond.error}

@@ -33,26 +33,34 @@ const {
   clientDeleteMock,
   clientGetMock,
   clientPostMock,
+  clientPutMock,
   createViewMock,
   deleteResultsMock,
   deleteViewMock,
+  listMutateMock,
   renameErrorMock,
   sharedWorkflowViewState,
+  showErrorMock,
   updateViewMock,
   userPreferences,
+  workspaceWriteCheckMock,
 } = vi.hoisted(() => ({
   clientDeleteMock: vi.fn(),
   clientGetMock: vi.fn(),
   clientPostMock: vi.fn(),
+  clientPutMock: vi.fn(),
   createViewMock: vi.fn(),
   deleteResultsMock: vi.fn(),
   deleteViewMock: vi.fn(),
+  listMutateMock: vi.fn(),
   renameErrorMock: vi.fn(),
   sharedWorkflowViewState: { views: [] as View[] },
+  showErrorMock: vi.fn(),
   updateViewMock: vi.fn(),
   userPreferences: {
     pageLimit: 200,
   },
+  workspaceWriteCheckMock: vi.fn(),
 }));
 
 vi.mock('@/contexts/UserPreference', () => ({
@@ -64,6 +72,11 @@ vi.mock('@/contexts/UserPreference', () => ({
 
 vi.mock('@/contexts/AuthContext', () => ({
   useCanWriteForWorkspace: () => true,
+  useWorkspaceWriteCheck: () => workspaceWriteCheckMock,
+}));
+
+vi.mock('@/components/ui/error-modal', () => ({
+  useErrorModal: () => ({ showError: showErrorMock }),
 }));
 
 vi.mock('@/hooks/useViews', () => ({
@@ -119,8 +132,13 @@ vi.mock('@/features/dags/components/dag-list', () => ({
     onDeleteWorkflowView,
     onDeleteDAGs,
     onRenameDAG,
+    onSetDAGPinned,
+    canPinDAG,
   }: {
-    dags: Array<{ fileName: string; dag: { name: string } }>;
+    dags: Array<{
+      fileName: string;
+      dag: { name: string; workspace?: string };
+    }>;
     searchText: string;
     handleSearchTextChange: (value: string) => void;
     activeOnly: boolean;
@@ -144,6 +162,11 @@ vi.mock('@/features/dags/components/dag-list', () => ({
       fileNames: string[]
     ) => Promise<Array<{ fileName: string; error?: string }>>;
     onRenameDAG: (fileName: string, newFileName: string) => Promise<void>;
+    onSetDAGPinned: (fileName: string, pinned: boolean) => Promise<void>;
+    canPinDAG?: (dag: {
+      fileName: string;
+      dag: { name: string; workspace?: string };
+    }) => boolean;
   }) => (
     <div>
       <input
@@ -236,9 +259,23 @@ vi.mock('@/features/dags/components/dag-list', () => ({
       >
         Rename demo workflow
       </button>
+      <button
+        type="button"
+        onClick={() => void onSetDAGPinned('demo.yaml', true)}
+      >
+        Pin demo workflow
+      </button>
+      <button
+        type="button"
+        onClick={() => void onSetDAGPinned('demo.yaml', false)}
+      >
+        Unpin demo workflow
+      </button>
       <ul>
         {dags.map((dag) => (
-          <li key={dag.fileName}>{dag.fileName}</li>
+          <li key={dag.fileName} data-can-pin={String(canPinDAG?.(dag))}>
+            {dag.fileName}
+          </li>
         ))}
       </ul>
     </div>
@@ -255,6 +292,7 @@ vi.mock('@/hooks/api', () => ({
     DELETE: clientDeleteMock,
     GET: clientGetMock,
     POST: clientPostMock,
+    PUT: clientPutMock,
   }),
 }));
 
@@ -444,6 +482,12 @@ describe('DagsPage', () => {
     clientGetMock.mockReset();
     clientPostMock.mockReset();
     clientPostMock.mockResolvedValue({});
+    clientPutMock.mockReset();
+    clientPutMock.mockResolvedValue({});
+    listMutateMock.mockReset();
+    showErrorMock.mockReset();
+    workspaceWriteCheckMock.mockReset();
+    workspaceWriteCheckMock.mockReturnValue(true);
     renameErrorMock.mockReset();
     sharedWorkflowViewState.views = [];
     createViewMock.mockReset();
@@ -545,7 +589,7 @@ describe('DagsPage', () => {
         return {
           data: dagsPageResponse,
           isLoading: name.length > 0,
-          mutate: vi.fn(),
+          mutate: listMutateMock,
           ...(name.length > 0 && !keepPreviousData ? { data: undefined } : {}),
         };
       }
@@ -1040,6 +1084,79 @@ describe('DagsPage', () => {
     expect(screen.getByTestId('selected-dag')).toHaveTextContent(
       'renamed.yaml'
     );
+  });
+
+  it('pins and unpins workflows through the pin endpoint', async () => {
+    renderPage();
+    const request = {
+      params: {
+        path: { fileName: 'demo.yaml' },
+        query: { remoteNode: 'remote-a' },
+      },
+    };
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Pin demo workflow' })
+      );
+    });
+    expect(clientPutMock).toHaveBeenCalledWith('/dags/{fileName}/pin', request);
+    expect(listMutateMock).toHaveBeenCalled();
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Unpin demo workflow' })
+      );
+    });
+    expect(clientDeleteMock).toHaveBeenCalledWith(
+      '/dags/{fileName}/pin',
+      request
+    );
+  });
+
+  // In an all-workspaces view, write access differs between workflows.
+  it('checks pin permission against each workflow workspace', () => {
+    dagsPageResponse.dags = [
+      { fileName: 'demo.yaml', dag: { name: 'demo' }, latestDAGRun: {} },
+      {
+        fileName: 'ops.yaml',
+        dag: { name: 'ops', workspace: 'ops' } as { name: string },
+        latestDAGRun: {},
+      },
+    ];
+    workspaceWriteCheckMock.mockImplementation(
+      (workspace?: string) => workspace === 'ops'
+    );
+    renderPage();
+
+    expect(screen.getByText('ops.yaml')).toHaveAttribute(
+      'data-can-pin',
+      'true'
+    );
+    expect(screen.getByText('demo.yaml')).toHaveAttribute(
+      'data-can-pin',
+      'false'
+    );
+  });
+
+  it('surfaces workflow pin errors without reloading the list', async () => {
+    clientPutMock.mockResolvedValueOnce({
+      error: { message: 'insufficient permissions' },
+    });
+    renderPage();
+    const reloadsBefore = listMutateMock.mock.calls.length;
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Pin demo workflow' })
+      );
+    });
+
+    expect(showErrorMock).toHaveBeenCalledWith(
+      'insufficient permissions',
+      expect.any(String)
+    );
+    expect(listMutateMock).toHaveBeenCalledTimes(reloadsBefore);
   });
 
   it('surfaces workflow rename errors', async () => {

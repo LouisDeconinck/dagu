@@ -18,7 +18,9 @@ Load only the reference file that matches the task.
 - Prefer `id` on every step. Omit `name` unless the display label must differ from the step ID.
 - Prefer `dagu schema ...` and `dagu validate ...` over guessing field names or shapes.
 - Prefer `action: template.render` when generating text files, prompts, or artifacts instead of assembling them with shell `echo` or heredocs.
+- Prefer `action: js.run` for transforming data between steps (parsing, filtering, reshaping, extracting with regular expressions, computing values) instead of `python -c`, Python or Node heredocs, or `awk`, `sed`, and `jq` pipelines in `run:`. It needs no interpreter on the host or worker, Dagu passes its script as written so `${...}` and `$` need no escaping, syntax errors fail validation before a run, and its returned value is clean stdout for `output:`. Pass data in with `with.input` or `with.input_file`. Keep `run:` for invoking CLIs and for work that needs the network, the filesystem, environment variables, or a library; `js.run` has none of these. A single jq path such as `.items[].id` is fine in `jq.filter`.
 - Prefer `file.*` actions for local file operations such as stat, read, write, copy, move, delete, mkdir, and list instead of shelling out to `cp`, `mv`, `rm`, or `mkdir`.
+- Prefer `xlsx.*` actions for `.xlsx` workbooks: `xlsx.read` for rows, `xlsx.validate` before acting on them, `xlsx.write` or `xlsx.append` for reports, `xlsx.update_rows` to write per-row results back, `xlsx.write_cells` to fill a template, `xlsx.sheet` to manage sheets, `xlsx.convert` to hand a sheet to a tool that reads CSV, and `xlsx.extract` to read named fields out of a form-like sheet whose layout differs by sender, instead of a Python or PowerShell script. Inspect a workbook first with `dagu xlsx inspect` or the MCP `workbook` read target.
 - Prefer `git.worktree.add` and `git.worktree.remove` when steps need isolated branches inside an existing local Git repository. Add an explicit remove step when the workflow should delete the worktree.
 - Prefer `stdout.artifact` / `stderr.artifact` when a command stream should become a DAG-run artifact, especially for large reports, JSON, Markdown, logs, or generated files.
 - Prefer `artifact.*` actions for explicit artifact reads/writes/lists. Use `DAG_RUN_ARTIFACTS_DIR` only when a tool truly needs a filesystem path inside the step.
@@ -208,9 +210,9 @@ Complete the task from a local CLI context with `dagu human-task complete --run-
 
 Load only the file you need:
 
-- `references/steptypes.md` when choosing an action or checking action-specific behavior such as `human.task`, `dag.run`, `parallel`, `git.worktree.*`, `jq.filter`, `file.*`, `state.*`, `template.render`, or `browser.*`
+- `references/steptypes.md` when choosing an action or checking action-specific behavior such as `human.task`, `dag.run`, `parallel`, `git.worktree.*`, `jq.filter`, `js.run`, `file.*`, `xlsx.*`, `state.*`, `template.render`, `chat.completion`, `browser.*`, or `computer.*`
 - `references/dagu-action.md` when creating a reusable `dagu-action.yaml` package or checking action input/output schema behavior
-- `references/cli.md` when choosing or using Dagu CLI commands, including workflow inspection, execution, and cleanup operations
+- `references/cli.md` when choosing or using Dagu CLI commands, including workflow inspection, execution, and cleanup operations, and browser sessions for building a browser step on a site you have not seen
 - `references/context.md` when using `${context.*}` metadata references or declared step `outputs:`
 - `references/build.md` when creating or troubleshooting a `type: build` file workflow, path references, reuse decisions, or `--no-reuse`
 - `references/file-dependencies.md` when a DAG needs scripts, configuration, or other files from its working directory
@@ -401,6 +403,16 @@ steps:
 ```
 
 Sub-DAGs do not inherit parent env vars. Pass values explicitly via `with.params`.
+
+## Approval Gates
+
+An `approval:` gate pauses a step after its execution until an operator approves, rejects, or pushes it back. In a root run, approving a gate resumes ready dependent steps while independent manual steps remain waiting, provided no failed, aborted, rejected, or retrying step would be re-run. Steps with build inputs do not by themselves trigger a resume while other manual steps wait.
+
+Root approvals, push-backs, agent interaction responses, and agent-session restarts resume directly unless the run belongs to an enabled global queue. Global queues require a running scheduler. For queued local managed OpenCode sessions, use `dagu start-all` so the server and scheduler share the session host. Standalone API servers resume unqueued local runs using their own session host; distributed runs retain their owning worker. The API's `resumed: true` indicates an accepted resume, not that execution has started.
+
+Approvals remain saved if resume admission fails. The approval endpoint returns HTTP 503 with `approvalStored: true` and `resumePending: true` in the error details. Use **Retry resume** in the run view or `POST /api/v1/dag-runs/{name}/{dagRunId}/resume` to retry without approving again. This recovery endpoint accepts no approval inputs and is limited to root runs with saved approvals and ready work. Repeated requests while queued or running do not create another execution.
+
+Child approvals and agent interaction responses resume only after every waiting step in the child is resolved. Independent branch resumption is supported only for root runs.
 
 ## human.task
 
@@ -779,6 +791,55 @@ steps:
 
 Output: `apple`
 
+## js.run
+
+Run a JavaScript function body in an embedded sandbox. No Node.js or other interpreter is needed on the host.
+
+Use it for data transformation between steps instead of inline Python, Node, or `awk`/`sed`/`jq` pipelines. Use `run:` when the work needs a CLI, the network, the filesystem, or a library.
+
+```yaml
+steps:
+  - id: fetch
+    action: http.request
+    with:
+      method: GET
+      url: https://example.com
+    output: HTML
+
+  - id: links
+    depends: [fetch]
+    action: js.run
+    with:
+      input: ${HTML}
+      script: |
+        const urls = new Set();
+        for (const m of input.matchAll(/href="([^"]+)"/g)) {
+          urls.add(new URL(m[1], "https://example.com").href);
+        }
+        return [...urls];
+    output: LINKS
+```
+
+`with.script` is a function body; `return` a value to publish it. The text is used as written: Dagu does not resolve `${...}` inside the script, so JavaScript template literals keep working. Pass workflow values through `with.input`.
+
+`with.input` is any YAML value bound to `input`; objects and lists arrive as native objects and arrays. `with.input_file` binds a file's contents instead. A string input that is a JSON object or array is parsed by default, so a captured output from an earlier step arrives as an object; set `format: text` to keep the string, or `format: json` to fail on invalid JSON:
+
+```yaml
+  - id: summarize
+    depends: [links]
+    action: js.run
+    with:
+      input: ${LINKS}
+      script: |
+        return {count: input.length, first: input[0]};
+```
+
+Output rules: `undefined` writes nothing, a string is written as-is, any other value is written as JSON. Capture it with `output:`.
+
+The sandbox exposes the ECMAScript builtins, `console.*` (written to step stderr), `URL`, and `URLSearchParams`. The language level is ES2022 (classes, destructuring, generators, `async`/`await`, optional chaining, `BigInt`, regex named groups and lookbehind) plus `toSorted` and the ES2025 `Set` methods; absent are ES modules, `Object.groupBy`, `WeakRef`, and host APIs such as `Intl`, `structuredClone`, `TextEncoder`, and `atob`. `await` works for promises that resolve synchronously; there is no `require`, `fetch`, filesystem, `process`, or timers. `with.timeout` takes seconds or a duration and defaults to the step timeout, or `60s` without one. `dagu validate` reports syntax errors with the script line. A thrown error fails the step with the exception and script line in the error, and the stack trace on stderr. A script that returns `undefined` leaves stdout empty and notes that on stderr. Use `node-script@v1` when a script needs real Node.js.
+
+`with` fields: `script`, `input`, `input_file`, `format`, `timeout`.
+
 ## template.render
 
 Render text using Go `text/template`.
@@ -795,7 +856,7 @@ steps:
     output: RESULT
 ```
 
-Set exactly one of `with.template` or `with.template_ref`. `with.template` is literal template text. `with.template_ref` must be one complete canonical Dagu reference such as `${env.TEMPLATE}` or `${steps.fetch.outputs.template}`; it resolves once to a non-empty string, and references inside the resulting template remain literal. The selected text is rendered as a template, not executed as shell. `with.output` writes rendered content to a file; top-level `output:` captures or publishes step output.
+Reference `with.data` keys with a leading dot: `{{ .name }}`. A bare `{{ name }}` is a function call in Go templates; `dagu validate` rejects it in inline `with.template` text, and a `with.template_ref` template fails the same way when the step runs. Set exactly one of `with.template` or `with.template_ref`. `with.template` is literal template text. `with.template_ref` must be one complete canonical Dagu reference such as `${env.TEMPLATE}` or `${steps.fetch.outputs.template}`; it resolves once to a non-empty string, and references inside the resulting template remain literal. The selected text is rendered as a template, not executed as shell. `with.output` writes rendered content to a file; top-level `output:` captures or publishes step output.
 
 ## file.stat / file.read / file.write / file.copy / file.move / file.delete / file.mkdir / file.list
 
@@ -931,13 +992,32 @@ SMTP server settings come from global configuration. With `mailbox`, the message
 goes through that entry of `mail_accounts` instead, and `from` defaults to its
 address.
 
+With `mailbox`, `in_reply_to` answers one found email (its `id`, or the email
+from `mail.search`): `to` defaults to its Reply-To or sender, `subject` to
+`Re: <subject>`, and the reply is threaded under it.
+
+```yaml
+- action: mail.send
+  with:
+    mailbox: support@example.com
+    in_reply_to: ${foreach.email.id}
+    message: Thanks, we are on it.
+```
+
 ## mail.search / mail.organize
 
-Read and organize a mailbox over IMAP. Accounts live in the DAG-level (or base
+Read and organize a mailbox over IMAP or, for a Google account signed in with
+OAuth, the Gmail API. Accounts live in the DAG-level (or base
 config) `mail_accounts` map, keyed by email address. `provider: google` or
 `provider: microsoft` fills in the servers; any other server sets `imap.host`.
 Authenticate with `password` or with `oauth` (`google_refresh` or
-`microsoft_refresh` and a refresh token).
+`microsoft_refresh` and a refresh token). `microsoft_refresh` accepts optional
+`scopes` to request instead of `https://outlook.office.com/.default`. A
+`provider: google` account with `oauth` uses the Gmail API instead of IMAP and
+SMTP: it takes no `imap`, `smtp`, or `username`, folders are Gmail labels, and
+its grant needs `https://www.googleapis.com/auth/gmail.modify` or
+`https://mail.google.com/`, and the Google Cloud project of `client_id` must have
+the Gmail API enabled.
 
 ```yaml
 mail_accounts:
@@ -974,7 +1054,7 @@ steps:
 `mail.search` `with` fields: `mailbox`, `folder` (default `INBOX`), `unread`,
 `from`, `subject`, `within` (such as `24h` or `7d`), `has_attachments`,
 `save_attachments`, `limit` (1-50, default 20). It publishes `messages` (oldest
-first, each with `id`, `folder`, `from_name`, `from_address`, `to`, `cc`,
+first, each with `id`, `message_id`, `folder`, `from_name`, `from_address`, `to`, `cc`,
 `subject`, `date`, `unread`, `flagged`, `text`, `attachments`), `count`, and
 `truncated`. Searching never marks email read.
 
@@ -984,6 +1064,249 @@ first, each with `id`, `folder`, `from_name`, `from_address`, `to`, `cc`,
 `dry_run`. It publishes `changed` and `missing`. To process each email once,
 mark it read inside the loop right after its work, so a failed email stays
 unread for the next run.
+
+## xlsx.read / xlsx.info / xlsx.list_sheets / xlsx.write / xlsx.append / xlsx.update_rows / xlsx.validate / xlsx.write_cells / xlsx.sheet / xlsx.convert / xlsx.extract
+
+Read and write `.xlsx` workbooks without a spreadsheet application, on any
+platform. The pattern a per-row job needs is: read the rows still to do, act on
+each, and write each row's result back.
+
+```yaml
+steps:
+  - id: read
+    action: xlsx.read
+    with:
+      path: ~/Inbox/orders.xlsx
+      sheet: Orders
+      where: {Status: ""}
+  - id: each
+    depends: read
+    foreach:
+      items: ${steps.read.outputs.rows}
+      key: ${foreach.item.order_id}
+      steps:
+        - id: submit
+          action: http.request
+          with:
+            method: POST
+            url: https://erp.example.com/orders
+            body: ${foreach.item}
+            format: json
+      collect:
+        order_id: ${foreach.item.order_id}
+        status: ${steps.submit.outputs.status_code}
+    output: RESULTS
+  - id: mark
+    depends: each
+    action: xlsx.update_rows
+    with:
+      path: ~/Inbox/orders.xlsx
+      sheet: Orders
+      key: order_id
+      rows: ${RESULTS}
+      set: {Status: status}
+      wait_for_unlock: 5m
+```
+
+The loop's `collect` builds one object per row with the key and the result
+fields, and `rows` accepts the foreach aggregate directly: a string-form
+`output: RESULTS` is the variable `${RESULTS}`, and its `outputs` list is
+what gets written back. `http.request` fails on a response outside 2xx, so a
+rejected order fails its item body; the loop is then partially succeeded,
+the aggregate lists the failed items and holds only the successful bodies in
+`outputs`, and the write-back marks the rows that succeeded. The rejected
+rows keep an empty Status, so the next run submits only them; the run ends
+partially succeeded.
+
+`xlsx.read` `with` fields: `path`, `password`, `sheet` (first sheet by default,
+matched case-insensitively), `range` (`A2:F`, `Sheet1!A2:F`, a named range, or a
+table; without it the data block is detected, skipping leading empty rows and
+columns), `header` (`true`, `false` for `A`, `B`, `C`, a row number, or `[3, 4]`
+to join two header rows), `columns` (names or `{name: alias}`), `merged` (`fill`
+or `first`), `stop_at_blank`, `keep_empty_rows`, `trim`, `formulas` (`cached`,
+`text`, `calculate`), `types` (`{amount: number, due: date}`; a pinned column
+also reads Japanese forms: `￥123,000`, `12万3,500円`, `▲1,000`, `(1,000)`,
+`10%`, `税込1,000`, `金壱拾弐万参千円也`, `2026年10月3日`, `令和8年10月3日`,
+`R8.10.3`, `2026年10月` as its first day, `10月3日` in the current year,
+`令和8年10月3日（金） 午後2時30分`, and under `boolean` `はい`/`いいえ`, `有`/`無`,
+`済`/`未`, `○`/`×`), `on_type_error`
+(`fail` or `warn`), `where` (`{Status: ""}`, `{Status: {ne: Done}}`,
+`{Status: {in: [A, B]}}`), `max_rows` (default 5000), `skip_hidden` (`true`
+leaves out rows hidden by a filter or by hand; they are read by default). It
+publishes `rows` (objects keyed by header, each with `_row`), `count`, `headers`, `sheet`, `range`,
+`warnings`, and `truncated`; do not declare outputs on the step. Numbers stay
+numbers, dates become ISO 8601 text, text keeps leading zeros, and errors name
+the cell: `orders.xlsx Orders!D17: expected number, found "N/A"`.
+
+`xlsx.info` publishes `path`, `sheets` (each with `name`, `hidden`, `used_range`,
+`range`, `header_row`, `headers`, `types`, `row_count`, `hidden_rows`, `columns`,
+`profile_truncated`, `tables`), `named_ranges`, `date_system`, and `warnings`;
+`xlsx.list_sheets` publishes `sheets` and `count`. `hidden` marks a hidden or
+very hidden sheet, and `hidden_rows` counts the data rows a filter or a person
+hid; pass `skip_hidden: true` to read only the rows shown. `types` and `columns` cover every data row of
+the detected table, up to 5000 (`profile_truncated` when there are more). Each
+column has `name`, `type`, `filled`, `blank`, `distinct` (counted up to 1000),
+`values` (the distinct values when 12 or fewer repeat), `min` and `max` (number
+and date columns), `odd` (cells the type cannot read even when pinned, such as
+`未定` in a number column; `１２` or `令和8年10月3日` are not odd), and
+`odd_cells` (the first three as `{cell, text}`). Before writing a workflow for a
+workbook, read it with `dagu xlsx inspect <path>` or the MCP `workbook` target
+to learn its sheets, headers, and types. A protected workbook takes `--password`
+or `DAGU_XLSX_PASSWORD` on the command, and `password` on the workbook target.
+Use the profile to choose `where`
+values, `types`, and `on_type_error`.
+
+`xlsx.write` `with` fields: `path`, `sheet` (created when missing), `rows` (a
+list of objects or arrays, usually `${steps.<id>.outputs.rows}`) or `input` (a
+`.json`, `.jsonl`, or `.csv` file), `columns` (order and selection; rows from a
+step output arrive with keys in alphabetical order, so pass
+`columns: ${steps.<id>.outputs.headers}` to keep the sheet's order), `header`,
+`mode` (`replace` the sheet, the default, or `append`), `style` (`table`, the
+default: bold frozen header, fitted widths, number formats by column; or
+`none`), `types`, `atomic` (default `true`), `dry_run`, `wait_for_unlock`,
+`artifact`. A replaced sheet is cleared in place, so its position, the defined
+names scoped to it, and formulas elsewhere that refer to it stay valid; its
+merged regions and tables are removed. Other sheets, widths, styles, and
+defined names are untouched. ISO date strings become real dates. `xlsx.append` adds rows below the last used row,
+copying the style of the cell above, and writes a header only when the sheet is
+empty. Appended fields are placed under the header cell of the same exact name:
+a loose match fails with `did you mean`, a name the header lacks adds a column
+at the right, and `header: false` writes rows by position onto a sheet with no
+header row. An append fails when a cell it would write, or the header cell of
+a new column, lies in a merged cell.
+
+`xlsx.update_rows` `with` fields: `path`, `sheet`, `key` (the column that
+identifies a row, or `_row`), `rows`, `set` (`{Status: status}` takes a field of
+each row, `{Reviewed: {value: yes}}` writes one literal, and a literal that is
+text in the canonical form of a number such as `"100"` is written as a number
+unless `type: string` pins it; omitted, every field
+other than the key and `_row` goes to the column of the same name), `missing`
+(`fail`, `skip`, or `append`), `atomic`, `dry_run`, `wait_for_unlock`,
+`artifact`. Columns the sheet lacks are added at the right. Two checks run
+before any cell is written and cannot be turned off: the key column and every
+existing `set` column must still be in the header row by name, and a row
+addressed by `_row` must still hold its key there. Either failure fails the
+step with the file untouched. A merged cell, such as one Status over the
+lines of an order, is written once at its top-left cell: rows may give it
+the same value, different values fail the step, and a merged cell reaching
+outside its column's data rows is refused. A row appended with `missing:
+append`, or a new column, that would land in a merged cell fails the step.
+
+Every writer publishes `path`, `sheet`, `changes` (`{sheet, range, rows_updated,
+rows_appended, columns_added, cells_changed}`), `dry_run`, and `warnings`.
+By default, saves go through a temporary file renamed over the workbook;
+`atomic: false` saves in place. A workbook that Excel holds open on Windows
+fails with `is open in another program; close it and retry`; a `~$` lock file
+nobody holds is only a warning; `wait_for_unlock: 5m` retries with backoff
+instead of failing. `artifact: true` keeps a copy of the saved workbook with
+the run's artifacts; a copy that fails after the save is a warning, not a
+failed step.
+
+`xlsx.validate` checks a sheet before a workflow acts on it. `with` fields:
+`path`, `password`, `sheet`, `range`, `header`, `columns`, `merged`,
+`skip_hidden`, `trim`, `formulas`, `max_problems` (default 1000: `count` reports every problem found
+while `problems` keeps that many), and the rules `required` (columns the
+header row must have), `not_blank` (columns no non-empty row may leave empty;
+rows whose cells are all empty are skipped), `unique` (columns whose values may not repeat), `types`
+(`{Amount: number}`), and `allowed` (`{Status: [Open, Done]}`); at least one
+rule is needed. It publishes `ok`, `problems` (each with `code`:
+`missing_column`, `blank`, `type`, `duplicate`, or `not_allowed`; `sheet`,
+`cell` and `row` (absent for `missing_column`), `column`, `message`), `count`
+(the number of problems), `rows` (the number of rows checked, not the rows
+themselves), `headers`, `sheet`, `range`, `warnings`, and `truncated`, and
+lists each problem on stderr. By
+default the step succeeds with the problems published (`on_problem: warn`);
+`on_problem: fail` fails it after listing them, and a failed step publishes
+nothing. To stop and ask someone, follow it with a `human.task` step whose
+precondition is `${steps.<id>.outputs.count}` with `expected: "num:>0"` and
+`continue_on: {skipped: true}`, so a clean workbook skips the task and the
+run goes on.
+
+`xlsx.write_cells` fills a template: `cells` maps addresses (`B2`,
+`Sheet1!B2`, `'My Sheet'!B2`, or a defined name for one cell; an address
+inside a merged cell, or a name over its whole area, writes the merged cell,
+and two addresses in one merged cell fail the step) to a value, to
+`{value: v, type: t}` to pin the type, to `{formula: "=SUM(B2:B9)"}`, or to
+`null` to empty the cell. `merge` lists ranges to merge first (`[A1:D1]`), so
+a title can span the template; a range over a filled cell or another merged
+region fails the step, and `changes.merged` counts the ranges merged. An ISO
+date string becomes a date, and text in the
+canonical form of a number (`100`, `-12.5`, not `007` or `1,234`) becomes a
+number, so `${foreach.item.amount}`, which arrives as text, lands as a number;
+`type: string` keeps such text. Every cell keeps its style, and a date written into
+a plain cell gains a date format. `output` writes the result to a new
+workbook, which must be a different file, and leaves `path` untouched, so one
+template serves many fills; the workbook at `path` must exist. `changes.cells_changed` counts cells that
+really changed. `dry_run`, `atomic`, `wait_for_unlock`, and `artifact` apply.
+
+`xlsx.sheet` takes `operation` (`add`, `copy`, `rename`, `delete`), `sheet`
+(the new sheet for `add`, the source for `copy`, the sheet to rename or
+delete otherwise), `to` (the new name for `copy` and `rename`), `if_exists`
+(`fail`, `skip`, or `replace` when the sheet to create exists), `missing`
+(`fail` or `skip` when the source is absent), and `position` (1-based; by
+default an added sheet goes last and a copy right after its source). It
+publishes the writer outputs plus `sheets`, the names afterwards. Rerun
+safety comes from `if_exists: skip`. A rename does not rewrite formulas on
+other sheets, a delete leaves references to the sheet dangling, and a copy
+does not carry tables, images, or charts.
+
+`xlsx.convert` exports a sheet: `path`, `output` (the file; `.csv`, `.json`,
+`.jsonl`, or `format`), the read options `sheet`, `range`, `header`,
+`columns`, `types`, `trim`, `skip_hidden`, and for csv `encoding` (`utf-8`, `utf-8-bom`,
+`shift_jis`; `cp932` is accepted) and `delimiter`. Every row is written, with
+no cap; `_row` is not. It publishes `path`, `format`, `count`, `sheet`,
+`range`, `warnings`, and with `artifact: true` the file's copy. The reverse
+direction is `xlsx.write` with `input`, whose csv also takes `encoding` and
+`delimiter`.
+
+`xlsx.extract` reads fields out of a sheet laid out as a form rather than a
+table, such as a supplier's quote whose layout differs by sender. `path`,
+`instruction` (what to find), and `schema` (`type: object`, one property per
+field, each optionally `description`-ed in the sheet's own language and typed
+`string`, `number`, `integer`, `boolean`, or `string` with `format: date` or
+`date-time`), plus a model through the DAG-level `llm` block or `with.llm`.
+Optional `sheet`, `range`, `send_values` (default true; false shows non-text
+cells as their kind only), `cache` (default true), `trim`, `formulas`. A
+model is shown the sheet's non-empty cells as `B3 [text,bold]: 見積番号` and
+answers only the address of each field's cell, or null; the engine reads the
+typed value from that cell, so no value is invented. It publishes each
+property, `cells` (property to the `Sheet1!B7` it came from), `sheet`,
+`warnings`, and `source` (`model` or `cache`); do not declare outputs. The
+model also names the cells that are labels, and the addresses are cached by
+the sheet's shape with a digest of each label, so a layout seen before makes
+no model request as long as the instruction, the schema, and the labels are
+unchanged; a form of the same template with a box left blank is read from
+the cache too, while a label renamed in place asks again. `dagu xlsx cache
+clear <dag>` drops the cache. A pinned type reads Japanese text as
+`xlsx.read` does: amounts such as `￥123,000`, `12万3,500円`, `▲1,000`, or
+`10%`, dates such as `2026年10月3日`, `令和8年10月3日 午後2時30分`, or `R8.10.3`,
+and `済`/`未` or `○`/`×` under `boolean`.
+
+```yaml
+llm:
+  provider: anthropic
+  model: claude-sonnet-5
+  api_key_name: ANTHROPIC_API_KEY
+steps:
+  - id: fields
+    action: xlsx.extract
+    with:
+      path: inbox/quote.xlsx
+      instruction: A supplier's quote. Find the quote number, the delivery date, and the total amount.
+      schema:
+        type: object
+        properties:
+          quote_no: {type: string, description: 見積番号}
+          delivery: {type: string, format: date, description: 納期}
+          total: {type: number, description: 合計金額}
+```
+
+`dagu dry` warns, without failing, when the workbook, sheet, or a column
+named by a reading, validating, converting, updating, cell-writing, or sheet
+step does not exist, and when the `input` file of `xlsx.write` or
+`xlsx.append` is missing (those two may create their workbook, so it is not
+checked); fields still holding a step-output reference are skipped.
+
 
 ## archive.create / archive.extract / archive.list
 
@@ -1002,6 +1325,41 @@ steps:
 ```
 
 `with` fields: `source`, `destination`, `format`, `compression_level`, `password`, `overwrite`, `strip_components`, `include`, `exclude`.
+
+## chat.completion
+
+Send a prompt to a model and print the reply. `with.prompt` (or `with.messages`) is required; every other `with` key (`provider`, `model`, `system`, `tools`, `max_tool_iterations`, `stream`, `thinking`, `web_search`) configures the model and replaces the DAG-level `llm` block entirely. `with.model` can be a list of `{provider, name}` entries tried in order.
+
+Add a step-level `output_schema` when later steps need typed values instead of free text:
+
+```yaml
+steps:
+  - id: classify
+    action: chat.completion
+    with:
+      provider: openai
+      model: gpt-5
+      prompt: "Classify this note and extract the amount: ${foreach.item.note}"
+    output_schema:
+      type: object
+      properties:
+        category: {type: string, enum: [refund, complaint, question]}
+        amount: {type: number}
+      required: [category]
+
+  - id: record
+    depends: classify
+    run: ./record.sh '${steps.classify.outputs.category}' '${steps.classify.outputs.amount}'
+```
+
+Structured output behavior:
+
+- The model answers through a forced `respond` tool whose parameters are the schema. A plain-text JSON reply is also accepted.
+- Unlisted properties are dropped, the rest is validated, and stdout is one JSON object. Each listed property becomes `${steps.<id>.outputs.<name>}`; references to other names are reported as unknown even for an open schema.
+- The schema needs `type: object`, at least one property, and every `required` name listed under `properties`. It cannot be combined with `web_search` or a tool named `respond`.
+- An invalid answer gets one correction, then the next `with.model` entry is tried. When none answers, the step fails; the error omits the answer and the step's stderr shows each rejected answer and why.
+- Validation checks shape, not truth. For extraction, leave a field out of `required` when the text may not contain it; a required field makes the model invent a value.
+- With `tools`, the tool DAGs are offered next to `respond`. Reaching `max_tool_iterations` without an answer fails that model like an unusable answer, so the next `with.model` entry starts over, running the tools again. The answer is never streamed.
 
 ## harness.run
 
@@ -1102,14 +1460,15 @@ steps:
 
 Browser behavior:
 
+- Before writing a browser step for a page you have not seen, work the page in a browser session (`dagu browser session`, see `references/cli.md`) with the same operations, looking at its outline after each, instead of guessing at its fields, buttons, or addresses. Export what worked: the step comes out with its acts recorded, so its first run replays them. With `browser.profile`, sign-in operations run only while the site asks for them, so guard them with `when: {selector: ...}` on the sign-in form.
 - Each `do` item sets exactly one of `goto`, `act`, `extract`, `expect`, `wait` (`selector` or `duration`), `screenshot`, or `ask`, plus optional `when` (skip unless it holds) and `timeout`.
-- An `act` performs one action: "Sign in with %user% and %password%" types into one field and stops. Write one act per field and one for the button.
+- An `act` performs one action: "Sign in with %user% and %password%" types into one field and stops. Write one act per field and one for the button. A dropdown that is not a native `<select>` takes two acts: one opens it, the next picks the option.
 - `expect` and `when` take a statement the model judges, or a fixed check `{text}`, `{selector}`, or `{url}` that reads the page without a model call. Prefer fixed checks for monitoring; they give the same result on every run. A fixed `when` reads the page once; add `within: 10s` when the page may still be loading.
 - Declare secrets under `secrets:`, pass them in `variables`, and reference them as `%name%`. The browser gets the value, the model only the name. An instruction containing a declared secret value (4+ characters) fails the step; do not write `${SECRET}` inside an instruction. A `%name%` that is not a variable or an earlier `ask.as` fails validation.
 - Model requests carry the instruction, the page's elements and visible text, and the extract schema; never variable values, typed field text, or screenshots. Declared secrets shown on the page are masked; plain variables are not.
 - "the model (...) answered that no element on the page matches the instruction" means the model chose no element. If the failure screenshot shows the element, the model answers that way for every request (for example `google/gemini-2.5-flash` via OpenRouter); switch models. Otherwise fix the instruction.
 - The top-level properties of each `extract` schema become `${steps.<id>.outputs.<name>}`. The same property in two extracts is a validation error.
-- Successful `act` operations are replayed on later runs on the same host without a model call; `extract` and model-judged conditions still call the model. A replay can hit a different element after a layout change, so follow important acts with an `expect`.
+- The `act` operations of a step that succeeded are replayed on later runs on the same host without a model call; `extract` and model-judged conditions still call the model. A replay can hit a different element after a layout change, so follow important acts with an `expect`: when a later operation fails on the page, the step's replays are dropped and the next run asks the model again.
 - The browser runtime applies `allowed_domains` to the page's HTTP(S) requests, so list CDN and sign-in hosts too; WebSockets are not covered. `example.com` matches only that host; `*.example.com` matches its subdomains. Dagu also fails the step when the page URL leaves the list. Blocked requests are counted per host in the timeline and appended to a failed step's error, so a missing CDN or sign-in host shows up there.
 - `ask: {prompt, as}` puts the step in Waiting until someone answers in the Web UI; the answer becomes `%<as>%`. Not supported on Windows. Answers are stored in run history, so use it for short-lived codes.
 - Downloads started by an act or goto are saved under `browser/<step id>/downloads/` in the run artifacts and awaited, up to the longest act or goto timeout, before the step ends. Screenshots are saved on failure by default (`screenshots: final` also keeps one of a successful end). Artifacts are not masked.
@@ -1117,6 +1476,65 @@ Browser behavior:
 - Where the browser sandbox cannot start, the host setting `browser.sandbox: false` or `DAGU_BROWSER_SANDBOX=false` turns it off for every browser step; a compromised page then runs with the Dagu process's permissions, so prefer the seccomp profile. DAGs cannot change it. With the sandbox on, a browser step fails when `CI` is set or Dagu runs as root on Linux, because the browser would run without the sandbox there; set `DAGU_BROWSER_SANDBOX=false` to allow it.
 - Profiles and the replay cache live on the host that runs the step. Pin such steps with `worker_selector` in distributed mode.
 - After a site redesign, clear recorded acts with `dagu browser cache clear <dag> [--step <id>]` on that host instead of editing the instruction or setting `cache: false`.
+
+## computer.extract / computer.run
+
+Automate desktop applications, such as an ERP client or a legacy Windows program, on the desktop of a macOS or Windows worker. The model looks at screenshots and clicks and types; it comes from the DAG-level `llm` block, or `with.llm`, which replaces it entirely. `anthropic`, `openai`, and `gemini` models use their native computer-use tools when they support them (Claude Opus 4.8 or Sonnet 5 and later, Gemini 3.5 and later); other providers, older models, or `mode: generic` use plain function tools with any tool-calling vision model.
+
+The Dagu process that runs the step must run in a logged-in user session: on Windows not as a service, with the screen unlocked; on macOS with Screen Recording and Accessibility granted to the app that starts Dagu. Run `dagu computer check` on the host to verify. Route computer DAGs to such workers with a DAG-level `worker_selector`; other systems fail the step.
+
+```yaml
+secrets:
+  - name: ERP_PASSWORD
+    provider: env
+    key: ERP_PASSWORD
+
+params:
+  INVOICE_ID: INV-0001
+
+llm:
+  provider: anthropic
+  model: claude-opus-5
+
+worker_selector:
+  desktop: finance
+
+steps:
+  - id: post
+    action: computer.run
+    with:
+      variables:
+        password: ${ERP_PASSWORD}
+      do:
+        - launch: C:\Program Files\ERP\client.exe
+        - act: Log in as clerk with password %password%
+        - act: Open the invoice entry form and post invoice ${params.INVOICE_ID}
+        - expect: {statement: A document number is shown, within: 30s}
+        - extract:
+            instruction: The document number in the status bar
+            schema:
+              type: object
+              properties:
+                document_number: {type: string}
+
+  - id: record
+    depends: post
+    run: echo "${steps.post.outputs.document_number}"
+```
+
+Computer behavior:
+
+- Each `do` item sets exactly one of `launch` (a command, or `{command, args}`; on macOS use `{command: open, args: [-a, TextEdit]}`), `act`, `extract`, `expect`, `wait` (a duration), `screenshot`, or `ask`, plus optional `when` and `timeout` (default 5m).
+- An `act` is a whole task: the model acts until it reports the task done, up to `max_actions` actions (default 50). It fails when the model reports it cannot finish.
+- `expect` and `when` take a statement the model judges against a screenshot, or an exact check that reads the window's elements without a model: `{text}` (the name or value of a visible element contains it), `{element: {role, name | id | near, in, nth}}` (the selector matches exactly one element; several is a miss), or `{window}` (the title of the window in front contains it; `*` wildcards). `{statement, within: 30s}` rechecks a false statement until it holds; an exact `expect` keeps looking until `within` or the operation timeout, and an exact `when` reads once unless `within` is set. Prefer exact checks for steps that repeat; they give the same result on every run, need no model, and work under `ai: never`. `%name%` placeholders in an exact check are replaced from variables and ask answers. Exact checks need 64-bit Windows.
+- Declare secrets under `secrets:`, pass them in `variables`, and reference them as `%name%`. The model sees only the placeholder, which is replaced when typed. Typed values can appear in later screenshots sent to the model and saved as artifacts. An instruction containing a declared secret value (4+ characters) fails the step.
+- The top-level properties of each `extract` schema become `${steps.<id>.outputs.<name>}`.
+- `with.ai` chooses how much the model decides, and `ai` on an `act` or an `extract` replaces it for that operation. `on_miss` (default): the acts of a step that succeeded are replayed on later runs on the same host without a model while every screen still matches what the model saw; when a screen differs, the model continues from there and repairs the recording. `every_run`: the model decides every run; a successful act still records. `never`: replay only; when the screen differs or there is no recording on the host, the step fails and says why, and the recording is kept for a run under `on_miss` to repair. A step whose operations never call the model needs no `llm`. A statement `expect` or `when` and an `extract` need the model, so a step-level `never` refuses them unless the extract sets its own `ai`; exact checks are allowed. `cache: false` means `every_run`; set `ai` or `cache`, not both. When a later operation fails, the step's replays are dropped and the next run asks the model again. Clear recordings with `dagu computer cache clear <dag> [--step <id>]`.
+- Each operation's timeline event carries `via` (`screen` for a replay, `model` for a model request, `exact` for an exact check), `durationMs`, and `tokens`.
+- When a model provider asks for confirmation before sensitive actions, the step fails unless `on_confirmation: allow`. Put an `ask` before such an act instead.
+- `ask: {prompt, as}` puts the step in Waiting and leaves the desktop as it is; the answer becomes `%<as>%` and the step resumes at the next operation.
+- One computer step at a time uses a user's desktop, across Dagu processes with different data directories; others wait. While a step holds the desktop, the display stays awake; a locked screen fails the step. Screenshots are saved under `computer/<step id>/` in the run artifacts on failure by default and are not masked.
+- Before sending input, a step waits until nobody has touched the desktop for `with.idle` (default `15s`). Actions the model chose on a screen a person has since used are not run; the model gets the new screen instead. `idle: 0` turns this off, for example on a dedicated host.
 
 ## router.route
 
@@ -1151,6 +1569,7 @@ steps:
 ```
 
 Routes are evaluated in priority order: exact matches first, then regex, then catch-all.
+A step listed under several routes runs once when any of their patterns matches.
 
 ---
 
@@ -1511,7 +1930,7 @@ Flags:
 
 ### dagu rm
 
-Remove DAG run history and/or the DAG YAML definition. At least one of `--history` or `--definition` is required. Active runs are never deleted from history; definition deletion is refused while the DAG has alive processes. With `--definition`, identify the DAG by filename, stem, or configured path. Deleting all history (no `--older-than`) also clears the browser replay cache of the DAG on this host.
+Remove DAG run history and/or the DAG YAML definition. At least one of `--history` or `--definition` is required. Active runs are never deleted from history; definition deletion is refused while the DAG has alive processes. With `--definition`, identify the DAG by filename, stem, or configured path. Deleting all history (no `--older-than`) also clears the browser and computer replay caches of the DAG on this host.
 
 ```sh
 dagu rm [--history|-H] [--definition|-d] [-t <duration>] [-f] [--dry-run] <dag>
@@ -1533,6 +1952,60 @@ Clear the recorded `act` operations that browser steps replay, so the next run a
 dagu browser cache clear <dag> [--step <id>]
 ```
 
+### dagu browser session
+
+Work a site in a browser kept open between commands, then turn what worked into a `browser.run` step. Each `do` runs one operation, read from stdin in the form of a `with.do` item, exactly as a step would, and reports what it did, the actions an act performed, what an extract read, and the page next with its outline. `describe` outlines the page without a model: fields with their labels, selects with their options, buttons, links with their addresses, tables and lists, each element with an ID that `do` can act on without a model: `{"click": ID}`, `{"type": {"into": ID, "text": TEXT}}`, `{"select": {"in": ID, "option": OPTION}}`, kept as the act a step writes, with its recording. `export` builds the step from the operations that succeeded and writes their act recordings to the step's replay cache, so its first run on this host replays them without a model request. Variable values go on stdin under `variables`; `{"env": NAME}` is read from the environment on every command and masked, a plain string serves one command. Every command prints one JSON object; a failure prints `{"error": {"code", "message"}}` and exits 1. A session closes its browser when idle past `--idle-timeout` (default `30m`); its history can be exported for a day after. `close --keep` ends it the same way at once, freeing its profile for a step.
+
+```sh
+dagu browser session open [URL] [--provider P --model M | --llm '<llm block>'] [--profile N] [--headed] [--viewport WxH] [--allowed-domain D]... [--idle-timeout 30m]
+echo '{"act": "Click Sign in"}' | dagu browser session do <id>
+echo '{"click": "0-131"}' | dagu browser session do <id>
+dagu browser session describe <id> [--find TEXT] [--format text] [--screenshot NAME]
+dagu browser session export <id> --dag <name|file> --step <id> [--skip N]... [--dry-run] [--close] [--format yaml]
+dagu browser session close <id> [--force] [--keep]
+dagu browser session list
+```
+
+### dagu computer check
+
+Check that computer steps can capture the screen and send input in the current session. Run it as the user and in the session of the worker that runs computer steps. On macOS it also asks macOS to show the Screen Recording and Accessibility prompts for missing permissions. Exits nonzero and lists the problems when the desktop cannot be automated. `--format json` prints `{os, width, height, ready, problems}`, each problem with a `code` (such as `screen_recording`, `accessibility`, or `screen_locked`) and a `message`.
+
+```sh
+dagu computer check [--format json]
+```
+
+### dagu computer elements
+
+List the accessible elements of the window in front on 64-bit Windows: each with `role`, `name`, `id`, `value`, `label`, `bounds` in display pixels, `window`, and `path` from the window down. `--at-pointer` reports the element under the pointer after `--after`; `--watch` reports it whenever it changes, one JSON object per line, until stdin closes; `--match` reports the elements a selector matches and succeeds only on exactly one, with `-` reading the selector from stdin. A selector is JSON with `role` and `name`, `id`, or `near` (`{label, side}`), optionally `app`, `window`, `in`, and `nth`; names take `*`. `--format json` prints one object; a failure prints `{"error": {"code", "message"}}` and exits 1, with `invalid_input`, `unsupported`, `load_failed`, `no_elements`, `not_found`, `ambiguous`, `failed`, or a `check` problem code.
+
+```sh
+dagu computer elements [--format json] [--limit N] [--at-pointer [--after 3s] | --watch | --match '<selector JSON>' | --match -]
+```
+
+### dagu computer cache clear
+
+Clear the recorded `act` operations that computer steps replay, so the next run asks the model again. Without `--step`, every step of the DAG is cleared. The cache lives on the host that ran the step; in distributed mode, run it on the worker.
+
+```sh
+dagu computer cache clear <dag> [--step <id>]
+```
+
+### dagu xlsx inspect
+
+Describe every sheet of an `.xlsx` workbook: used range, detected data block, header row, column names and types, a profile of each column, row count, tables, and a few typed sample rows, plus the workbook's named ranges and date system. Types and the profile cover every data row up to 5000: filled and blank counts, distinct count, the values when a few repeat, min and max of number and date columns, and the cells that do not read as the column's type. The text format shows them after each column, as in `状態 (string: 済, 未; 40 blank), 数量 (number; 1..250; 1 odd: D300 "未定")`. It reads the file directly, needs no configuration or engine, and creates no run. `--sheet` describes one sheet only and `--rows` sets the sample size. A hidden sheet is marked `(hidden)` and rows hidden by a filter or by hand are counted, as in `300 rows, 12 hidden`. A protected workbook takes its password from `DAGU_XLSX_PASSWORD`, which keeps it out of the process list; `--password` is a convenience that wins when both are set. `--format json` prints one object: `path`, `date_system`, `sheets` (each with `name`, `hidden`, `used_range`, `range`, `header_row`, `headers`, `types`, `row_count`, `hidden_rows`, `columns`, `profile_truncated`, `tables`, `sample`), `named_ranges`, and `warnings`.
+
+```sh
+dagu xlsx inspect <path> [--sheet <name>] [--rows <n>] [--password <password>] [--format json]
+```
+
+### dagu xlsx read
+
+Print the typed rows of a sheet the way `xlsx.read` publishes them: numbers stay numbers, dates become ISO 8601 text, text keeps its leading zeros, and each row carries `_row`. The flags mirror the action's fields: `--sheet`, `--range`, `--header` (`true`, `false`, a row number, or `3,4`), `--columns` (comma-separated, with `name:alias` renames), `--max-rows`, `--skip-hidden` (leave out rows hidden by a filter or by hand), and `--password` (a protected workbook; prefer `DAGU_XLSX_PASSWORD`, which keeps it out of the process list, and the flag wins when both are set). The text format is tab-separated, with tabs, line breaks, and backslashes inside a cell escaped as `\t`, `\n`, `\r`, and `\\` so one cell stays in one column; `--format json` prints `rows`, `count`, `headers`, `sheet`, `range`, `warnings`, and `truncated`.
+
+```sh
+dagu xlsx read <path> [--sheet <name>] [--range A2:F] [--header false] [--columns "a,b:c"] [--max-rows <n>] [--skip-hidden] [--password <password>] [--format json]
+```
+
 ### dagu ps
 
 List running DAG processes.
@@ -1552,6 +2025,21 @@ Deprecated: prefer `dagu rm --history`.
 ```sh
 dagu cleanup <dag-name> [--retention-days <n>] [--dry-run] [--yes/-y]
 ```
+
+### dagu prune-artifacts
+
+Remove artifact directories and index records that no surviving DAG run points to. Orphans appear when a run record is deleted by a route other than `dagu rm`, or when the artifact root moved. Only the artifact layout is examined: `<root>/YYYY/MM/DD/<run>` directories with their index records, and pre-date `<root>/<dag>/dag-run_<ts>_<id>` directories. Liveness is decided by name: an entry is removed only when no run in the current history tree could still claim it, and only when it is older than `--older-than`. A minimum age of 1h is always enforced because a run's artifact directory exists before its record does. Without `--yes`, the command reports how many entries it found before asking to delete them.
+
+```sh
+dagu prune-artifacts [--older-than|-t <duration>] [--root <dir>] [--dry-run] [--yes/-y]
+```
+
+Flags:
+
+- `--older-than/-t` — Only remove entries older than a duration (e.g. `10d`, `24h`, `1w`). Default `24h`; a minimum of 1h is enforced
+- `--root` — Artifact root to prune (default: configured `paths.artifact_dir`). Pass a previous artifacts directory (e.g. `<old data_dir>/artifacts`) or a DAG's `artifacts.dir`. A root that holds the run history or the log directory is refused
+- `--dry-run` — Preview removals without deleting
+- `--yes/-y` — Skip confirmation prompt
 
 ### dagu schema
 
@@ -1638,7 +2126,7 @@ Start distributed worker: `dagu worker --worker.coordinators <host:port,...> [--
 - `dagu example [id]` — Show built-in example DAGs
 - `dagu version` — Show version
 - `dagu upgrade [--check] [--version/-v <ver>] [--dry-run] [--yes/-y]` — Self-update binary
-- `dagu license <activate|deactivate|check>` — Manage license
+- `dagu license <activate [key]|deactivate|check>` — Manage license; `activate` without a key prints a Dagu Console approval URL and waits for an owner to approve this server
 - `dagu secret resolve <ref> [--workspace <name>]` — Print a registry secret's plaintext value to stdout, without a trailing newline; a workspace falls back to global like a DAG's `secrets:` entry, and an unknown workspace fails. Each read is recorded in the audit log. Local context only
 
 ---
@@ -1935,6 +2423,8 @@ For host subprocess runs, built-in provider adapters resolve binaries through `P
 ### Managed OpenCode Sessions
 
 Built-in `provider: opencode` steps use a managed OpenCode server session by default when they run from a standalone Dagu server, from `dagu start-all`, or on a distributed worker. The run page shows the agent timeline and lets an operator answer permission requests and questions. Each managed step has its own conversation by default; runs with multiple managed steps provide a step selector in the Agent tab. A waiting answer suspends the step durably; Dagu resumes the same OpenCode session on the host that owns it. The final assistant text becomes step stdout.
+
+Root interaction responses and clean-session restarts resume directly unless the run belongs to an enabled global queue. Standalone API servers resume unqueued local sessions on their own OpenCode host. Enabled global queues require a running scheduler; use `dagu start-all` for queued local managed sessions so the scheduler shares the server's OpenCode host. Distributed sessions retain their owning worker.
 
 Managed mode starts one process-local OpenCode server under the Dagu service identity. Install a compatible `opencode` executable for that service and authenticate it with `opencode auth login` (normally stored in `~/.local/share/opencode/auth.json`) or pass selected provider credentials through the service configuration:
 

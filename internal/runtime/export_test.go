@@ -21,6 +21,11 @@ func (r *Runner) SetupPushBackConversation(ctx context.Context, node *Node) {
 	r.setupPushBackConversation(ctx, node)
 }
 
+// CheckDryRunStep exposes checkDryRunStep for testing.
+func CheckDryRunStep(ctx context.Context, step ir.Step) error {
+	return checkDryRunStep(ctx, step)
+}
+
 // StepSupportsChatMessages exposes stepSupportsChatMessages for testing.
 func StepSupportsChatMessages(step ir.Step) bool {
 	return stepSupportsChatMessages(step)
@@ -57,4 +62,9 @@ func (n *Node) SetPushBackPreviousStdout(path string) {
 	n.Data.mu.Lock()
 	defer n.Data.mu.Unlock()
 	n.inner.State.PushBackPreviousStdout = path
+}
+
+// ChildRunSummary exports childRunSummary for testing.
+func ChildRunSummary(ctx context.Context, childRunID string, outputsReported bool) string {
+	return childRunSummary(ctx, childRunID, outputsReported)
 }

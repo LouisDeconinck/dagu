@@ -31,9 +31,57 @@ const approvalTabMock = vi.hoisted(() => vi.fn());
 const humanTasksTabMock = vi.hoisted(() => vi.fn());
 const nodeStatusTableMock = vi.hoisted(() => vi.fn());
 const logViewerMock = vi.hoisted(() => vi.fn());
+const foreachItems = vi.hoisted(() => ({
+  list: {
+    total: 1,
+    counts: { notStarted: 0, running: 0, succeeded: 0, failed: 1, aborted: 0 },
+    items: [
+      {
+        item: '0',
+        index: 0,
+        key: 'a',
+        status: 2,
+        statusLabel: 'failed',
+        error: 'exit status 3',
+      },
+    ],
+  },
+  item: {
+    item: '0',
+    index: 0,
+    key: 'a',
+    status: 2,
+    statusLabel: 'failed',
+    steps: [
+      {
+        name: 'body',
+        status: 2,
+        statusLabel: 'failed',
+        hasStdout: true,
+        hasStderr: true,
+      },
+    ],
+  },
+}));
 
 vi.mock('@/hooks/api', () => ({
   useClient: vi.fn(),
+  useQuery: (path: string, init: unknown) => {
+    if (!init) {
+      return { data: undefined, isLoading: false };
+    }
+    if (path.endsWith('/foreach')) {
+      return { data: foreachItems.list, isLoading: false };
+    }
+    if (path.endsWith('/foreach/{item}')) {
+      return { data: foreachItems.item, isLoading: false };
+    }
+    return { data: { content: '' }, isLoading: false };
+  },
+}));
+
+vi.mock('@/contexts/AuthContext', () => ({
+  useCanExecuteForWorkspace: () => true,
 }));
 
 vi.mock('@/contexts/ConfigContext', () => ({
@@ -304,6 +352,43 @@ afterEach(() => {
 });
 
 describe('DAGStatus', () => {
+  it('keeps approval recovery visible after the last gate is approved', () => {
+    const pendingRun = {
+      ...dagRun,
+      status: Status.Waiting,
+      statusLabel: StatusLabel.waiting,
+      approvalResumePending: true,
+      nodes: [
+        {
+          step: { name: 'gate', approval: { prompt: 'Approve deployment' } },
+          status: NodeStatus.Success,
+          statusLabel: NodeStatusLabel.succeeded,
+          approvedAt: '2026-09-28T12:00:00Z',
+        },
+      ],
+    } as components['schemas']['DAGRunDetails'];
+    const { rerender } = render(dagStatusView(pendingRun, 'local', true));
+    expect(screen.getByRole('button', { name: 'Retry resume' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: 'Outputs' }));
+    expect(screen.getByRole('button', { name: 'Retry resume' })).toBeVisible();
+    rerender(dagStatusView({ ...pendingRun }, 'local', true));
+    expect(screen.getByText('Approval saved; resume failed.')).toBeVisible();
+    rerender(
+      dagStatusView(
+        {
+          ...pendingRun,
+          status: Status.Queued,
+          approvalResumePending: undefined,
+        },
+        'local',
+        true
+      )
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Retry resume' })
+    ).not.toBeInTheDocument();
+  });
+
   it('preserves a controlled tab across runs', () => {
     const { rerender } = render(dagStatusView(dagRun, 'local', true));
     fireEvent.click(screen.getByRole('button', { name: 'Outputs' }));
@@ -470,6 +555,43 @@ describe('DAGStatus', () => {
       expect(
         screen.queryByRole('dialog', { name: 'step' })
       ).not.toBeInTheDocument();
+    });
+  });
+
+  it('drills from a foreach step into an item body step log', async () => {
+    const foreachRun = {
+      ...dagRun,
+      nodes: [
+        {
+          ...dagRun.nodes[0],
+          step: { name: 'step', executorConfig: { type: 'foreach' } },
+          status: NodeStatus.PartialSuccess,
+          statusLabel: NodeStatusLabel.partially_succeeded,
+        },
+      ],
+    } as components['schemas']['DAGRunDetails'];
+
+    render(dagStatusView(foreachRun));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open step details' }));
+    const drawer = await screen.findByRole('dialog', { name: 'step' });
+    const items = within(drawer).getByRole('region', { name: 'Items' });
+    expect(items).toHaveTextContent('1 of 1 done');
+
+    fireEvent.click(within(items).getByRole('button', { name: 'Item 0' }));
+    fireEvent.click(
+      within(items).getByRole('button', { name: 'Open body in log viewer' })
+    );
+
+    await waitFor(() => {
+      expect(logViewerMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isOpen: true,
+          stepName: 'body',
+          stream: Stream.stdout,
+          foreach: { stepName: 'step', item: '0' },
+        })
+      );
     });
   });
 

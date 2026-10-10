@@ -1190,6 +1190,90 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dag-runs/{name}/{dagRunId}/steps/{stepName}/foreach": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the items of a foreach step in a DAG-run
+         * @description Lists the items a foreach step expanded to, with the status each item's
+         *     body run reached. Items are sorted failed first, then running, then the
+         *     rest in index order. Nested foreach items are listed by passing the
+         *     parent path a body step reports as foreachParent.
+         *
+         */
+        get: operations["getDAGRunForeachItems"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dag-runs/{name}/{dagRunId}/steps/{stepName}/foreach/{item}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Retrieve one item of a foreach step in a DAG-run
+         * @description Fetches an item's body run: its status and the status of each body step
+         */
+        get: operations["getDAGRunForeachItem"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dag-runs/{name}/{dagRunId}/steps/{stepName}/foreach/{item}/steps/{bodyStepName}/log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Retrieve log for a body step of a foreach item in a DAG-run
+         * @description Fetches the log of one body step run for one item of a foreach step
+         */
+        get: operations["getDAGRunForeachStepLog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dag-runs/{name}/{dagRunId}/steps/{stepName}/foreach/{item}/steps/{bodyStepName}/log/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download log for a body step of a foreach item in a DAG-run
+         * @description Downloads the entire log file of one body step run for one item of a foreach step
+         */
+        get: operations["downloadDAGRunForeachStepLog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dag-runs/{name}/{dagRunId}/steps/log/download": {
         parameters: {
             query?: never;
@@ -1203,8 +1287,10 @@ export interface paths {
          *     DAG-run only. Logs from nested DAG-runs are not included.
          *     Returns a streaming ZIP archive with no size limit. Each available log is
          *     stored as <index>-<step-name>/stdout.log or stderr.log, in run order.
-         *     Missing files are skipped. Each file includes only the bytes present when
-         *     it is opened; subsequent log growth is excluded.
+         *     The body logs and item records of a foreach step are stored under
+         *     <index>-<step-name>/foreach/. Missing files are skipped. Each file
+         *     includes only the bytes present when it is opened; subsequent log growth
+         *     is excluded.
          *
          */
         get: operations["downloadDAGRunStepLogs"];
@@ -1264,6 +1350,26 @@ export interface paths {
         patch: operations["updateDAGRunStepStatus"];
         trace?: never;
     };
+    "/dag-runs/{name}/{dagRunId}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume work after a saved approval
+         * @description Retries resume admission for a root run without changing its approvals or inputs. Already queued or running resumes are not dispatched again.
+         */
+        post: operations["resumeDAGRun"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dag-runs/{name}/{dagRunId}/steps/{stepName}/approve": {
         parameters: {
             query?: never;
@@ -1275,7 +1381,7 @@ export interface paths {
         put?: never;
         /**
          * Approve a waiting step
-         * @description Approves a step that is in Waiting status, optionally providing input parameters that will be available as environment variables in subsequent steps
+         * @description Approves a waiting step and requests resume when work is ready. Approval and inputs remain saved if resume admission fails; use the run resume endpoint to retry without approving again.
          */
         post: operations["approveDAGRunStep"];
         delete?: never;
@@ -1538,6 +1644,90 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/{stepName}/foreach": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the items of a foreach step in a sub DAG-run
+         * @description Lists the items a foreach step expanded to, with the status each item's
+         *     body run reached. Items are sorted failed first, then running, then the
+         *     rest in index order. Nested foreach items are listed by passing the
+         *     parent path a body step reports as foreachParent.
+         *
+         */
+        get: operations["getSubDAGRunForeachItems"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/{stepName}/foreach/{item}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Retrieve one item of a foreach step in a sub DAG-run
+         * @description Fetches an item's body run: its status and the status of each body step
+         */
+        get: operations["getSubDAGRunForeachItem"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/{stepName}/foreach/{item}/steps/{bodyStepName}/log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Retrieve log for a body step of a foreach item in a sub DAG-run
+         * @description Fetches the log of one body step run for one item of a foreach step
+         */
+        get: operations["getSubDAGRunForeachStepLog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/{stepName}/foreach/{item}/steps/{bodyStepName}/log/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Download log for a body step of a foreach item in a sub DAG-run
+         * @description Downloads the entire log file of one body step run for one item of a foreach step
+         */
+        get: operations["downloadSubDAGRunForeachStepLog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dag-runs/{name}/{dagRunId}/sub-dag-runs/{subDAGRunId}/steps/log/download": {
         parameters: {
             query?: never;
@@ -1551,8 +1741,10 @@ export interface paths {
          *     sub DAG-run only. Logs from nested DAG-runs are not included.
          *     Returns a streaming ZIP archive with no size limit. Each available log is
          *     stored as <index>-<step-name>/stdout.log or stderr.log, in run order.
-         *     Missing files are skipped. Each file includes only the bytes present when
-         *     it is opened; subsequent log growth is excluded.
+         *     The body logs and item records of a foreach step are stored under
+         *     <index>-<step-name>/foreach/. Missing files are skipped. Each file
+         *     includes only the bytes present when it is opened; subsequent log growth
+         *     is excluded.
          *
          */
         get: operations["downloadSubDAGRunStepLogs"];
@@ -2332,6 +2524,52 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/dags/{fileName}/webhook/profile-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create webhook profile token
+         * @description Creates an additional webhook token bound to one runtime profile.
+         *     Requests authenticated with it always run with that profile.
+         *     Returns the new token, which is only shown once. Not available when
+         *     the webhook auth mode is `hmac_only`. Admin only.
+         *
+         */
+        post: operations["createDAGWebhookProfileToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dags/{fileName}/webhook/profile-tokens/{tokenId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke webhook profile token
+         * @description Revokes a webhook profile token. The token becomes invalid
+         *     immediately. Admin only.
+         *
+         */
+        delete: operations["revokeDAGWebhookProfileToken"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/dags/{fileName}/webhook/toggle": {
         parameters: {
             query?: never;
@@ -2465,6 +2703,30 @@ export interface paths {
          * @description Removes server-side settings for the specified DAG. Manager or admin only.
          */
         delete: operations["deleteDAGSettings"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/dags/{fileName}/pin": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Pin a DAG
+         * @description Pins the DAG to the top of the DAG list for all users. Requires write access to the DAG's workspace; allowed when Git sync is read-only. Pinning an already pinned DAG succeeds.
+         */
+        put: operations["pinDAG"];
+        post?: never;
+        /**
+         * Unpin a DAG
+         * @description Removes the DAG's pin for all users. Requires write access to the DAG's workspace; allowed when Git sync is read-only. Unpinning a DAG that is not pinned succeeds.
+         */
+        delete: operations["unpinDAG"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2973,9 +3235,57 @@ export interface paths {
         put?: never;
         /**
          * Deactivate the current license
-         * @description Removes local activation data and returns to community mode. Admin only.
+         * @description Frees the server's slot in Dagu Console, removes local activation data, and returns to community mode. Admin only.
          */
         post: operations["deactivateLicense"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/license/connect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the Dagu Console connection request
+         * @description Returns the state of the latest request to connect this server to Dagu Console. Admin only.
+         */
+        get: operations["getLicenseConnect"];
+        put?: never;
+        /**
+         * Connect this server to Dagu Console
+         * @description Starts a request for a license from Dagu Console, or returns the pending one. Open connectUrl to approve it; the license is installed once a workspace owner approves. Admin only.
+         */
+        post: operations["startLicenseConnect"];
+        /**
+         * Cancel the Dagu Console connection request
+         * @description Abandons the pending request to connect this server to Dagu Console. Admin only.
+         */
+        delete: operations["cancelLicenseConnect"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/license/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check in with Dagu Console now
+         * @description Refreshes the license from Dagu Console instead of waiting for the next hourly check-in. Admin only.
+         */
+        post: operations["refreshLicense"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3821,7 +4131,7 @@ export interface components {
             dagRunId: string;
             /** @description The approved step name */
             stepName: string;
-            /** @description Whether the DAG run was re-enqueued for execution */
+            /** @description Whether resume execution was accepted, directly or through a queue */
             resumed: boolean;
         };
         /** @description A single chat message in an LLM session */
@@ -4080,6 +4390,8 @@ export interface components {
             authMode: components["schemas"]["WebhookAuthMode"];
             hmac: components["schemas"]["WebhookHMACDetails"];
             profileSelection: components["schemas"]["WebhookProfileSelectionDetails"];
+            /** @description Additional tokens, each bound to one runtime profile. Remote nodes running versions without profile tokens omit the field. */
+            profileTokens?: components["schemas"]["WebhookProfileToken"][];
             /**
              * Format: date-time
              * @description When the webhook was created
@@ -4117,6 +4429,34 @@ export interface components {
         WebhookProfileSelectionDetails: {
             /** @description Runtime profile names accepted through X-Dagu-Profile. An empty list disables caller selection. */
             allowedProfiles: components["schemas"]["RuntimeProfileName"][];
+        };
+        /** @description Webhook token bound to one runtime profile (token not included) */
+        WebhookProfileToken: {
+            /** @description Unique identifier for the profile token */
+            id: string;
+            /** @description Label identifying the caller that holds the token */
+            name: string;
+            /** @description Leading characters of the token for identification */
+            tokenPrefix: string;
+            profile: components["schemas"]["RuntimeProfileName"];
+            /**
+             * Format: date-time
+             * @description When the profile token was created
+             */
+            createdAt: string;
+            /** @description User ID who created the profile token */
+            createdBy?: string;
+            /**
+             * Format: date-time
+             * @description When the profile token last authorized a request
+             */
+            lastUsedAt?: string;
+        };
+        /** @description Request to create a webhook profile token */
+        WebhookProfileTokenCreateRequest: {
+            /** @description Label identifying the caller that will hold the token */
+            name: string;
+            profile: components["schemas"]["RuntimeProfileName"];
         };
         /** @description Replacement runtime-profile allowlist for a webhook */
         WebhookProfileSelectionRequest: {
@@ -4827,6 +5167,8 @@ export interface components {
             nextRun?: string;
             /** @description Whether the DAG is suspended */
             suspended: boolean;
+            /** @description Whether the DAG is pinned to the top of the DAG list */
+            pinned: boolean;
             /** @description List of errors encountered during the request */
             errors: string[];
         };
@@ -5300,6 +5642,8 @@ export interface components {
             onWait?: components["schemas"]["Node"];
             /** @description List of preconditions that must be met before the DAG-run can start */
             preconditions?: components["schemas"]["Condition"][];
+            /** @description Top-level error recorded for the DAG-run, such as a definition build failure that prevented the run from starting */
+            error?: string;
             /** @description Goal progress of an agent DAG-run. Absent for other DAG types. */
             agentTasks?: components["schemas"]["AgentTask"][];
             /** @description Ordered decision timeline of an agent DAG-run: what the agent ran, in what order, and when each task was satisfied. Absent for other DAG types. */
@@ -5310,6 +5654,8 @@ export interface components {
             sourceFileName?: components["schemas"]["DAGFileName"];
             /** @description Whether completed human-task input is durable but the same DAG-run still needs its retry queued */
             humanTaskResumePending?: boolean;
+            /** @description Whether a root run has a saved approval and ready work whose resume still needs to be accepted */
+            approvalResumePending?: boolean;
         };
         /** @description One file within a DAG-run's artifact directory */
         ArtifactListFile: {
@@ -5606,6 +5952,18 @@ export interface components {
             name?: string;
             status?: string;
             files?: string[];
+            /** @description How an operation ran: screen for a replayed recording, model for a model request; absent for one that decides nothing */
+            via?: string;
+            /**
+             * Format: int64
+             * @description How long the operation took, in milliseconds; absent when under one
+             */
+            durationMs?: number;
+            /**
+             * Format: int64
+             * @description Model tokens the operation used; absent when none
+             */
+            tokens?: number;
         };
         /** @description One push-back event recorded for an approval step or a human task */
         PushBackHistoryEntry: {
@@ -5703,6 +6061,8 @@ export interface components {
             };
             /** @description List of step names that must complete before this step can start */
             depends?: string[];
+            /** @description Step names this step depends on because it references their outputs, in addition to depends */
+            inferredDepends?: string[];
             repeatPolicy?: components["schemas"]["RepeatPolicy"];
             /** @description Whether to send email notifications on step failure */
             mailOnError?: boolean;
@@ -5960,6 +6320,72 @@ export interface components {
             path: string;
             error: string;
         };
+        /**
+         * @description Status of a foreach item's body run
+         * @enum {string}
+         */
+        ForeachItemStatusFilter: ForeachItemStatusFilter;
+        /** @description Number of items per body run status */
+        ForeachItemCounts: {
+            notStarted: number;
+            running: number;
+            succeeded: number;
+            failed: number;
+            aborted: number;
+        };
+        /** @description One page of a foreach step's items */
+        ForeachItemList: {
+            /** @description Number of items the step expanded to, before any status filter */
+            total: number;
+            counts: components["schemas"]["ForeachItemCounts"];
+            items: components["schemas"]["ForeachItemSummary"][];
+        };
+        /** @description One item of a foreach step and the status its body run reached */
+        ForeachItemSummary: {
+            /** @description Path that addresses the item in the foreach item routes */
+            item: string;
+            index: number;
+            key: string;
+            status: components["schemas"]["NodeStatus"];
+            statusLabel: components["schemas"]["NodeStatusLabel"];
+            /** @description Error the body run reported, when it failed */
+            error?: string;
+            /** @description RFC3339 timestamp when the body run started */
+            startedAt?: string;
+            /** @description RFC3339 timestamp when the body run finished */
+            finishedAt?: string;
+        };
+        /** @description One item of a foreach step with the status of each body step */
+        ForeachItem: {
+            /** @description Path that addresses the item in the foreach item routes */
+            item: string;
+            index: number;
+            key: string;
+            status: components["schemas"]["NodeStatus"];
+            statusLabel: components["schemas"]["NodeStatusLabel"];
+            error?: string;
+            startedAt?: string;
+            finishedAt?: string;
+            /** @description Body steps in execution order */
+            steps: components["schemas"]["ForeachBodyStep"][];
+        };
+        /** @description Status of one body step within a foreach item */
+        ForeachBodyStep: {
+            name: string;
+            id?: string;
+            status: components["schemas"]["NodeStatus"];
+            statusLabel: components["schemas"]["NodeStatusLabel"];
+            error?: string;
+            startedAt?: string;
+            finishedAt?: string;
+            retryCount?: number;
+            /** @description Whether a stdout log file was recorded for the step */
+            hasStdout: boolean;
+            /** @description Whether a stderr log file was recorded for the step */
+            hasStderr: boolean;
+            /** @description For a body step that is itself a foreach, the parent path that lists its items */
+            foreachParent?: string;
+        };
         /** @description Log information for the execution */
         Log: {
             /** @description Log content */
@@ -5982,12 +6408,14 @@ export interface components {
         };
         /** @description Precondition that must be satisfied before running a step or DAG-run */
         Condition: {
-            /** @description Value or command text to evaluate. When `expected` is omitted, this runs as a command check. When `expected` is set, this is value-resolved and compared as data. */
+            /** @description Value or command text to evaluate. When `expected` and `expectedAny` are omitted, this runs as a command check. When either is set, this is value-resolved and compared as data. */
             condition?: string;
             /** @description Dynamic value expression to evaluate and compare with `expected`. Valid only when `expected` is set and `condition` is omitted. */
             eval?: string;
             /** @description Expected result for a value-match precondition. When set, Dagu compares the actual value from `condition` or `eval` instead of using command exit status. */
             expected?: string;
+            /** @description Alternative expected results for a value-match precondition, set instead of `expected`. The condition is met when any of them matches. Set on a step that a router lists under several routes. */
+            expectedAny?: string[];
             /** @description If true, inverts the condition result (run when condition does NOT match) */
             negate?: boolean;
             /** @description Error message if the condition is not met */
@@ -6231,6 +6659,39 @@ export interface components {
             warningCode: string;
             /** @description User-facing explanation when a configured license is unusable */
             error: string;
+            /** @description Name that identifies this server in Dagu Console */
+            serverName?: string;
+            /** @description Identifier of the loaded license */
+            licenseId?: string;
+            /** @description Dagu Console workspace that owns the license */
+            workspace?: string;
+            /**
+             * @description How the license reached this server
+             * @enum {string}
+             */
+            connectedVia?: LicenseStatusResponseConnectedVia;
+            /** @description Identifier of this server in Dagu Console, for licenses that check in */
+            serverId?: string;
+            /** @description Last time Dagu Console accepted this server's check-in */
+            lastCheckIn?: string;
+            /** @description Dagu Console page for this server */
+            consoleUrl?: string;
+        };
+        /** @description Request to connect this server to Dagu Console */
+        LicenseConnectStatus: {
+            /**
+             * @description Progress of the request
+             * @enum {string}
+             */
+            state: LicenseConnectStatusState;
+            /** @description Dagu Console page that approves the request */
+            connectUrl?: string;
+            /** @description Short code Dagu Console shows so the approver can confirm the request */
+            code?: string;
+            /** @description When the request expires unless approved */
+            expiresAt?: string;
+            /** @description Why the request failed */
+            error?: string;
         };
         /** @description Request body for changing password */
         ChangePasswordRequest: {
@@ -6986,6 +7447,8 @@ export interface components {
         UserId: string;
         /** @description unique identifier of the API key */
         APIKeyId: string;
+        /** @description unique identifier of the webhook profile token */
+        WebhookProfileTokenId: string;
         /** @description number of items per page (default is 30, max is 100) */
         PerPage: number;
         /** @description Number of Wiki page entries per page (default 50, max 200) */
@@ -7014,6 +7477,19 @@ export interface components {
         DAGName: components["schemas"]["DAGName"];
         /** @description name of the step */
         StepName: string;
+        /** @description Path of a foreach item: the item index, or for an item of a nested
+         *     foreach the parent path reported as foreachParent followed by a dot
+         *     and the item index, such as 2.inner.0.
+         *      */
+        ForeachItemPath: string;
+        /** @description name or ID of a body step of the foreach item */
+        BodyStepName: string;
+        /** @description Lists the items of a nested foreach instead of the step's own items.
+         *     The value is the foreachParent a body step reports, such as 2.inner.
+         *      */
+        ForeachParent: string;
+        /** @description only list items whose body run reached this status */
+        ForeachItemStatusFilter: components["schemas"]["ForeachItemStatusFilter"];
         /** @description explicit ID of the human-task step */
         HumanTaskStepId: string;
         /** @description Relative artifact file path within the DAG-run artifact directory. Must not start with '/' or '\' or contain '..'. */
@@ -8113,6 +8589,8 @@ export interface operations {
                 /** @description Field to sort by:
                  *     - `name`: Sort alphabetically by DAG name (case-insensitive)
                  *     - `nextRun`: Sort by next scheduled run time. DAGs with earlier next run times appear first in ascending order. DAGs without schedules appear last.
+                 *
+                 *     Pinned DAGs are listed before all others; `sort` and `order` apply within the pinned and unpinned parts.
                  *      */
                 sort?: PathsDagsGetParametersQuerySort;
                 /** @description Sort order (ascending or descending) */
@@ -8279,6 +8757,8 @@ export interface operations {
                         latestDAGRun: components["schemas"]["DAGRunDetails"];
                         /** @description Whether the DAG is suspended */
                         suspended: boolean;
+                        /** @description Whether the DAG is pinned to the top of the DAG list */
+                        pinned: boolean;
                         /** @description List of errors encountered during the request */
                         errors: string[];
                         /** @description Non-fatal spec warnings */
@@ -10440,6 +10920,8 @@ export interface operations {
                     stepName?: string;
                     /** @description Optional. When true, retry the selected step and every reachable descendant. Requires stepName. Unrelated branches keep their existing status. */
                     includeDownstream?: boolean;
+                    /** @description Optional. When true, skip step precondition evaluation for the steps reset by this retry. Requires stepName. DAG-level preconditions and lifecycle handlers still apply. */
+                    bypassPreconditions?: boolean;
                     subDAGRunId?: components["schemas"]["DAGRunId"] & unknown;
                 };
             };
@@ -10852,6 +11334,241 @@ export interface operations {
             };
         };
     };
+    getDAGRunForeachItems: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+                /** @description Lists the items of a nested foreach instead of the step's own items.
+                 *     The value is the foreachParent a body step reports, such as 2.inner.
+                 *      */
+                parent?: components["parameters"]["ForeachParent"];
+                /** @description only list items whose body run reached this status */
+                status?: components["parameters"]["ForeachItemStatusFilter"];
+                /** @description page number of items to fetch (default is 1) */
+                page?: components["parameters"]["Page"];
+                /** @description number of items per page (default is 30, max is 100) */
+                perPage?: components["parameters"]["PerPage"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run or 'latest' to get the most recent DAG-run */
+                dagRunId: components["parameters"]["DAGRunId"];
+                /** @description name of the step */
+                stepName: components["parameters"]["StepName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForeachItemList"];
+                };
+            };
+            /** @description DAG-run or step not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getDAGRunForeachItem: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run or 'latest' to get the most recent DAG-run */
+                dagRunId: components["parameters"]["DAGRunId"];
+                /** @description name of the step */
+                stepName: components["parameters"]["StepName"];
+                /** @description Path of a foreach item: the item index, or for an item of a nested
+                 *     foreach the parent path reported as foreachParent followed by a dot
+                 *     and the item index, such as 2.inner.0.
+                 *      */
+                item: components["parameters"]["ForeachItemPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForeachItem"];
+                };
+            };
+            /** @description DAG-run, step, or item not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getDAGRunForeachStepLog: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+                /** @description Number of lines to return from the end of the file */
+                tail?: components["parameters"]["Tail"];
+                /** @description Number of lines to return from the beginning of the file */
+                head?: components["parameters"]["Head"];
+                /** @description Line number to start reading from (1-based) */
+                offset?: components["parameters"]["Offset"];
+                /** @description Maximum number of lines to return */
+                limit?: components["parameters"]["Limit"];
+                /** @description Whether to return stdout or stderr logs */
+                stream?: components["parameters"]["Stream"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run or 'latest' to get the most recent DAG-run */
+                dagRunId: components["parameters"]["DAGRunId"];
+                /** @description name of the step */
+                stepName: components["parameters"]["StepName"];
+                /** @description Path of a foreach item: the item index, or for an item of a nested
+                 *     foreach the parent path reported as foreachParent followed by a dot
+                 *     and the item index, such as 2.inner.0.
+                 *      */
+                item: components["parameters"]["ForeachItemPath"];
+                /** @description name or ID of a body step of the foreach item */
+                bodyStepName: components["parameters"]["BodyStepName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Log"];
+                };
+            };
+            /** @description Log file not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    downloadDAGRunForeachStepLog: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+                /** @description Whether to return stdout or stderr logs */
+                stream?: components["parameters"]["Stream"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run or 'latest' to get the most recent DAG-run */
+                dagRunId: components["parameters"]["DAGRunId"];
+                /** @description name of the step */
+                stepName: components["parameters"]["StepName"];
+                /** @description Path of a foreach item: the item index, or for an item of a nested
+                 *     foreach the parent path reported as foreachParent followed by a dot
+                 *     and the item index, such as 2.inner.0.
+                 *      */
+                item: components["parameters"]["ForeachItemPath"];
+                /** @description name or ID of a body step of the foreach item */
+                bodyStepName: components["parameters"]["BodyStepName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Log file content */
+            200: {
+                headers: {
+                    /** @description Attachment filename */
+                    "Content-Disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Log file not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     downloadDAGRunStepLogs: {
         parameters: {
             query?: {
@@ -11064,6 +11781,74 @@ export interface operations {
             };
         };
     };
+    resumeDAGRun: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run or 'latest' to get the most recent DAG-run */
+                dagRunId: components["parameters"]["DAGRunId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Resume accepted or already in progress */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        dagRunId: components["schemas"]["DAGRunId"];
+                        /** @description Whether execution has been accepted */
+                        resumed: boolean;
+                    };
+                };
+            };
+            /** @description DAG-run not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Run has no approved work ready to resume or its state changed */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Approval remains saved but resume admission failed; retry this endpoint */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     approveDAGRunStep: {
         parameters: {
             query?: {
@@ -11107,6 +11892,24 @@ export interface operations {
             };
             /** @description DAG-run or step not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Run state changed before resume admission */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Approval was saved but resume admission failed; use the run resume endpoint */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -11821,6 +12624,249 @@ export interface operations {
                 subDAGRunId: string;
                 /** @description name of the step */
                 stepName: components["parameters"]["StepName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Log file content */
+            200: {
+                headers: {
+                    /** @description Attachment filename */
+                    "Content-Disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+            /** @description Log file not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getSubDAGRunForeachItems: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+                /** @description Lists the items of a nested foreach instead of the step's own items.
+                 *     The value is the foreachParent a body step reports, such as 2.inner.
+                 *      */
+                parent?: components["parameters"]["ForeachParent"];
+                /** @description only list items whose body run reached this status */
+                status?: components["parameters"]["ForeachItemStatusFilter"];
+                /** @description page number of items to fetch (default is 1) */
+                page?: components["parameters"]["Page"];
+                /** @description number of items per page (default is 30, max is 100) */
+                perPage?: components["parameters"]["PerPage"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run or 'latest' to get the most recent DAG-run */
+                dagRunId: components["parameters"]["DAGRunId"];
+                /** @description ID of the sub DAG-run */
+                subDAGRunId: string;
+                /** @description name of the step */
+                stepName: components["parameters"]["StepName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForeachItemList"];
+                };
+            };
+            /** @description DAG-run or step not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getSubDAGRunForeachItem: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run or 'latest' to get the most recent DAG-run */
+                dagRunId: components["parameters"]["DAGRunId"];
+                /** @description ID of the sub DAG-run */
+                subDAGRunId: string;
+                /** @description name of the step */
+                stepName: components["parameters"]["StepName"];
+                /** @description Path of a foreach item: the item index, or for an item of a nested
+                 *     foreach the parent path reported as foreachParent followed by a dot
+                 *     and the item index, such as 2.inner.0.
+                 *      */
+                item: components["parameters"]["ForeachItemPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ForeachItem"];
+                };
+            };
+            /** @description DAG-run, step, or item not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getSubDAGRunForeachStepLog: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+                /** @description Number of lines to return from the end of the file */
+                tail?: components["parameters"]["Tail"];
+                /** @description Number of lines to return from the beginning of the file */
+                head?: components["parameters"]["Head"];
+                /** @description Line number to start reading from (1-based) */
+                offset?: components["parameters"]["Offset"];
+                /** @description Maximum number of lines to return */
+                limit?: components["parameters"]["Limit"];
+                /** @description Whether to return stdout or stderr logs */
+                stream?: components["parameters"]["Stream"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run or 'latest' to get the most recent DAG-run */
+                dagRunId: components["parameters"]["DAGRunId"];
+                /** @description ID of the sub DAG-run */
+                subDAGRunId: string;
+                /** @description name of the step */
+                stepName: components["parameters"]["StepName"];
+                /** @description Path of a foreach item: the item index, or for an item of a nested
+                 *     foreach the parent path reported as foreachParent followed by a dot
+                 *     and the item index, such as 2.inner.0.
+                 *      */
+                item: components["parameters"]["ForeachItemPath"];
+                /** @description name or ID of a body step of the foreach item */
+                bodyStepName: components["parameters"]["BodyStepName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A successful response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Log"];
+                };
+            };
+            /** @description Log file not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Generic error response */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    downloadSubDAGRunForeachStepLog: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+                /** @description Whether to return stdout or stderr logs */
+                stream?: components["parameters"]["Stream"];
+            };
+            header?: never;
+            path: {
+                /** @description name of the DAG */
+                name: components["parameters"]["DAGName"];
+                /** @description ID of the DAG-run or 'latest' to get the most recent DAG-run */
+                dagRunId: components["parameters"]["DAGRunId"];
+                /** @description ID of the sub DAG-run */
+                subDAGRunId: string;
+                /** @description name of the step */
+                stepName: components["parameters"]["StepName"];
+                /** @description Path of a foreach item: the item index, or for an item of a nested
+                 *     foreach the parent path reported as foreachParent followed by a dot
+                 *     and the item index, such as 2.inner.0.
+                 *      */
+                item: components["parameters"]["ForeachItemPath"];
+                /** @description name or ID of a body step of the foreach item */
+                bodyStepName: components["parameters"]["BodyStepName"];
             };
             cookie?: never;
         };
@@ -12766,7 +13812,7 @@ export interface operations {
                 remoteNode?: components["parameters"]["RemoteNode"];
             };
             header?: {
-                /** @description Bearer token for webhook authentication (e.g., 'Bearer dagu_wh_...'). Required only when the webhook auth mode includes token authentication. */
+                /** @description Bearer token for webhook authentication (e.g., 'Bearer dagu_wh_...'). Accepts the webhook's default token or one of its profile tokens. Required only when the webhook auth mode includes token authentication. */
                 Authorization?: string;
                 /** @description HMAC webhook signature in the format `sha256=<hex>`. Required only
                  *     when the webhook auth mode includes HMAC authentication with strict
@@ -12775,7 +13821,7 @@ export interface operations {
                  *     `x-dagu-profile:<profile>\n<raw-request-body>`.
                  *      */
                 "X-Dagu-Signature"?: string;
-                /** @description Runtime profile selected for this DAG run. The profile must be allowed by the webhook profile-selection policy. Omit the header to use the DAG's default profile resolution. */
+                /** @description Runtime profile selected for this DAG run. With the default token, the profile must be allowed by the webhook profile-selection policy; omit the header to use the DAG's default profile resolution. With a profile token, the run always uses the token's profile; the header may be omitted or must name that profile. */
                 "X-Dagu-Profile"?: components["schemas"]["RuntimeProfileName"];
             };
             path: {
@@ -12817,7 +13863,7 @@ export interface operations {
                     "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description Forbidden - webhook disabled or not configured */
+            /** @description Forbidden - webhook disabled or not configured, or the requested runtime profile is not allowed for the token */
             403: {
                 headers: {
                     [name: string]: unknown;
@@ -14365,6 +15411,127 @@ export interface operations {
             };
         };
     };
+    createDAGWebhookProfileToken: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description the name of the DAG file */
+                fileName: components["parameters"]["DAGFileName"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebhookProfileTokenCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Profile token created successfully */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookCreateResponse"];
+                };
+            };
+            /** @description Invalid name, unavailable runtime profile, unsupported auth mode, or token limit reached */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description No webhook or runtime profile found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    revokeDAGWebhookProfileToken: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description the name of the DAG file */
+                fileName: components["parameters"]["DAGFileName"];
+                /** @description unique identifier of the webhook profile token */
+                tokenId: components["parameters"]["WebhookProfileTokenId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Profile token revoked successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebhookDetails"];
+                };
+            };
+            /** @description Insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description No webhook or profile token found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     toggleDAGWebhook: {
         parameters: {
             query?: {
@@ -14791,6 +15958,108 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description DAG not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    pinDAG: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description the name of the DAG file */
+                fileName: components["parameters"]["DAGFileName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description DAG pinned */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden - insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description DAG not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    unpinDAG: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path: {
+                /** @description the name of the DAG file */
+                fileName: components["parameters"]["DAGFileName"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description DAG unpinned */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Forbidden - insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
             };
             /** @description DAG not found */
             404: {
@@ -16438,6 +17707,8 @@ export interface operations {
                 content: {
                     "application/json": {
                         message?: string;
+                        /** @description Dagu Console could not be told, so the server's slot stays in use until it is disconnected there */
+                        releaseFailed?: boolean;
                     };
                 };
             };
@@ -16452,6 +17723,197 @@ export interface operations {
             };
             /** @description Insufficient permissions */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getLicenseConnect: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current connection request */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseConnectStatus"];
+                };
+            };
+            /** @description Insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    startLicenseConnect: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current connection request */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseConnectStatus"];
+                };
+            };
+            /** @description Insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The license is set outside Dagu or the server already has an active license */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    cancelLicenseConnect: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current connection request */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseConnectStatus"];
+                };
+            };
+            /** @description Insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Unexpected error */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    refreshLicense: {
+        parameters: {
+            query?: {
+                /** @description name of the remote node */
+                remoteNode?: components["parameters"]["RemoteNode"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description License status after the check-in */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LicenseStatusResponse"];
+                };
+            };
+            /** @description The license does not check in with Dagu Console */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Insufficient permissions */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Dagu Console could not be reached */
+            502: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -19757,7 +21219,6 @@ export enum DAGDetailsType {
 export enum ValueReferenceNoticeReason {
     unknown_step_id = "unknown_step_id",
     unknown_output_name = "unknown_output_name",
-    missing_dependency = "missing_dependency",
     self_reference = "self_reference",
     namespace_unavailable = "namespace_unavailable",
     unknown_context_field = "unknown_context_field",
@@ -19844,6 +21305,13 @@ export enum WikiPageTreeNodeResponseType {
     file = "file",
     directory = "directory"
 }
+export enum ForeachItemStatusFilter {
+    not_started = "not_started",
+    running = "running",
+    succeeded = "succeeded",
+    failed = "failed",
+    aborted = "aborted"
+}
 export enum RepeatMode {
     While = "while",
     Until = "until"
@@ -19863,6 +21331,20 @@ export enum UserAuthProvider {
     builtin = "builtin",
     oidc = "oidc",
     proxy = "proxy"
+}
+export enum LicenseStatusResponseConnectedVia {
+    console = "console",
+    key = "key",
+    env = "env",
+    config = "config",
+    file = "file"
+}
+export enum LicenseConnectStatusState {
+    idle = "idle",
+    pending = "pending",
+    granted = "granted",
+    failed = "failed",
+    expired = "expired"
 }
 export enum APIKeyAllowedSurfaces {
     rest_api = "rest_api",

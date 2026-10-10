@@ -732,6 +732,28 @@ func TestRetry(t *testing.T) {
 		assert.NotContains(t, spec.Args, "--downstream")
 	})
 
+	t.Run("RetryWithBypassPreconditions", func(t *testing.T) {
+		t.Parallel()
+		spec := builder.Retry(dag, launcher.RetryOptions{
+			DAGRunID:            "retry-run-id",
+			Step:                "step-1",
+			BypassPreconditions: true,
+		})
+
+		assert.Contains(t, spec.Args, "--step=step-1")
+		assert.Contains(t, spec.Args, "--bypass-preconditions")
+	})
+
+	t.Run("RetryOmitsBypassPreconditionsWithoutStep", func(t *testing.T) {
+		t.Parallel()
+		spec := builder.Retry(dag, launcher.RetryOptions{
+			DAGRunID:            "retry-run-id",
+			BypassPreconditions: true,
+		})
+
+		assert.NotContains(t, spec.Args, "--bypass-preconditions")
+	})
+
 	t.Run("RetryWithActor", func(t *testing.T) {
 		t.Parallel()
 		spec := builder.Retry(dag, launcher.RetryOptions{

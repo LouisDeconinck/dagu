@@ -24,6 +24,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	"github.com/dagucloud/dagu/v2/internal/llm"
 	"github.com/dagucloud/dagu/v2/internal/spec/types"
+	"github.com/goccy/go-yaml"
 )
 
 // step defines a step in the DAG.
@@ -1783,9 +1784,10 @@ func buildSingleCommand(val string, result *ir.Step) error {
 		return nil
 	}
 
-	// Harness uses command as a prompt, so preserve multiline text as a single
-	// command entry instead of reclassifying it as an inline script.
-	if strings.Contains(raw, "\n") && result.ExecutorConfig.Type == "harness" {
+	// Harness uses command as a prompt and jq as its filter, so preserve
+	// multiline text as a single command entry instead of reclassifying it as
+	// an inline script, which jq reads as its input.
+	if strings.Contains(raw, "\n") && (result.ExecutorConfig.Type == "harness" || result.ExecutorConfig.Type == "jq") {
 		result.Commands = []ir.CommandEntry{
 			{
 				CmdWithArgs: raw,
@@ -2630,16 +2632,34 @@ func buildStepLLM(ctx stepBuildContext, s *step, result *ir.Step) error {
 	}
 
 	// Step has explicit llm: config - use it (full override of DAG-level)
-	cfg := s.LLM
+	cfg, err := llmConfigOf(s.LLM)
+	if err != nil {
+		return err
+	}
+	result.LLM = cfg
+	return nil
+}
 
+// ParseLLMConfig reads an llm block, written as a step's llm field is, in
+// YAML or JSON, and checks it as a step's would be.
+func ParseLLMConfig(data []byte) (*ir.LLMConfig, error) {
+	var cfg llmConfig
+	if err := yaml.UnmarshalWithOptions(data, &cfg, yaml.Strict()); err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
+	return llmConfigOf(&cfg)
+}
+
+// llmConfigOf checks an llm block and returns the configuration it gives.
+func llmConfigOf(cfg *llmConfig) (*ir.LLMConfig, error) {
 	// Validate provider if specified (for single model config)
 	if err := validateLLMProvider(cfg.Provider); err != nil {
-		return ir.NewValidationError("llm.provider", cfg.Provider, err)
+		return nil, ir.NewValidationError("llm.provider", cfg.Provider, err)
 	}
 
 	// Model is required when llm config is provided
 	if cfg.Model.IsZero() {
-		return ir.NewValidationError("llm.model", nil,
+		return nil, ir.NewValidationError("llm.model", nil,
 			fmt.Errorf("model must be specified when llm config is provided"))
 	}
 
@@ -2651,12 +2671,12 @@ func buildStepLLM(ctx stepBuildContext, s *step, result *ir.Step) error {
 		var err error
 		models, err = convertModelEntries(cfg.Model.Entries())
 		if err != nil {
-			return err
+			return nil, err
 		}
 	} else {
 		modelString = cfg.Model.String()
 		if modelString == "" {
-			return ir.NewValidationError("llm.model", cfg.Model.Value(),
+			return nil, ir.NewValidationError("llm.model", cfg.Model.Value(),
 				fmt.Errorf("model must be specified when llm config is provided"))
 		}
 	}
@@ -2664,7 +2684,7 @@ func buildStepLLM(ctx stepBuildContext, s *step, result *ir.Step) error {
 	// Validate temperature range
 	if cfg.Temperature != nil {
 		if *cfg.Temperature < 0.0 || *cfg.Temperature > 2.0 {
-			return ir.NewValidationError("llm.temperature", *cfg.Temperature,
+			return nil, ir.NewValidationError("llm.temperature", *cfg.Temperature,
 				fmt.Errorf("temperature must be between 0.0 and 2.0"))
 		}
 	}
@@ -2672,28 +2692,28 @@ func buildStepLLM(ctx stepBuildContext, s *step, result *ir.Step) error {
 	// Validate max_tokens if specified
 	if cfg.MaxTokens != nil {
 		if *cfg.MaxTokens < 1 {
-			return ir.NewValidationError("llm.max_tokens", *cfg.MaxTokens,
+			return nil, ir.NewValidationError("llm.max_tokens", *cfg.MaxTokens,
 				fmt.Errorf("max_tokens must be at least 1"))
 		}
 	}
 	if err := validateAgentLLMLimits(cfg, false); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Validate top_p range
 	if cfg.TopP != nil {
 		if *cfg.TopP < 0.0 || *cfg.TopP > 1.0 {
-			return ir.NewValidationError("llm.top_p", *cfg.TopP,
+			return nil, ir.NewValidationError("llm.top_p", *cfg.TopP,
 				fmt.Errorf("top_p must be between 0.0 and 1.0"))
 		}
 	}
 
 	thinking, err := buildThinkingConfig(cfg.Thinking)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	result.LLM = &ir.LLMConfig{
+	return &ir.LLMConfig{
 		Provider:          cfg.Provider,
 		Model:             modelString,
 		Models:            models,
@@ -2708,9 +2728,7 @@ func buildStepLLM(ctx stepBuildContext, s *step, result *ir.Step) error {
 		Tools:             cfg.Tools,
 		MaxToolIterations: cfg.MaxToolIterations,
 		WebSearch:         buildWebSearchConfig(cfg.WebSearch),
-	}
-
-	return nil
+	}, nil
 }
 
 func validateAgentLLMLimits(cfg *llmConfig, agentRoot bool) error {

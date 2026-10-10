@@ -15,6 +15,12 @@ on:
       - internal/runtime/builtin/browser/**
       - internal/browserhost/**
       - internal/cmn/config/**
+      - internal/cmd/**
+      - internal/launcher/**
+      - internal/service/frontend/**
+      - internal/service/scheduler/**
+      - internal/runtime/node.go
+      - internal/runtime/plan.go
       - go.mod
       - go.sum
       - .github/workflows/docker-browser-smoke.yaml
@@ -29,6 +35,12 @@ on:
       - internal/runtime/builtin/browser/**
       - internal/browserhost/**
       - internal/cmn/config/**
+      - internal/cmd/**
+      - internal/launcher/**
+      - internal/service/frontend/**
+      - internal/service/scheduler/**
+      - internal/runtime/node.go
+      - internal/runtime/plan.go
       - go.mod
       - go.sum
       - .github/workflows/docker-browser-smoke.yaml
@@ -70,6 +82,9 @@ jobs:
           load: true
           provenance: false
           tags: dagu-ci:dev
+
+      - name: Check graceful signal shutdown through Tini
+        run: bash deploy/docker/smoke/signal-shutdown.sh
 
       # The documented command copies the bundled profile out of the image.
       - name: Check the bundled seccomp profile

@@ -22,6 +22,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
+	"github.com/dagucloud/dagu/v2/internal/dagpin"
 	"github.com/dagucloud/dagu/v2/internal/dagrun"
 	"github.com/dagucloud/dagu/v2/internal/dagsettings"
 	"github.com/dagucloud/dagu/v2/internal/dispatch"
@@ -93,6 +94,7 @@ type API struct {
 	dagWritesDisabled    bool // True when git sync read-only mode is active
 	baseConfigStore      dagsettings.BaseConfigStore
 	dagSettingsStore     dagsettings.Store
+	dagPinStore          dagpin.Store
 	wikiStore            wiki.PageStore
 	workspaceWikiMu      sync.RWMutex
 	secretStore          secretpkg.Store
@@ -177,9 +179,11 @@ type AuthService interface {
 	EnableWebhookHMAC(ctx context.Context, dagName string, authMode auth.WebhookAuthMode, enforcementMode auth.WebhookHMACEnforcementMode) (*authservice.WebhookHMACSecretResult, error)
 	ConfigureWebhookHMAC(ctx context.Context, dagName string, authMode auth.WebhookAuthMode, enforcementMode auth.WebhookHMACEnforcementMode) (*auth.Webhook, error)
 	ConfigureWebhookProfiles(ctx context.Context, dagName string, allowedProfiles []string) (*auth.Webhook, error)
+	CreateWebhookProfileToken(ctx context.Context, dagName, name, profile, creatorID string) (*authservice.CreateWebhookResult, error)
+	RevokeWebhookProfileToken(ctx context.Context, dagName, tokenID string) (*auth.Webhook, error)
 	RegenerateWebhookHMACSecret(ctx context.Context, dagName string) (*authservice.WebhookHMACSecretResult, error)
 	DisableWebhookHMAC(ctx context.Context, dagName string) (*auth.Webhook, error)
-	AuthorizeWebhookRequest(ctx context.Context, input authservice.AuthorizeWebhookRequestInput) (*auth.Webhook, error)
+	AuthorizeWebhookRequest(ctx context.Context, input authservice.AuthorizeWebhookRequestInput) (*authservice.WebhookAuthorization, error)
 	ToggleWebhook(ctx context.Context, dagName string, enabled bool) (*auth.Webhook, error)
 	ValidateWebhookToken(ctx context.Context, dagName, token string) (*auth.Webhook, error)
 	HasWebhookStore() bool
@@ -276,6 +280,13 @@ func WithViewStore(store view.Store) APIOption {
 func WithDAGSettingsStore(store dagsettings.Store) APIOption {
 	return func(a *API) {
 		a.dagSettingsStore = store
+	}
+}
+
+// WithDAGPinStore returns an APIOption that sets the store of pinned DAGs.
+func WithDAGPinStore(store dagpin.Store) APIOption {
+	return func(a *API) {
+		a.dagPinStore = store
 	}
 }
 
@@ -482,6 +493,7 @@ func (a *API) ConfigureRoutes(ctx context.Context, r chi.Router, writeTimeout ti
 		r.Use(frontendauth.Middleware(authOptions))
 		r.Use(a.restAuditSubjectMiddleware())
 		r.Use(a.syncProxyAuthorization(mountedAPIPath))
+		r.Use(a.licenseProxyAuthorization(mountedAPIPath))
 		r.Use(humanTaskInputMiddleware(mountedAPIPath))
 		if a.config.Server.StrictValidation {
 			r.Use(a.createValidatorMiddleware(swagger))
@@ -495,6 +507,9 @@ func (a *API) ConfigureRoutes(ctx context.Context, r chi.Router, writeTimeout ti
 			resetSyncWriteDeadline(writeTimeout),
 		}
 		options := api.StrictHTTPServerOptions{
+			RequestErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, _ error) {
+				a.handleError(w, r, ErrInvalidRequestBody)
+			},
 			ResponseErrorHandlerFunc: a.handleError,
 		}
 		handler := api.NewStrictHandlerWithOptions(a, middlewares, options)

@@ -304,6 +304,10 @@ steps:
 	// A key only one source defines survives from that source.
 	assert.Contains(t, restored.Env, "TRANSPORT_ONLY=from-transport")
 	assert.Contains(t, restored.Env, "SNAPSHOT_ONLY=from-snapshot")
+
+	// The root env span still marks only the declared entry after the rebuild.
+	span := restored.RootEnvSpan
+	assert.Equal(t, []string{"DECLARED=from-transport"}, restored.Env[span.Start:span.End])
 }
 
 func TestRebuildFromYAML_RestoresHarnessConfig(t *testing.T) {

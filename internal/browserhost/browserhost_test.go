@@ -48,11 +48,12 @@ func TestMain(m *testing.M) {
 // Like Chrome, it stops accepting connections after Browser.close unless it
 // is hung.
 type fakeBrowser struct {
-	server     *httptest.Server
-	extensions []browserhost.Extension
-	hung       bool
-	mu         sync.Mutex
-	methods    []string
+	server      *httptest.Server
+	extensions  []browserhost.Extension
+	commandLine string
+	hung        bool
+	mu          sync.Mutex
+	methods     []string
 }
 
 func newFakeBrowser(t *testing.T, extensions ...browserhost.Extension) *fakeBrowser {
@@ -99,8 +100,11 @@ func (f *fakeBrowser) serve(w http.ResponseWriter, r *http.Request) {
 	f.methods = append(f.methods, request.Method)
 	f.mu.Unlock()
 	result := map[string]any{}
-	if request.Method == "Extensions.getExtensions" {
+	switch request.Method {
+	case "Extensions.getExtensions":
 		result["extensions"] = f.extensions
+	case "SystemInfo.getInfo":
+		result["commandLine"] = f.commandLine
 	}
 	response, _ := json.Marshal(map[string]any{"id": request.ID, "result": result})
 	_ = conn.Write(r.Context(), websocket.MessageText, response)
@@ -196,6 +200,28 @@ func TestProbeAndClose(t *testing.T) {
 	assert.NoError(t, browserhost.CloseBrowser(context.Background(), unreachableURL), "an unreachable browser is already closed")
 }
 
+func TestUsesProfile(t *testing.T) {
+	t.Parallel()
+
+	// The command line is set before the server starts serving it.
+	fake := &fakeBrowser{commandLine: `chrome --remote-debugging-port=9222 --user-data-dir=/tmp/profile-1 about:blank "--user-data-dir=C:\Temp\my profile"`}
+	fake.start()
+	t.Cleanup(fake.server.Close)
+	for dir, want := range map[string]bool{
+		"/tmp/profile-1":     true,
+		`C:\Temp\my profile`: true,
+		"/tmp/profile":       false,
+		"/tmp/profile-2":     false,
+	} {
+		got, err := browserhost.UsesProfile(context.Background(), fake.server.URL, dir)
+		require.NoError(t, err)
+		assert.Equal(t, want, got, dir)
+	}
+
+	_, err := browserhost.UsesProfile(context.Background(), unreachableURL, "/tmp/profile-1")
+	assert.ErrorIs(t, err, browserhost.ErrUnreachable)
+}
+
 // Sweep keeps sessions a step can still use and releases every other one.
 func TestSweep(t *testing.T) {
 	t.Parallel()
@@ -264,6 +290,121 @@ func TestSweep(t *testing.T) {
 			assert.NoDirExists(t, userDataDir)
 		})
 	}
+}
+
+// A sweep closes the browser of a browser session nothing will use again,
+// keeping the session's history for a day, and removes the history after
+// that day. A session one of its commands holds is left alone.
+func TestSweepSessions(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	startedAt, _ := procutil.StartTime(os.Getpid())
+	history := json.RawMessage(`{"ops":[{"kind":"act"}]}`)
+
+	for _, tc := range []struct {
+		name   string
+		record browserhost.Record
+		// held makes a command hold the session while the sweep runs.
+		held bool
+		want string // kept, ended, or purged
+	}{
+		{name: "idle before its deadline", record: browserhost.Record{State: browserhost.StateInteractive, Deadline: now.Add(time.Minute)}, want: "kept"},
+		{name: "idle past its deadline", record: browserhost.Record{State: browserhost.StateInteractive, Deadline: now.Add(-time.Second)}, want: "ended"},
+		{name: "idle past its deadline while a command holds it", record: browserhost.Record{State: browserhost.StateInteractive, Deadline: now.Add(-time.Second)}, held: true, want: "kept"},
+		{name: "running with a live command", record: browserhost.Record{State: browserhost.StateRunning, OwnerPID: os.Getpid(), OwnerStartedAt: startedAt}, want: "kept"},
+		{name: "running after its command died", record: browserhost.Record{State: browserhost.StateRunning, OwnerPID: 1 << 30}, want: "ended"},
+		{name: "ended within its retention", record: browserhost.Record{State: browserhost.StateEnded, Deadline: now.Add(time.Hour)}, want: "kept"},
+		{name: "ended past its retention", record: browserhost.Record{State: browserhost.StateEnded, Deadline: now.Add(-time.Second)}, want: "purged"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			fake := newFakeBrowser(t)
+			browserDir := t.TempDir()
+			store := browserhost.NewInteractiveStore(browserDir)
+			record := tc.record
+			record.ID = "ab2cd3ef4g"
+			record.Interactive = history
+			if record.State != browserhost.StateEnded {
+				record.CDPURL = fake.server.URL
+				record.ExtensionDir = t.TempDir()
+				record.UserDataDir = t.TempDir()
+				record.OwnsUserDataDir = true
+				record.WorkDir = store.WorkDir(record.ID)
+				require.NoError(t, os.MkdirAll(record.WorkDir, 0o700))
+			}
+			require.NoError(t, store.Save(record))
+			if tc.held {
+				lock := store.SessionLock(record.ID)
+				require.NoError(t, lock.TryLock())
+				t.Cleanup(func() { _ = lock.Unlock() })
+			}
+
+			require.NoError(t, browserhost.SweepAll(context.Background(), browserDir, now, nil))
+
+			current, err := store.Load(record.ID)
+			switch tc.want {
+			case "kept":
+				require.NoError(t, err)
+				assert.Equal(t, record.State, current.State)
+				assert.Empty(t, fake.calls())
+			case "ended":
+				require.NoError(t, err)
+				assert.Equal(t, browserhost.StateEnded, current.State)
+				assert.WithinDuration(t, now.Add(browserhost.SessionRetention), current.Deadline, time.Second)
+				assert.JSONEq(t, string(history), string(current.Interactive), "the history outlives the browser")
+				assert.Empty(t, current.CDPURL)
+				assert.Equal(t, []string{"Browser.close"}, fake.calls())
+				assert.NoDirExists(t, record.ExtensionDir)
+				assert.NoDirExists(t, record.UserDataDir)
+				assert.NoDirExists(t, record.WorkDir)
+			case "purged":
+				assert.ErrorIs(t, err, os.ErrNotExist)
+				assert.NoDirExists(t, store.WorkDir(record.ID))
+				assert.NoDirExists(t, filepath.Join(browserDir, "interactive", record.ID+".lock"))
+			}
+		})
+	}
+}
+
+// One sweep covers the browsers steps keep and the browser sessions.
+func TestSweepAllCoversStepsAndSessions(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	browserDir := t.TempDir()
+	stepBrowser, sessionBrowser := newFakeBrowser(t), newFakeBrowser(t)
+	steps, sessions := browserhost.NewStore(browserDir), browserhost.NewInteractiveStore(browserDir)
+	require.NoError(t, steps.Save(browserhost.Record{ID: "step", State: browserhost.StateDetached, Deadline: now.Add(-time.Second), CDPURL: stepBrowser.server.URL}))
+	require.NoError(t, sessions.Save(browserhost.Record{ID: "session", State: browserhost.StateInteractive, Deadline: now.Add(-time.Second), CDPURL: sessionBrowser.server.URL}))
+
+	require.NoError(t, browserhost.SweepAll(context.Background(), browserDir, now, nil))
+
+	_, err := steps.Load("step")
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	ended, err := sessions.Load("session")
+	require.NoError(t, err)
+	assert.Equal(t, browserhost.StateEnded, ended.State)
+	assert.Equal(t, []string{"Browser.close"}, stepBrowser.calls())
+	assert.Equal(t, []string{"Browser.close"}, sessionBrowser.calls())
+}
+
+// Releasing a browser session removes the files it owns with its record.
+func TestReleaseRemovesSessionFiles(t *testing.T) {
+	t.Parallel()
+
+	store := browserhost.NewInteractiveStore(t.TempDir())
+	workDir := store.WorkDir("session")
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, "screenshots"), 0o700))
+	record := browserhost.Record{ID: "session", State: browserhost.StateInteractive, CDPURL: newFakeBrowser(t).server.URL, WorkDir: workDir}
+	require.NoError(t, store.Save(record))
+
+	require.NoError(t, browserhost.Release(context.Background(), store, record))
+
+	_, err := store.Load("session")
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	assert.NoDirExists(t, workDir)
 }
 
 // A browser that keeps running after Browser.close keeps its record and

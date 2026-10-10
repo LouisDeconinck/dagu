@@ -21,6 +21,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/build"
 	"github.com/dagucloud/dagu/v2/internal/executor/registry"
 	"github.com/dagucloud/dagu/v2/internal/runctx"
+	"github.com/dagucloud/dagu/v2/internal/runtimeenv"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/cmdutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
@@ -74,9 +75,13 @@ type Runner struct {
 	canceled      int32
 	failed        int32
 	mu            sync.RWMutex
-	pause         time.Duration
 	lastError     error
 	preconditions []ir.ConditionResult
+	// preconditionCancel interrupts the running DAG-level precondition check.
+	preconditionCancel context.CancelFunc
+	forceCancel        context.CancelFunc
+	forcedStop         bool
+	stepsDone          chan struct{}
 
 	handlerMu sync.RWMutex
 	handlers  map[ir.HandlerType]*Node
@@ -107,7 +112,6 @@ func New(cfg *Config) *Runner {
 		dagRunID:             cfg.DAGRunID,
 		messagesHandler:      cfg.MessagesHandler,
 		stepExecutor:         NewStepExecutor(),
-		pause:                time.Millisecond * 100,
 		onWait:               cfg.OnWait,
 		forcedStatus:         cfg.ForcedStatus,
 		materializations:     cfg.MaterializationStore,
@@ -162,6 +166,22 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUp
 	}
 	defer cancel()
 	defer plan.Finish()
+	// Forced step cleanup must not cancel lifecycle handler execution.
+	executionCtx, forceCancel := context.WithCancel(ctx)
+	r.mu.Lock()
+	r.forceCancel = forceCancel
+	r.stepsDone = nil
+	if r.forcedStop {
+		forceCancel()
+	}
+	r.mu.Unlock()
+	defer func() {
+		forceCancel()
+		r.mu.Lock()
+		r.forceCancel = nil
+		r.stepsDone = nil
+		r.mu.Unlock()
+	}()
 
 	// Initialize node count metrics
 	nodes := plan.Nodes()
@@ -178,11 +198,15 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUp
 			r.setFailed()
 			r.Cancel(plan)
 		} else {
-			results, conditionErr := EvaluateConditions(ctx, shell, rCtx.DAG.Preconditions)
+			checkCtx, stopCheck := r.watchPreconditionStop(executionCtx)
+			results, conditionErr := EvaluateConditions(checkCtx, shell, rCtx.DAG.Preconditions)
+			stopCheck()
 			r.setPreconditionResults(results)
 			if conditionErr != nil {
 				logger.Info(ctx, "Preconditions are not met", tag.Error(conditionErr))
-				if !errors.Is(conditionErr, ErrConditionNotMet) {
+				// A check interrupted by abort leaves the run aborted.
+				abortedCheck := errors.Is(conditionErr, errConditionInterrupted) && r.isCanceled()
+				if !errors.Is(conditionErr, ErrConditionNotMet) && !abortedCheck {
 					r.setLastError(conditionErr)
 					r.setFailed()
 				}
@@ -205,11 +229,18 @@ func (r *Runner) Run(ctx context.Context, plan *Plan, progressCh chan ProgressUp
 		}
 	}
 
-	if rCtx.DAG.IsAgent() {
-		r.runAgentLoop(ctx, plan, progressCh)
-	} else {
-		r.runGraphLoop(ctx, plan, nodes, progressCh)
-	}
+	stepsDone := make(chan struct{})
+	r.mu.Lock()
+	r.stepsDone = stepsDone
+	r.mu.Unlock()
+	func() {
+		defer close(stepsDone)
+		if rCtx.DAG.IsAgent() {
+			r.runAgentLoop(executionCtx, plan, progressCh)
+		} else {
+			r.runGraphLoop(executionCtx, plan, nodes, progressCh)
+		}
+	}()
 
 	// Collect final metrics
 	r.metrics.totalExecutionTime = time.Since(r.metrics.startTime)
@@ -439,7 +470,7 @@ func (r *Runner) runGraphLoop(ctx context.Context, plan *Plan, nodes []*Node, pr
 			}(node)
 
 			if r.delay > 0 {
-				time.Sleep(r.delay)
+				waitForExecution(ctx, r.delay)
 			}
 
 		case node := <-doneCh:
@@ -579,8 +610,7 @@ func (r *Runner) runNodeExecution(ctx context.Context, plan *Plan, node *Node, p
 	met, err := r.meetsPreconditions(ctx, node, preconditionProgress)
 	if err != nil {
 		r.markBuildPrecondition(ctx, buildSession, node, ir.BuildReasonPreconditionError, "", progressCh)
-		r.setLastError(err)
-		r.Cancel(plan)
+		r.handlePreconditionError(plan, err)
 		return
 	}
 	if !met {
@@ -596,6 +626,9 @@ func (r *Runner) runNodeExecution(ctx context.Context, plan *Plan, node *Node, p
 	r.setupChatMessages(ctx, node)
 	r.setupPushBackConversation(ctx, node)
 	declaredStep := node.Step()
+	// A graceful stop does not signal repeating steps, so an attempt that is
+	// running when the stop arrives completes with its own outcome.
+	stoppedDuringAttempt := false
 
 ExecRepeat: // repeat execution
 	for !r.isCanceled() {
@@ -609,6 +642,7 @@ ExecRepeat: // repeat execution
 			return
 		}
 		execErr := r.execNode(attemptCtx, node, progressCh)
+		stoppedDuringAttempt = r.isCanceled()
 		if execErr == nil {
 			committed, commitErr := commitBuildAttempt(attemptCtx, node, buildSession, stagingPath)
 			if committed {
@@ -651,11 +685,20 @@ ExecRepeat: // repeat execution
 		break ExecRepeat
 	}
 
+	// A stop after a repeating step's attempt finished aborts its pending
+	// repetition, even when the executor already reported the attempt's
+	// success. An attempt that was running when the stop arrived keeps its
+	// outcome.
+	isRepetitive := node.Step().RepeatPolicy.RepeatMode != ""
+	if isRepetitive && r.isCanceled() && !stoppedDuringAttempt {
+		status := node.State().Status
+		if status == ir.NodeRunning || status == ir.NodeSucceeded || status == ir.NodePartiallySucceeded {
+			node.SetStatus(ir.NodeAborted)
+		}
+	}
+
 	// Determine final status for nodes still in running state.
-	// Repetitive tasks complete naturally (signal not sent - see runner.Signal).
-	// Only mark as aborted if: not a repetitive task AND runner was canceled.
 	if node.State().Status == ir.NodeRunning {
-		isRepetitive := node.Step().RepeatPolicy.RepeatMode != ""
 		if !isRepetitive && r.isCanceled() {
 			node.SetStatus(ir.NodeAborted)
 		} else if node.Step().Approval != nil {
@@ -761,8 +804,7 @@ func (r *Runner) runHumanTask(ctx context.Context, plan *Plan, node *Node, progr
 	ctx = r.setupNodeExecutionEnv(ctx, node)
 	met, err := r.meetsPreconditions(ctx, node, progressCh)
 	if err != nil {
-		r.setLastError(err)
-		r.Cancel(plan)
+		r.handlePreconditionError(plan, err)
 		return
 	}
 	if !met {
@@ -939,12 +981,15 @@ func (r *Runner) setupVariables(ctx context.Context, plan *Plan, node *Node) (co
 
 	// Add container environment variables (step-level takes precedence over DAG-level)
 	// This ensures container env vars are available when evaluating command arguments
-	if ct := node.Step().Container; ct != nil {
+	ct := node.Step().Container
+	if ct == nil && env.DAG != nil {
+		ct = env.DAG.Container
+	}
+	if ct != nil {
 		if err := addResolvedEnvVars(ctx, &env, ct.Env, "container.env.", cmnvalue.ContainerEnvField); err != nil {
 			return ctx, err
 		}
-	} else if dag := env.DAG; dag != nil && dag.Container != nil {
-		if err := addResolvedEnvVars(ctx, &env, dag.Container.Env, "container.env.", cmnvalue.ContainerEnvField); err != nil {
+		if err := addContainerEnvFileVars(ctx, &env, ct); err != nil {
 			return ctx, err
 		}
 	}
@@ -986,6 +1031,47 @@ func addResolvedEnvVars(ctx context.Context, env *Env, envList []string, fieldPr
 			return fmt.Errorf("failed to evaluate environment variable %q: %w", v, err)
 		}
 		env.Scope = env.Scope.WithEntry(key, evaluatedValue, cmnvalue.EnvSourceStepEnv)
+	}
+	return nil
+}
+
+// addContainerEnvFileVars adds the variables of the container's env_file
+// entries to the scope without evaluating their values. Keys declared in the
+// container's env keep their values, so env_file variables sit between step
+// env and container env (spec 006).
+func addContainerEnvFileVars(ctx context.Context, env *Env, ct *ir.Container) error {
+	if len(ct.EnvFile) == 0 {
+		return nil
+	}
+
+	paths := make([]string, len(ct.EnvFile))
+	for i, path := range ct.EnvFile {
+		field := cmnvalue.ContainerField(fmt.Sprintf("container.env_file[%d]", i))
+		resolved, err := resolverFromEnv(ctx, *env).String(ctx, path, field)
+		if err != nil {
+			return fmt.Errorf("failed to evaluate container env_file %q: %w", path, err)
+		}
+		paths[i] = resolved
+	}
+	var dagLocation string
+	if env.DAG != nil {
+		dagLocation = env.DAG.Location
+	}
+	vars, err := runtimeenv.LoadEnvFiles(paths, env.WorkingDir, dagLocation)
+	if err != nil {
+		return fmt.Errorf("failed to load container env_file: %w", err)
+	}
+
+	declared := make(map[string]struct{}, len(ct.Env))
+	for _, entry := range ct.Env {
+		key, _, _ := strings.Cut(entry, "=")
+		declared[key] = struct{}{}
+	}
+	for _, entry := range vars {
+		key, value, _ := strings.Cut(entry, "=")
+		if _, ok := declared[key]; !ok {
+			env.Scope = env.Scope.WithEntry(key, value, cmnvalue.EnvSourceStepEnv)
+		}
 	}
 	return nil
 }
@@ -1059,6 +1145,7 @@ func disableDeclaredStepOutputs(env *Env) {
 
 func (r *Runner) execNode(ctx context.Context, node *Node, progressCh chan ProgressUpdate) error {
 	if r.dry {
+		warnDryRunStep(ctx, node)
 		return nil
 	}
 	report := func() {
@@ -1081,7 +1168,8 @@ func (r *Runner) Signal(
 	r.Stop(ctx, plan, cmdutil.TerminationFromSignal(sig), done, allowOverride)
 }
 
-// Stop requests that all active nodes stop according to lifecycle intent.
+// Stop requests workflow steps to stop according to lifecycle intent.
+// Completion excludes lifecycle handlers, which retain their own timeouts.
 func (r *Runner) Stop(
 	ctx context.Context, plan *Plan, intent cmdutil.TerminationIntent, done chan bool, allowOverride bool,
 ) {
@@ -1094,12 +1182,28 @@ func (r *Runner) Stop(
 		if !r.isCanceled() {
 			r.setCanceled()
 		}
+		r.mu.RLock()
+		cancelCheck := r.preconditionCancel
+		r.mu.RUnlock()
+		if cancelCheck != nil {
+			cancelCheck()
+		}
 	}
 
-	for _, node := range plan.Nodes() {
+	nodes := plan.Nodes()
+	if intent.IsForce() {
+		r.mu.Lock()
+		r.forcedStop = true
+		cancel := r.forceCancel
+		r.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+	}
+	for _, node := range nodes {
 		// for a repetitive task, we'll wait for the job to finish
 		// until time reaches max wait time
-		if node.Step().RepeatPolicy.RepeatMode != "" {
+		if node.Step().RepeatPolicy.RepeatMode != "" && !intent.IsForce() {
 			logger.Info(ctx, "Waiting for repeat node to finish",
 				tag.Step(node.Step().Name),
 			)
@@ -1109,12 +1213,13 @@ func (r *Runner) Stop(
 	}
 
 	if done != nil && isTermination {
-		defer func() {
-			for plan.HasActiveNodes() {
-				time.Sleep(r.pause)
-			}
-			done <- true
-		}()
+		r.mu.RLock()
+		stepsDone := r.stepsDone
+		r.mu.RUnlock()
+		if stepsDone != nil {
+			<-stepsDone
+		}
+		done <- true
 	}
 }
 
@@ -1318,16 +1423,17 @@ func isReady(ctx context.Context, plan *Plan, node *Node) bool {
 func (r *Runner) runEventHandler(ctx context.Context, plan *Plan, node *Node, extraEnvs map[string]string) error {
 	defer node.Finish()
 
-	if r.dry {
-		node.SetStatus(ir.NodeSucceeded)
-		return nil
-	}
-
 	var err error
 	ctx, err = r.setupEnvironEventHandler(ctx, plan, node, extraEnvs)
 	if err != nil {
 		node.SetStatus(ir.NodeFailed)
 		return err
+	}
+
+	if r.dry {
+		warnDryRunStep(logger.WithValues(ctx, tag.Step(node.Name())), node)
+		node.SetStatus(ir.NodeSucceeded)
+		return nil
 	}
 
 	if err := node.Prepare(ctx, r.logDir, r.dagRunID); err != nil {
@@ -1405,12 +1511,33 @@ func (r *Runner) setFailed() {
 	r.failed = 1
 }
 
+// watchPreconditionStop returns a context for the DAG-level precondition check
+// that Stop cancels, including a stop that arrived before the check started.
+// The returned func ends the watch and must be called once the check returns.
+func (r *Runner) watchPreconditionStop(ctx context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	r.mu.Lock()
+	r.preconditionCancel = cancel
+	r.mu.Unlock()
+	if r.isCanceled() {
+		cancel()
+	}
+	return ctx, func() {
+		r.mu.Lock()
+		r.preconditionCancel = nil
+		r.mu.Unlock()
+		cancel()
+	}
+}
+
 func (r *Runner) resetRunState(plan *Plan) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.canceled = 0
 	if plan.isCancelRequested() {
 		r.canceled = 1
+	} else {
+		r.forcedStop = false
 	}
 	r.failed = 0
 	r.lastError = nil
@@ -1557,7 +1684,11 @@ func (r *Runner) shouldRetryNode(ctx context.Context, node *Node, execErr error)
 		node.Step().RetryPolicy.MaxInterval,
 		node.GetRetryCount()-1, // -1 because we just incremented
 	)
-	time.Sleep(interval)
+	if !waitForExecution(ctx, interval) || r.isCanceled() {
+		node.SetStatus(ir.NodeAborted)
+		r.setLastError(execErr)
+		return false
+	}
 	node.SetRetriedAt(time.Now())
 	node.SetStatus(ir.NodeRunning)
 	return true
@@ -1625,6 +1756,21 @@ func externalStepRetryEnabled(ctx context.Context) bool {
 	return false
 }
 
+// handlePreconditionError records a step precondition error and cancels the
+// run. An interrupted check leaves the run to the abort or timeout that
+// interrupted it, so the run ends as that event defines: an abort records no
+// error, and a timeout records the interruption as the failure.
+func (r *Runner) handlePreconditionError(plan *Plan, err error) {
+	if !errors.Is(err, errConditionInterrupted) {
+		r.setLastError(err)
+		r.Cancel(plan)
+		return
+	}
+	if !r.isCanceled() {
+		r.setLastError(err)
+	}
+}
+
 // checkPreconditions evaluates the preconditions for a node and updates its status accordingly.
 func (r *Runner) meetsPreconditions(ctx context.Context, node *Node, progressCh chan ProgressUpdate) (bool, error) {
 	err := node.evalPreconditions(ctx)
@@ -1634,7 +1780,11 @@ func (r *Runner) meetsPreconditions(ctx context.Context, node *Node, progressCh 
 			r.report(ctx, progressCh, node)
 			return false, nil
 		}
-		node.SetStatus(ir.NodeFailed)
+		status := ir.NodeFailed
+		if errors.Is(err, errConditionInterrupted) {
+			status = ir.NodeAborted
+		}
+		node.SetStatus(status)
 		node.SetError(err)
 		r.report(ctx, progressCh, node)
 		return false, err
@@ -1714,6 +1864,10 @@ func (r *Runner) handleNodeExecutionError(ctx context.Context, plan *Plan, node 
 
 // shouldRepeatNode determines if a node should be repeated based on its repeat policy
 func (r *Runner) shouldRepeatNode(ctx context.Context, node *Node, execErr error) bool {
+	if r.isCanceled() || node.State().Status == ir.NodeAborted || errors.Is(execErr, context.DeadlineExceeded) {
+		return false
+	}
+
 	rp := node.Step().RepeatPolicy
 
 	// Check the hard limit first - this overrides everything
@@ -1725,14 +1879,42 @@ func (r *Runner) shouldRepeatNode(ctx context.Context, node *Node, execErr error
 	ctx = r.reloadNodeOutputs(ctx, node)
 	shell := GetEnv(ctx).Shell(ctx)
 
+	var repeat bool
+	var err error
 	switch rp.RepeatMode {
 	case ir.RepeatModeWhile:
-		return r.evalWhileCondition(ctx, shell, node, rp, execErr)
+		repeat, err = r.evalWhileCondition(ctx, shell, node, rp, execErr)
 	case ir.RepeatModeUntil:
-		return r.evalUntilCondition(ctx, shell, node, rp, execErr)
+		repeat, err = r.evalUntilCondition(ctx, shell, node, rp, execErr)
 	default:
 		return false
 	}
+	// Abort and timeout take precedence over a repeat condition result.
+	if r.isCanceled() || node.State().Status == ir.NodeAborted {
+		return false
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		err = fmt.Errorf("%w: %w", errConditionInterrupted, ctxErr)
+	}
+	if err == nil {
+		return repeat
+	}
+
+	if errors.Is(err, errConditionInterrupted) {
+		node.SetStatus(ir.NodeAborted)
+		node.SetError(err)
+		if !r.isCanceled() {
+			r.setLastError(err)
+		}
+		return false
+	}
+	node.MarkError(err)
+	if node.ShouldMarkSuccess(ctx) {
+		node.SetStatus(ir.NodeSucceeded)
+		return false
+	}
+	r.setLastError(err)
+	return false
 }
 
 // reloadNodeOutputs updates the context with the node's current output variables.
@@ -1751,29 +1933,39 @@ func (r *Runner) reloadNodeOutputs(ctx context.Context, node *Node) context.Cont
 }
 
 // evalWhileCondition evaluates the repeat condition for a "while" loop.
-func (r *Runner) evalWhileCondition(ctx context.Context, shell []string, node *Node, rp ir.RepeatPolicy, execErr error) bool {
+// A not-met condition is a normal loop answer; any other error is an
+// evaluation error for the caller to report.
+func (r *Runner) evalWhileCondition(ctx context.Context, shell []string, node *Node, rp ir.RepeatPolicy, execErr error) (bool, error) {
 	if rp.Condition != nil {
 		err := EvalCondition(ctx, shell, rp.Condition)
-		return err == nil // Repeat while condition is met
+		if err != nil && !errors.Is(err, ErrConditionNotMet) {
+			return false, err
+		}
+		return err == nil, nil // Repeat while condition is met
 	}
 	if len(rp.ExitCode) > 0 {
-		return slices.Contains(rp.ExitCode, node.State().ExitCode)
+		return slices.Contains(rp.ExitCode, node.State().ExitCode), nil
 	}
 	// Unconditional while: repeat as long as the step succeeds
-	return execErr == nil
+	return execErr == nil, nil
 }
 
 // evalUntilCondition evaluates the repeat condition for an "until" loop.
-func (r *Runner) evalUntilCondition(ctx context.Context, shell []string, node *Node, rp ir.RepeatPolicy, execErr error) bool {
+// A not-met condition is a normal loop answer; any other error is an
+// evaluation error for the caller to report.
+func (r *Runner) evalUntilCondition(ctx context.Context, shell []string, node *Node, rp ir.RepeatPolicy, execErr error) (bool, error) {
 	if rp.Condition != nil {
 		err := EvalCondition(ctx, shell, rp.Condition)
-		return err != nil // Repeat until condition is met
+		if err != nil && !errors.Is(err, ErrConditionNotMet) {
+			return false, err
+		}
+		return err != nil, nil // Repeat until condition is met
 	}
 	if len(rp.ExitCode) > 0 {
-		return !slices.Contains(rp.ExitCode, node.State().ExitCode)
+		return !slices.Contains(rp.ExitCode, node.State().ExitCode), nil
 	}
 	// Unconditional until: repeat until the step succeeds
-	return execErr != nil
+	return execErr != nil, nil
 }
 
 // prepareNodeForRepeat sets up a node for repetition
@@ -1793,11 +1985,25 @@ func (r *Runner) prepareNodeForRepeat(ctx context.Context, node *Node, progressC
 		step.RepeatPolicy.MaxInterval,
 		node.State().DoneCount,
 	)
-	time.Sleep(interval)
+	if !waitForExecution(ctx, interval) {
+		node.SetStatus(ir.NodeAborted)
+		return
+	}
 	node.SetRepeated(true) // mark as repeated
 	logger.Info(ctx, "Repeating step")
 
 	r.report(ctx, progressCh, node)
+}
+
+func waitForExecution(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return ctx.Err() == nil
+	}
 }
 
 func NewPlanEnv(ctx context.Context, step ir.Step, plan *Plan) Env {

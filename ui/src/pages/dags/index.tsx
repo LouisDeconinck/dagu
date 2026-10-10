@@ -12,8 +12,12 @@ import {
   ViewSpecType,
 } from '../../api/v1/schema';
 import { Button } from '@/components/ui/button';
+import { useErrorModal } from '@/components/ui/error-modal';
 import { AppBarContext } from '../../contexts/AppBarContext';
-import { useCanWriteForWorkspace } from '../../contexts/AuthContext';
+import {
+  useCanWriteForWorkspace,
+  useWorkspaceWriteCheck,
+} from '../../contexts/AuthContext';
 import { useSearchState } from '../../contexts/SearchStateContext';
 import { useUserPreferences } from '../../contexts/UserPreference';
 import { DAGDetailsModal } from '../../features/dags/components/dag-details';
@@ -31,6 +35,7 @@ import {
   viewMatchesScope,
   viewScopeForSelection,
 } from '../../features/views/viewScope';
+import { setDAGPinned } from '../../features/dags/lib/dagPins';
 import { useClient, useQuery } from '../../hooks/api';
 import { useDAGsListSSE } from '../../hooks/useDAGsListSSE';
 import {
@@ -250,6 +255,7 @@ function DAGsContent() {
   const appBarContext = React.useContext(AppBarContext);
   const searchState = useSearchState();
   const client = useClient();
+  const { showError } = useErrorModal();
   const remoteNode = appBarContext.selectedRemoteNode || 'local';
   const workspaceSelection = appBarContext.workspaceSelection;
   const workspaceQuery = React.useMemo(
@@ -268,6 +274,13 @@ function DAGsContent() {
   );
   const canManageWorkflowViews = useCanWriteForWorkspace(
     workflowViewScope.workspace
+  );
+  const canWriteWorkspace = useWorkspaceWriteCheck();
+  // The server authorizes a pin against the workflow's own workspace.
+  const canPinDAG = React.useCallback(
+    (dag: components['schemas']['DAGFile']) =>
+      canWriteWorkspace(dag.dag.workspace),
+    [canWriteWorkspace]
   );
   const {
     views: sharedWorkflowViews,
@@ -791,6 +804,28 @@ function DAGsContent() {
     ]
   );
 
+  // Pinning moves a workflow across pages, so the list reloads from page one.
+  const reloadDAGList = React.useCallback(async () => {
+    resetLoadedPages();
+    await mutate();
+  }, [mutate, resetLoadedPages]);
+
+  const handleSetDAGPinned = React.useCallback(
+    async (fileName: string, pinned: boolean): Promise<void> => {
+      try {
+        await setDAGPinned(client, { fileName, pinned, remoteNode });
+      } catch (error) {
+        showError(
+          error instanceof Error ? error.message : String(error),
+          'Please try again or check the server connection.'
+        );
+        return;
+      }
+      await reloadDAGList();
+    },
+    [client, reloadDAGList, remoteNode, showError]
+  );
+
   const handleSelectDAG = React.useCallback(
     (fileName: string) => updateSelectedDAG(fileName),
     [updateSelectedDAG]
@@ -1156,6 +1191,8 @@ function DAGsContent() {
             onDeleteWorkflowView={handleDeleteWorkflowView}
             onDeleteDAGs={handleDeleteDAGs}
             onRenameDAG={handleRenameDAG}
+            canPinDAG={canPinDAG}
+            onSetDAGPinned={handleSetDAGPinned}
             resultCount={data.pagination.totalRecords}
             selectedDAG={selectedDAG}
             onSelectDAG={handleSelectDAG}
@@ -1202,6 +1239,7 @@ function DAGsContent() {
           fileName={selectedDAG}
           isOpen={!!selectedDAG}
           onClose={() => updateSelectedDAG(null, true)}
+          onPinnedChange={reloadDAGList}
         />
       )}
     </div>

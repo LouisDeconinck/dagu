@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
+	"github.com/dagucloud/dagu/v2/internal/cmn/fileutil"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
 	"github.com/dagucloud/dagu/v2/internal/cmn/runenv"
@@ -157,7 +158,7 @@ func applyPersistedRunWorkingDir(dag *ir.DAG, status *ir.DAGRunStatus) {
 // If the input is a file path (.yaml or .yml), it loads the DAG metadata
 // to extract the name. Otherwise, it returns the input as-is.
 func extractDAGName(ctx *Context, name string) (string, error) {
-	if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+	if !fileutil.IsYAMLFile(name) {
 		return name, nil
 	}
 

@@ -270,7 +270,7 @@ function DAGDetails() {
               setData: setRootDAGRunData,
             }}
           >
-            <div className="flex h-full min-h-0 w-full min-w-0 max-w-7xl flex-col">
+            <div className="flex h-full min-h-0 w-full min-w-0 flex-col">
               {dagData?.dag && dagMatchesWorkspace && (
                 <>
                   <DAGHeader
@@ -280,6 +280,7 @@ function DAGDetails() {
                     refreshFn={refreshData}
                     formatDuration={formatDuration}
                     buildScopedUrl={buildUrl}
+                    pinned={dagData.pinned}
                   />
                   <div className="min-h-0 flex-1">
                     <DAGDetailsContent

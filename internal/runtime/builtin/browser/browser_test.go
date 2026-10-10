@@ -14,16 +14,19 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/browserhost"
 	cmnconfig "github.com/dagucloud/dagu/v2/internal/cmn/config"
+	"github.com/dagucloud/dagu/v2/internal/cmn/replaycache"
 	"github.com/dagucloud/dagu/v2/internal/cmn/runenv"
 	"github.com/dagucloud/dagu/v2/internal/cmn/value"
 	"github.com/dagucloud/dagu/v2/internal/ir"
 	llmpkg "github.com/dagucloud/dagu/v2/internal/llm"
 	"github.com/dagucloud/dagu/v2/internal/runtime"
+	"github.com/dagucloud/dagu/v2/internal/runtime/builtin/internal/agentstep"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -117,7 +120,7 @@ func (r *testRun) records() []browserhost.Record {
 func eventNames(session *ir.AgentSession) []string {
 	names := make([]string, 0, len(session.Events))
 	for _, event := range session.Events {
-		if event.Type == eventOperation {
+		if event.Type == agentstep.EventOperation {
 			names = append(names, event.Name+":"+event.Status)
 		}
 	}
@@ -283,6 +286,51 @@ func TestActWithNoMatchingElementNamesTheModel(t *testing.T) {
 	require.ErrorContains(t, execution.err, "try another model")
 }
 
+// A click that loads a new document can detach the page before the act
+// reports back. The new document shows the click went through, so the step
+// goes on without clicking again, which could submit a form twice.
+func TestActLosingPageToNewDocumentCompletes(t *testing.T) {
+	t.Parallel()
+
+	run := newTestRun(t, pageModel(nil))
+	run.engine.actNavigatesTo = "https://shop.example.com/orders"
+	run.engine.actLosesPage = 1
+	execution := run.execute(`{"url": "https://shop.example.com/login", "do": [
+		{"act": "Click the sign-in button"},
+		{"expect": {"url": "/orders"}}
+	]}`, nil)
+	require.NoError(t, execution.err)
+
+	assert.Equal(t, []string{"Click the sign-in button"}, run.engine.actInstructions())
+	assert.Equal(t, []string{"goto:completed", "act:completed", "expect:completed"}, eventNames(execution.exec.GetAgentSession()))
+}
+
+// An act that lost the page while the page kept its document did not take
+// effect, so it runs once more; losing the page again fails the step.
+func TestActLosingPageKeepingDocumentRunsAgain(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		losses  int
+		wantErr string
+	}{
+		{losses: 1},
+		{losses: 2, wantErr: "do[0] act failed: the browser lost its connection to the page"},
+	} {
+		run := newTestRun(t, pageModel(nil))
+		run.engine.actLosesPage = tc.losses
+		execution := run.execute(`{"url": "https://shop.example.com/login", "do": [{"act": "Click the sign-in button"}]}`, nil)
+
+		assert.Len(t, run.engine.actInstructions(), 2, "losses: %d", tc.losses)
+		if tc.wantErr != "" {
+			require.ErrorContains(t, execution.err, tc.wantErr)
+			continue
+		}
+		require.NoError(t, execution.err)
+		assert.Contains(t, execution.stderr.String(), "running it again")
+	}
+}
+
 func TestSecretInInstructionIsRejected(t *testing.T) {
 	t.Parallel()
 
@@ -408,7 +456,7 @@ func TestReplayCommitKeepsClear(t *testing.T) {
 	run := newTestRun(t, pageModel(nil))
 	require.NoError(t, run.execute(first, nil).err)
 
-	cache := browserhost.NewReplayCache(filepath.Join(run.dataDir, browserhost.DataDirName))
+	cache := replaycache.New(filepath.Join(run.dataDir, browserhost.DataDirName))
 	run.engine.onAct = func() {
 		_, err := cache.Clear("orders", "shop")
 		require.NoError(t, err)
@@ -421,6 +469,139 @@ func TestReplayCommitKeepsClear(t *testing.T) {
 	next := run.execute(both, nil)
 	require.NoError(t, next.err)
 	assert.Equal(t, []string{"goto:completed", "act:completed", "act:cache-hit"}, eventNames(next.exec.GetAgentSession()))
+}
+
+// Runs of a step can start together and act one after another, such as
+// foreach items that wait for one browser profile. An act replays its
+// recording as other runs left it by then: healed, it replays the healed
+// actions; dropped after a failure, it asks the model.
+func TestReplaySeesOtherRuns(t *testing.T) {
+	t.Parallel()
+
+	const (
+		pageURL     = "https://shop.example.com/home"
+		instruction = "Open the receivables screen from the main menu"
+	)
+	steps := fmt.Sprintf(`{"url": %q, "do": [{"act": {"instruction": "Accept the cookies", "cache": false}}, {"act": %q}]}`, pageURL, instruction)
+	run := newTestRun(t, pageModel(nil))
+	require.NoError(t, run.execute(steps, nil).err)
+
+	key := replayKey(1, instruction, pageURL)
+	// otherRun applies change once, as another run of the step that finishes
+	// while this run's first act asks the model.
+	otherRun := func(change func(*replayCache) error) func() {
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				other := openReplayCache(filepath.Join(run.dataDir, browserhost.DataDirName), "orders", "shop")
+				_, _ = other.Lookup(key)
+				require.NoError(t, change(other))
+			})
+		}
+	}
+
+	healed := []recordedAction{{Selector: "xpath=/html/body/nav/a[3]", Method: "click"}}
+	run.engine.onAct = otherRun(func(other *replayCache) error {
+		other.Stage(key, healed)
+		return other.Commit(t.Context())
+	})
+	replayed := run.execute(steps, nil)
+	require.NoError(t, replayed.err)
+	assert.Equal(t, []string{"goto:completed", "act:completed", "act:cache-hit"}, eventNames(replayed.exec.GetAgentSession()))
+	assert.Equal(t, healed, run.engine.replays)
+
+	run.engine.onAct = otherRun(func(other *replayCache) error { return other.Evict(t.Context()) })
+	dropped := run.execute(steps, nil)
+	require.NoError(t, dropped.err)
+	assert.Equal(t, []string{"goto:completed", "act:completed", "act:completed"}, eventNames(dropped.exec.GetAgentSession()))
+	assert.Len(t, run.engine.replays, 1, "the dropped recording is not replayed")
+}
+
+// A healed act can record nothing, as when its click loads a new document
+// before the act reports back. The recording it healed no longer replays, so
+// it is dropped, and the next run asks the model instead of repeating it.
+func TestHealedActWithoutActionsDropsRecording(t *testing.T) {
+	t.Parallel()
+
+	const steps = `{"url": "https://shop.example.com/login", "do": [{"act": "Click the sign-in button"}]}`
+	run := newTestRun(t, pageModel(nil))
+	require.NoError(t, run.execute(steps, nil).err)
+
+	run.engine.hidden = []string{"xpath=/html/body/button"}
+	run.engine.actNavigatesTo = "https://shop.example.com/orders"
+	run.engine.actLosesPage = 1
+	healed := run.execute(steps, nil)
+	require.NoError(t, healed.err)
+	assert.Equal(t, []string{"goto:completed", "act:healed"}, eventNames(healed.exec.GetAgentSession()))
+
+	run.engine.hidden = nil
+	run.engine.actNavigatesTo = ""
+	next := run.execute(steps, nil)
+	require.NoError(t, next.err)
+	assert.Equal(t, []string{"goto:completed", "act:completed"}, eventNames(next.exec.GetAgentSession()))
+}
+
+// A replayed click that loads a new document can lose the page too. The new
+// document shows the click took effect, so the model does not act again, and
+// the action recorded after it runs on the new document.
+func TestReplayLosingPageToNewDocumentGoesOn(t *testing.T) {
+	t.Parallel()
+
+	const steps = `{"url": "https://shop.example.com/login", "do": [{"act": "Click the sign-in button"}]}`
+	run := newTestRun(t, pageModel(nil))
+	run.engine.twoStepAct = true
+	require.NoError(t, run.execute(steps, nil).err)
+	modelCalls := run.provider.callCount()
+
+	run.engine.actNavigatesTo = "https://shop.example.com/orders"
+	run.engine.replayLosesPage = 1
+	replayed := run.execute(steps, nil)
+	require.NoError(t, replayed.err)
+
+	assert.Equal(t, modelCalls, run.provider.callCount(), "no model call")
+	assert.Len(t, run.engine.actInstructions(), 1, "no act after the replay")
+	assert.Len(t, run.engine.replays, 2, "both recorded actions run")
+	assert.Equal(t, []string{"goto:completed", "act:cache-hit"}, eventNames(replayed.exec.GetAgentSession()))
+}
+
+// A replayed action that lost the page while the page kept its document did
+// not take effect, so the model acts on the page as it is.
+func TestReplayLosingPageKeepingDocumentAsksModel(t *testing.T) {
+	t.Parallel()
+
+	const steps = `{"url": "https://shop.example.com/login", "do": [{"act": "Click the sign-in button"}]}`
+	run := newTestRun(t, pageModel(nil))
+	require.NoError(t, run.execute(steps, nil).err)
+
+	run.engine.replayLosesPage = 1
+	replayed := run.execute(steps, nil)
+	require.NoError(t, replayed.err)
+
+	assert.Len(t, run.engine.actInstructions(), 2, "the model acts once more")
+	assert.Equal(t, []string{"goto:completed", "act:healed"}, eventNames(replayed.exec.GetAgentSession()))
+}
+
+// A replay can miss after an earlier recorded action loaded a new document.
+// The model's act is then judged by that document: judged by the one from
+// before the replay, an act that lost the page without taking effect would
+// count as done.
+func TestReplayMissAfterNewDocumentJudgesActByIt(t *testing.T) {
+	t.Parallel()
+
+	const steps = `{"url": "https://shop.example.com/login", "do": [{"act": "Click the sign-in button"}]}`
+	run := newTestRun(t, pageModel(nil))
+	run.engine.twoStepAct = true
+	require.NoError(t, run.execute(steps, nil).err)
+
+	run.engine.replayNavigatesTo = "https://shop.example.com/orders"
+	run.engine.hidden = []string{"xpath=/html/body/button/next"}
+	run.engine.actLosesPage = 1
+	replayed := run.execute(steps, nil)
+	require.NoError(t, replayed.err)
+
+	assert.Len(t, run.engine.replays, 2, "the replay stops at the hidden element")
+	assert.Len(t, run.engine.actInstructions(), 3, "the act that lost the page runs once more")
+	assert.Equal(t, []string{"goto:completed", "act:healed"}, eventNames(replayed.exec.GetAgentSession()))
 }
 
 const loginSteps = `{
@@ -438,6 +619,10 @@ func TestAskWaitsAndResumesSameBrowser(t *testing.T) {
 	t.Parallel()
 
 	run := newTestRun(t, pageModel(map[string]string{"The account name": `{"account":"acme"}`}))
+	// The resumed step closes the browser's whole process tree, which only
+	// the browser's process identifies.
+	run.engine.handle.BrowserPID = 4242
+	run.engine.handle.BrowserStartedAt = 1_700_000_000_000
 	waiting := run.execute(loginSteps, nil)
 	require.NoError(t, waiting.err)
 
@@ -475,6 +660,37 @@ func TestAskWaitsAndResumesSameBrowser(t *testing.T) {
 	assert.True(t, resumed.exec.GetAgentSession().Interactions[0].Applied)
 	assert.True(t, run.engine.closed)
 	assert.Empty(t, run.records())
+}
+
+// An answer whose browser record cannot be read for now stays pending, so a
+// retry reattaches to the same browser once the record is readable again.
+func TestAskResumeAfterUnreadableRecord(t *testing.T) {
+	t.Parallel()
+
+	run := newTestRun(t, pageModel(map[string]string{"The account name": `{"account":"acme"}`}))
+	waiting := run.execute(loginSteps, nil)
+	require.NoError(t, waiting.err)
+	session := waiting.exec.GetAgentSession()
+	session.Interactions[0].Status = ir.AgentInteractionAnswered
+	session.Interactions[0].Answers = [][]string{{"123456"}}
+
+	// A directory in place of the record cannot be read as a file by any
+	// process, whatever its privileges.
+	record := filepath.Join(run.dataDir, browserhost.DataDirName, "sessions", browserhost.RecordID("run-1", "shop")+".json")
+	data, err := os.ReadFile(record)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(record))
+	require.NoError(t, os.Mkdir(record, 0o700))
+	failed := run.execute(loginSteps, session)
+	require.NoError(t, os.Remove(record))
+	require.NoError(t, os.WriteFile(record, data, 0o600))
+	require.ErrorContains(t, failed.err, "read the waiting browser's record")
+	retry := failed.exec.GetAgentSession()
+	assert.False(t, retry.Interactions[0].Applied, "the answer stays pending")
+
+	require.NoError(t, run.execute(loginSteps, retry).err)
+	assert.Equal(t, []browserHandle{run.engine.handle}, run.launcher.reattaches, "the retry reattaches to the waiting browser")
+	assert.Len(t, run.launcher.launches, 1)
 }
 
 // A resumed step applies allowed_domains to the browser it reattaches, as the
@@ -533,12 +749,15 @@ func TestAskRejectionFailsStep(t *testing.T) {
 	require.NoError(t, waiting.err)
 
 	session := waiting.exec.GetAgentSession()
+	used := session.Usage.TotalTokens
+	require.Positive(t, used)
 	session.Interactions[0].Status = ir.AgentInteractionRejected
 	rejected := run.execute(loginSteps, session)
 
 	require.ErrorContains(t, rejected.err, "the input request was rejected")
 	assert.Empty(t, run.launcher.reattaches)
 	assert.Empty(t, run.records(), "the waiting browser is released")
+	assert.Equal(t, used, rejected.exec.GetAgentSession().Usage.TotalTokens, "tokens used before the wait still count")
 }
 
 // A step that waits for a person keeps what it recorded and the tokens it
@@ -609,7 +828,7 @@ func TestModelBridgeFallsBackAndMasks(t *testing.T) {
 		return working, nil
 	}
 	ctx := runtime.WithEnv(t.Context(), runtime.Env{Scope: value.NewEnvScope(nil, false)})
-	bridge, err := newModelBridge(ctx, cfg, newMasker(map[string]string{"TOKEN": "s3cr3t-token"}, nil), factory)
+	bridge, err := newModelBridge(ctx, cfg, agentstep.NewMasker(map[string]string{"TOKEN": "s3cr3t-token"}, nil), factory)
 	require.NoError(t, err)
 
 	resp, err := bridge.generate(ctx, generateRequest{
@@ -623,20 +842,9 @@ func TestModelBridgeFallsBackAndMasks(t *testing.T) {
 
 	require.Len(t, working.calls, 1)
 	request := working.calls[0]
-	assert.Equal(t, toolChoiceRequired, request.ToolChoice)
+	assert.Equal(t, agentstep.ToolChoiceRequired, request.ToolChoice)
 	assert.NotContains(t, request.Tools[0].Function.Parameters, "$schema")
 	assert.Equal(t, "tree contains *******", lastUserText(request))
-}
-
-func TestStructuredAnswerFromText(t *testing.T) {
-	t.Parallel()
-
-	answer, err := structuredAnswer(&llmpkg.ChatResponse{Content: "```json\n{\"ok\":true}\n```"})
-	require.NoError(t, err)
-	assert.JSONEq(t, `{"ok":true}`, string(answer))
-
-	_, err = structuredAnswer(&llmpkg.ChatResponse{Content: "I cannot help"})
-	assert.Error(t, err)
 }
 
 func TestCheckAllowedDomain(t *testing.T) {
@@ -749,7 +957,7 @@ func TestUnfinishedDownloadFailsStep(t *testing.T) {
 func TestMaskerHidesSecretsAndAnswers(t *testing.T) {
 	t.Parallel()
 
-	masker := newMasker(
+	masker := agentstep.NewMasker(
 		map[string]string{"TOKEN": "s3cr3t-token", "PIN": "12", "SHORT": "éé", "WORD": "パスワード"},
 		map[string]string{"otp": "424242", "choice": "2"},
 	)
@@ -871,4 +1079,42 @@ func TestFixedWhenWaitsWithin(t *testing.T) {
 	]}`, nil)
 	require.NoError(t, execution.err)
 	assert.Equal(t, []string{"Open the code form"}, run.engine.actInstructions())
+}
+
+// A step fails at once when a browser session keeps its profile's browser
+// open, naming the session and how to close it, rather than starting a
+// second browser on the same profile.
+func TestProfileHeldByBrowserSessionFailsStep(t *testing.T) {
+	t.Parallel()
+
+	run := newTestRun(t, pageModel(nil))
+	sessions := browserhost.NewInteractiveStore(filepath.Join(run.dataDir, browserhost.DataDirName))
+	require.NoError(t, sessions.Save(browserhost.Record{
+		ID: "ab2cd3ef4g", State: browserhost.StateInteractive, Profile: "shop", Deadline: time.Now().Add(time.Hour),
+	}))
+
+	execution := run.execute(`{"browser":{"profile":"shop"},"do":[{"goto":"https://shop.example.com"}]}`, nil)
+	require.Error(t, execution.err)
+	assert.Contains(t, execution.err.Error(), `browser profile "shop" is held by browser session ab2cd3ef4g; close it with "dagu browser session close ab2cd3ef4g"`)
+	assert.Empty(t, run.launcher.launches)
+}
+
+// Taking a profile without waiting fails at once while a running step uses
+// it, and succeeds once the step is done with it.
+func TestProfileWithoutWaiting(t *testing.T) {
+	t.Parallel()
+
+	browserDir := t.TempDir()
+	step, err := acquireProfile(t.Context(), browserDir, "shop", "step-record", true)
+	require.NoError(t, err)
+
+	_, err = acquireProfile(t.Context(), browserDir, "shop", "ab2cd3ef4g", false)
+	var held *profileHeldError
+	require.ErrorAs(t, err, &held)
+	assert.Equal(t, `browser profile "shop" is in use by a running browser step`, err.Error())
+
+	step.release()
+	session, err := acquireProfile(t.Context(), browserDir, "shop", "ab2cd3ef4g", false)
+	require.NoError(t, err)
+	session.release()
 }

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 	"testing"
+	"time"
 
 	cmnvalue "github.com/dagucloud/dagu/v2/internal/cmn/value"
 	"github.com/dagucloud/dagu/v2/internal/ir"
@@ -256,6 +257,50 @@ func TestEvalConditions(t *testing.T) {
 			wantErr:            true,
 			notConditionNotMet: true,
 		},
+
+		// Any-of tests: one matching pattern satisfies the condition.
+		{
+			name:       "ExpectedAnyExactMatch",
+			conditions: []*ir.Condition{{Condition: "minimal", ExpectedAny: []string{"full", "minimal"}}},
+		},
+		{
+			name:       "ExpectedAnyRegexMatch",
+			conditions: []*ir.Condition{{Condition: "apple_pie", ExpectedAny: []string{"banana", "re:^apple"}}},
+		},
+		{
+			name:                "ExpectedAnyNoMatch",
+			conditions:          []*ir.Condition{{Condition: "other", ExpectedAny: []string{"full", "re:^min"}}},
+			wantErr:             true,
+			wantConditionNotMet: true,
+		},
+		{
+			name:       "ExpectedAnyNumericLowBand",
+			conditions: []*ir.Condition{{Condition: "0.05", ExpectedAny: []string{"num:<0.1", "num:>0.9"}}},
+		},
+		{
+			name:       "ExpectedAnyNumericHighBand",
+			conditions: []*ir.Condition{{Condition: "0.95", ExpectedAny: []string{"num:<0.1", "num:>0.9"}}},
+		},
+		{
+			name:                "ExpectedAnyNumericBetweenBands",
+			conditions:          []*ir.Condition{{Condition: "0.5", ExpectedAny: []string{"num:<0.1", "num:>0.9"}}},
+			wantErr:             true,
+			wantConditionNotMet: true,
+		},
+		{
+			// A numeric pattern that cannot be evaluated fails the check even
+			// when another pattern matches, so the gate never half-applies.
+			name:               "ExpectedAnyNumericValueNotANumber",
+			conditions:         []*ir.Condition{{Condition: "abc", ExpectedAny: []string{"num:>0.9", "abc"}}},
+			wantErr:            true,
+			notConditionNotMet: true,
+		},
+		{
+			name:                "ExpectedAnyNegated",
+			conditions:          []*ir.Condition{{Condition: "minimal", ExpectedAny: []string{"full", "minimal"}, Negate: true}},
+			wantErr:             true,
+			wantConditionNotMet: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -317,6 +362,30 @@ func TestEvalConditionsClearsErrorsWhenReevaluationSucceeds(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, results[0].Error)
 	require.Empty(t, results[1].Error)
+}
+
+// Passing siblings are back-filled with a message matching the deciding
+// failure: an evaluation error fails the owner, so the back-fill must not
+// claim another condition was not met.
+func TestEvalConditions_SiblingErrorWording(t *testing.T) {
+	ctx := newTestContext()
+
+	results, err := runtime.EvaluateConditions(ctx, nil, []*ir.Condition{
+		{Condition: "ok", Expected: "ok"},
+		{Condition: "abc", Expected: "num:>=0.8"},
+	})
+	require.Error(t, err)
+	require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
+	require.Equal(t, runtime.ErrMsgOtherConditionFailed, results[0].Error)
+	require.NotEmpty(t, results[1].Error)
+
+	results, err = runtime.EvaluateConditions(ctx, nil, []*ir.Condition{
+		{Condition: "ok", Expected: "ok"},
+		{Condition: "x", Expected: "y"},
+	})
+	require.ErrorIs(t, err, runtime.ErrConditionNotMet)
+	require.Equal(t, runtime.ErrMsgOtherConditionNotMet, results[0].Error)
+	require.NotEmpty(t, results[1].Error)
 }
 
 func TestEvalConditions_ValueMatchEvalRunsCommandSubstitution(t *testing.T) {
@@ -463,6 +532,82 @@ func TestEvalConditions_CommandFormExpandsHomeRelativeScopeVars(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// A command check interrupted by workflow abort or timeout is an evaluation
+// error, not a not-met condition, so the owning DAG or step follows the abort
+// or timeout outcome instead of skipping.
+func TestEvalConditions_CommandCheckInterrupted(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("uses POSIX shell snippets")
+	}
+
+	t.Run("ShellCanceledMidCommand", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(newTestContext())
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			cancel()
+		}()
+
+		err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "sleep 30"}})
+		require.ErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
+	})
+
+	t.Run("ShellDeadlineExceeded", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(newTestContext(), 100*time.Millisecond)
+		defer cancel()
+
+		err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "sleep 30"}})
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
+	})
+
+	t.Run("DirectCanceledMidCommand", func(t *testing.T) {
+		script := filepath.Join(t.TempDir(), "sleep.sh")
+		require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755))
+
+		ctx, cancel := context.WithCancel(newTestContext())
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			cancel()
+		}()
+
+		err := evalConditions(ctx, nil, []*ir.Condition{{Condition: script}})
+		require.ErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, runtime.ErrConditionNotMet)
+	})
+}
+
+// The exit status alone decides a command check, so a background descendant
+// that outlives the check neither delays nor changes the result.
+func TestEvalConditions_CommandCheckIgnoresDescendants(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("uses POSIX shell snippets")
+	}
+
+	// The deadline ends before the descendant does, so waiting on it would
+	// turn the result into an interruption.
+	ctx, cancel := context.WithTimeout(newTestContext(), 2*time.Second)
+	defer cancel()
+
+	err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "sleep 5 & exit 0"}})
+	require.NoError(t, err)
+}
+
+// A non-zero exit, a death by signal outside abort or timeout, and a command
+// that cannot be started remain ordinary not-met conditions.
+func TestEvalConditions_CommandCheckNotMet(t *testing.T) {
+	ctx := newTestContext()
+
+	err := evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "exit 3"}})
+	require.ErrorIs(t, err, runtime.ErrConditionNotMet)
+
+	err = evalConditions(ctx, []string{"sh"}, []*ir.Condition{{Condition: "kill -KILL $$"}})
+	require.ErrorIs(t, err, runtime.ErrConditionNotMet)
+
+	err = evalConditions(ctx, nil, []*ir.Condition{{Condition: "./definitely-missing-condition-command"}})
+	require.ErrorIs(t, err, runtime.ErrConditionNotMet)
+}
+
 // A threshold can come from a secret, and condition errors are persisted with
 // the run, so no error may quote the resolved threshold.
 func TestResolveNumericComparisonHidesResolvedThreshold(t *testing.T) {
@@ -486,4 +631,22 @@ func TestResolveNumericComparisonHidesResolvedThreshold(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "did not resolve")
 	require.NotContains(t, err.Error(), "not a number")
+}
+
+// A not-met any-of condition names every pattern as authored, never with a
+// resolved threshold, since the message is persisted with the run.
+func TestEvalConditionsExpectedAnyNotMetMessage(t *testing.T) {
+	ctx := newTestContext()
+	env := runtime.GetEnv(ctx)
+	env.Scope = env.Scope.WithEntry("SECRET_THRESHOLD", "0.8", cmnvalue.EnvSourceDAGEnv)
+	ctx = runtime.WithEnv(ctx, env)
+
+	err := evalConditions(ctx, nil, []*ir.Condition{{
+		Condition:   "0.5",
+		ExpectedAny: []string{"num:>=${env.SECRET_THRESHOLD}", "done"},
+	}})
+	require.ErrorIs(t, err, runtime.ErrConditionNotMet)
+	require.Contains(t, err.Error(), `"num:>=${env.SECRET_THRESHOLD}"`)
+	require.Contains(t, err.Error(), `"done"`)
+	require.NotContains(t, err.Error(), "0.8")
 }

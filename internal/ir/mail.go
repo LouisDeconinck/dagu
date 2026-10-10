@@ -3,7 +3,11 @@
 
 package ir
 
-import "github.com/dagucloud/dagu/v2/internal/cmn/mailer/oauthconfig"
+import (
+	"slices"
+
+	"github.com/dagucloud/dagu/v2/internal/cmn/mailer/oauthconfig"
+)
 
 // Mail account providers select default IMAP and SMTP servers.
 const (
@@ -49,6 +53,12 @@ type MailAccount struct {
 	OAuth    *oauthconfig.Config
 }
 
+// GmailAPI reports whether the account reaches its mailbox through the Gmail
+// API instead of IMAP and SMTP. Such an account has no servers.
+func (a *MailAccount) GmailAPI() bool {
+	return a.Provider == MailProviderGoogle && a.OAuth != nil
+}
+
 // MailServer is the IMAP or SMTP server of a mail account.
 type MailServer struct {
 	Host          string
@@ -79,6 +89,7 @@ func (a *MailAccount) Clone() *MailAccount {
 	cloned.SMTP = a.SMTP.clone()
 	if a.OAuth != nil {
 		oauth := *a.OAuth
+		oauth.Scopes = slices.Clone(a.OAuth.Scopes)
 		cloned.OAuth = &oauth
 	}
 	return &cloned

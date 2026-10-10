@@ -122,6 +122,9 @@ func mapAPIStep(step api.Step) ir.Step {
 		Inputs:      mapAPIStepInputs(step.Inputs),
 		Outputs:     mapAPIStepOutputs(step.Outputs),
 	}
+	for _, dep := range derefStringSlice(step.InferredDepends) {
+		mapped.InferredDepends = append(mapped.InferredDepends, ir.InferredDependency{Step: dep})
+	}
 	if step.Id != nil {
 		mapped.ID = *step.Id
 	}
@@ -207,6 +210,22 @@ func remoteResolveDAG(ctx *Context, arg string) (*api.DAGFile, error) {
 	return ctx.Remote.resolveDAG(ctx, arg)
 }
 
+// remoteRunParams resolves run parameters for remote commands: "--" arguments
+// first, then --params, then stdin when --params-stdin is enabled.
+func remoteRunParams(ctx *Context, args []string) (string, error) {
+	if argsLenAtDash := ctx.Command.ArgsLenAtDash(); argsLenAtDash >= 0 {
+		return strings.Join(quoteStartDashArgs(args[argsLenAtDash:]), " "), nil
+	}
+	if ctx.Command.Flags().Changed("params") {
+		return ctx.StringParam("params")
+	}
+	hasInput, err := stdinHasParamsInput(ctx)
+	if err != nil || !hasInput {
+		return "", err
+	}
+	return readStdinParams()
+}
+
 func remoteRunStart(ctx *Context, args []string) error {
 	if err := validateRemoteStartLikeFlags(ctx); err != nil {
 		return err
@@ -223,7 +242,7 @@ func remoteRunStart(ctx *Context, args []string) error {
 		if err := validateRunID(fromRunID); err != nil {
 			return fmt.Errorf("invalid from-run-id: %w", err)
 		}
-		if len(args) != 1 || ctx.Command.Flags().Changed("params") || ctx.Command.ArgsLenAtDash() != -1 {
+		if len(args) != 1 || ctx.Command.Flags().Changed("params") || ctx.Command.ArgsLenAtDash() != -1 || stdinParamsRequested(ctx) {
 			return fmt.Errorf("parameters cannot be provided when using --from-run-id")
 		}
 		dag, err := remoteResolveDAG(ctx, args[0])
@@ -249,12 +268,9 @@ func remoteRunStart(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	params := ""
-	if ctx.Command.ArgsLenAtDash() >= 0 {
-		params = joinNonEmpty(args[1:])
-	}
-	if flagParams, _ := ctx.StringParam("params"); flagParams != "" {
-		params = flagParams
+	params, err := remoteRunParams(ctx, args)
+	if err != nil {
+		return err
 	}
 	nameOverride, _ := ctx.StringParam("name")
 	runID, _ := ctx.StringParam("run-id")
@@ -304,12 +320,9 @@ func remoteRunEnqueue(ctx *Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	params := ""
-	if ctx.Command.ArgsLenAtDash() >= 0 {
-		params = joinNonEmpty(args[1:])
-	}
-	if flagParams, _ := ctx.StringParam("params"); flagParams != "" {
-		params = flagParams
+	params, err := remoteRunParams(ctx, args)
+	if err != nil {
+		return err
 	}
 	nameOverride, _ := ctx.StringParam("name")
 	runID, _ := ctx.StringParam("run-id")
@@ -702,16 +715,6 @@ func derefStringSlice(v *[]string) []string {
 		return nil
 	}
 	return append([]string{}, (*v)...)
-}
-
-func joinNonEmpty(parts []string) string {
-	filtered := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part != "" {
-			filtered = append(filtered, part)
-		}
-	}
-	return strings.Join(filtered, " ")
 }
 
 func enrichRemoteHistoryStatus(status *ir.DAGRunStatus, detail *api.DAGRunDetails) error {

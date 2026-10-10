@@ -8,12 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os/signal"
 	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/dagucloud/dagu/v2/internal/agentsession"
+	"github.com/dagucloud/dagu/v2/internal/cloudreport"
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger"
 	"github.com/dagucloud/dagu/v2/internal/cmn/logger/tag"
@@ -93,18 +93,22 @@ func newServer(ctx *Context, rs *resource.Service, stores frontend.Stores, opts 
 func runServer(ctx *Context, _ []string, serverOpts ...frontend.ServerOption) error {
 	// Create a context that will be cancelled on interrupt signal.
 	// This must be created BEFORE server initialization so auth provider init can be cancelled.
-	signalCtx, stop := signal.NotifyContext(ctx.Context, syscall.SIGINT, syscall.SIGTERM)
+	signalCtx, stop := notifyShutdownContext(ctx.Context, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	// Create a signal-aware context for services
-	serviceCtx := ctx.WithContext(signalCtx)
+	serviceCtx := ctx.WithContext(ctx.withSignalPropagation(signalCtx))
 	openCodeHost := opencodehost.New(signalCtx, ctx.Config.OpenCode)
 	cleanupCancel, cleanupDone := startLocalAgentSessionCleanup(signalCtx, ctx.Persistence, openCodeHost)
 	startBrowserReaper(signalCtx, ctx.Config.Paths.DataDir, ctx.Persistence.DAGRunRepository)
 	var tunnelService *tunnel.Service
 	var resourceService *resource.Service
+	var cloudReporter *cloudreport.Reporter
 	defer func() {
 		stop()
+		if cloudReporter != nil {
+			cloudReporter.Stop()
+		}
 		if resourceService != nil {
 			if err := resourceService.Stop(ctx); err != nil {
 				logger.Error(ctx, "Failed to stop resource service", tag.Error(err))
@@ -179,8 +183,10 @@ func runServer(ctx *Context, _ []string, serverOpts ...frontend.ServerOption) er
 		}
 	}
 
+	cloudReporter = startCloudReport(serviceCtx)
+
 	err = server.Serve(serviceCtx)
-	stop() // Restore default signal handling while deferred cleanup runs.
+	stop() // Let a second SIGINT end deferred cleanup; SIGTERM stays absorbed.
 	if err != nil {
 		return fmt.Errorf("failed to start server: %w", err)
 	}
@@ -256,6 +262,16 @@ func initTunnelService(cfg *config.Config) (*tunnel.Service, error) {
 	}
 
 	return tunnel.NewService(tunnelCfg, cfg.Paths.DataDir)
+}
+
+// startCloudReport reports this server's health to Dagu Console while it holds
+// an online license. It returns nil when cloud.report is off or no license
+// manager runs.
+func startCloudReport(ctx *Context) *cloudreport.Reporter {
+	if !ctx.Config.Cloud.Report || ctx.LicenseManager == nil {
+		return nil
+	}
+	return cloudreport.Start(ctx, ctx.LicenseManager.CloudCredentials, ctx.Persistence.ServiceRegistry)
 }
 
 // logTunnelStatus logs the tunnel status prominently to the console.

@@ -66,8 +66,23 @@ func (p *Provider) Chat(ctx context.Context, req *llm.ChatRequest) (*llm.ChatRes
 	}
 	defer func() { _ = respBody.Close() }()
 
+	data, err := io.ReadAll(respBody)
+	if err != nil {
+		return nil, llm.WrapError(providerName, fmt.Errorf("failed to read response: %w", err))
+	}
 	var resp generateContentResponse
-	if err := json.NewDecoder(respBody).Decode(&resp); err != nil {
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, llm.WrapError(providerName, fmt.Errorf("failed to decode response: %w", err))
+	}
+	// The raw parts are kept so the turn can be sent back unchanged.
+	var raw struct {
+		Candidates []struct {
+			Content struct {
+				Parts json.RawMessage `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, llm.WrapError(providerName, fmt.Errorf("failed to decode response: %w", err))
 	}
 
@@ -111,12 +126,16 @@ func (p *Provider) Chat(ctx context.Context, req *llm.ChatRequest) (*llm.ChatRes
 		}
 	}
 
-	return &llm.ChatResponse{
+	result := &llm.ChatResponse{
 		Content:      content.String(),
 		FinishReason: finishReason,
 		Usage:        usage,
 		ToolCalls:    toolCalls,
-	}, nil
+	}
+	if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
+		result.ProviderState = &llm.ProviderState{Provider: llm.ProviderGemini, Data: raw.Candidates[0].Content.Parts}
+	}
+	return result, nil
 }
 
 // ChatStream sends messages and streams the response.
@@ -191,8 +210,11 @@ func (p *Provider) buildRequestBody(req *llm.ChatRequest) ([]byte, error) {
 func (p *Provider) processMessages(reqMessages []llm.Message) (*systemInstruction, []content) {
 	var sysInstr *systemInstruction
 	contents := make([]content, 0, len(reqMessages))
+	// callNames maps tool call IDs to function names; a function response
+	// must name the function it answers.
+	callNames := make(map[string]string)
 
-	for _, m := range reqMessages {
+	for i, m := range reqMessages {
 		switch m.Role {
 		case llm.RoleSystem:
 			if sysInstr == nil {
@@ -201,12 +223,28 @@ func (p *Provider) processMessages(reqMessages []llm.Message) (*systemInstructio
 			sysInstr.Parts = append(sysInstr.Parts, part{Text: m.Content})
 
 		case llm.RoleUser:
+			parts := make([]part, 0, len(m.Images)+1)
+			for _, image := range m.Images {
+				parts = append(parts, part{InlineData: &inlineData{MimeType: image.MediaType, Data: image.Data}})
+			}
+			if m.Content != "" || len(parts) == 0 {
+				parts = append(parts, part{Text: m.Content})
+			}
 			contents = append(contents, content{
 				Role:  "user",
-				Parts: []part{{Text: m.Content}},
+				Parts: parts,
 			})
 
 		case llm.RoleAssistant:
+			for _, tc := range m.ToolCalls {
+				callNames[tc.ID] = tc.Function.Name
+			}
+			if state := m.ProviderState; state != nil && state.Provider == llm.ProviderGemini {
+				// The turn goes back as received, keeping its thought
+				// signatures.
+				contents = append(contents, content{Role: "model", rawParts: state.Data})
+				continue
+			}
 			// Check if this assistant message has tool calls
 			if len(m.ToolCalls) > 0 {
 				parts := make([]part, 0, len(m.ToolCalls)+1)
@@ -248,15 +286,18 @@ func (p *Provider) processMessages(reqMessages []llm.Message) (*systemInstructio
 			if err := json.Unmarshal([]byte(m.Content), &jsonResponse); err == nil {
 				response = jsonResponse
 			}
-			contents = append(contents, content{
-				Role: "user",
-				Parts: []part{{
-					FunctionResponse: &functionResponsePart{
-						Name:     m.Name,
-						Response: response,
-					},
-				}},
-			})
+			name := m.Name
+			if name == "" {
+				name = callNames[m.ToolCallID]
+			}
+			responsePart := part{FunctionResponse: &functionResponsePart{Name: name, Response: response}}
+			// Responses to the calls of one turn share a single content.
+			if i > 0 && reqMessages[i-1].Role == llm.RoleTool {
+				last := &contents[len(contents)-1]
+				last.Parts = append(last.Parts, responsePart)
+				continue
+			}
+			contents = append(contents, content{Role: "user", Parts: []part{responsePart}})
 		}
 	}
 	return sysInstr, contents
@@ -269,9 +310,9 @@ func (p *Provider) convertTools(tools []llm.Tool) []geminiTool {
 	funcDecls := make([]functionDeclaration, len(tools))
 	for i, t := range tools {
 		funcDecls[i] = functionDeclaration{
-			Name:        t.Function.Name,
-			Description: t.Function.Description,
-			Parameters:  t.Function.Parameters,
+			Name:                 t.Function.Name,
+			Description:          t.Function.Description,
+			ParametersJSONSchema: t.Function.Parameters,
 		}
 	}
 	return []geminiTool{{FunctionDeclarations: funcDecls}}
@@ -383,6 +424,7 @@ func (p *Provider) streamResponse(ctx context.Context, body io.ReadCloser, event
 	defer func() { _ = body.Close() }()
 
 	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	var usage *llm.Usage
 
 	for scanner.Scan() {
@@ -449,8 +491,15 @@ func (p *Provider) streamResponse(ctx context.Context, body io.ReadCloser, event
 
 type part struct {
 	Text             string                `json:"text,omitempty"`
+	InlineData       *inlineData           `json:"inlineData,omitempty"`
 	FunctionCall     *functionCallPart     `json:"functionCall,omitempty"`
 	FunctionResponse *functionResponsePart `json:"functionResponse,omitempty"`
+}
+
+// inlineData carries encoded media; Data marshals as base64.
+type inlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     []byte `json:"data"`
 }
 
 // Function calling types
@@ -464,10 +513,12 @@ type functionResponsePart struct {
 	Response any    `json:"response"`
 }
 
+// functionDeclaration sends parameters as JSON Schema; the OpenAPI-based
+// parameters field rejects keywords such as additionalProperties and $defs.
 type functionDeclaration struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description,omitempty"`
-	Parameters  map[string]any `json:"parameters,omitempty"`
+	Name                 string         `json:"name"`
+	Description          string         `json:"description,omitempty"`
+	ParametersJSONSchema map[string]any `json:"parametersJsonSchema,omitempty"`
 }
 
 type toolConfig struct {
@@ -481,6 +532,20 @@ type functionCallingConfig struct {
 type content struct {
 	Role  string `json:"role"`
 	Parts []part `json:"parts"`
+	// rawParts, when set, are sent in place of Parts.
+	rawParts json.RawMessage
+}
+
+// MarshalJSON sends a replayed turn's parts exactly as received.
+func (c content) MarshalJSON() ([]byte, error) {
+	if c.rawParts != nil {
+		return json.Marshal(struct {
+			Role  string          `json:"role"`
+			Parts json.RawMessage `json:"parts"`
+		}{c.Role, c.rawParts})
+	}
+	type plain content
+	return json.Marshal(plain(c))
 }
 
 type systemInstruction struct {

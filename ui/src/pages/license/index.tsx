@@ -1,348 +1,370 @@
+import { useContext, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { AppBarContext } from '@/contexts/AppBarContext';
-import {
-  type LicenseStatus,
-  useConfig,
-  useUpdateConfig,
-} from '@/contexts/ConfigContext';
-import { useClient } from '@/hooks/api';
-import { LICENSE_CONSOLE_URL } from '@/lib/constants';
-import dayjs from '@/lib/dayjs';
 import ConfirmModal from '@/components/ui/confirm-dialog';
+import { LicenseStatusBadge } from '@/components/LicenseStatusBadge';
+import { LicenseActions } from '@/components/LicenseActions';
+import { ConnectSection } from './ConnectSection';
+import { ServerIdentity } from './ServerIdentity';
+import { useLicenseConnect } from './useLicenseConnect';
+import { AppBarContext } from '@/contexts/AppBarContext';
+import { LicenseContext } from '@/contexts/LicenseContext';
+import { useConfig, type LicenseStatus } from '@/contexts/ConfigContext';
+import { useClient } from '@/hooks/api';
+import { useLicenseState } from '@/hooks/useLicense';
+import { LicenseConnectStatusState } from '@/api/v1/schema';
+import { useI18n } from '@/i18n/I18nProvider';
 import {
-  AlertTriangle,
-  CheckCircle2,
-  Info,
-  Shield,
-  XCircle,
-} from 'lucide-react';
-import { useContext, useEffect, useState } from 'react';
-import { I18nText } from '@/i18n/I18nText';
-import { I18nProps } from '@/i18n/I18nProps';
-import { I18nTemplate } from '@/i18n/I18nTemplate';
+  hasActiveLicense,
+  hasLicensedFeature,
+  licensedFeatures,
+  licenseLink,
+  licensePlanName,
+} from '@/lib/license';
+import dayjs from '@/lib/dayjs';
 
 export default function LicensePage() {
+  const { license, loading, error: statusError } = useLicenseState();
+  const { mutate } = useContext(LicenseContext)!;
   const config = useConfig();
-  const license = config?.license;
-  const updateConfig = useUpdateConfig();
-  const appBarContext = useContext(AppBarContext);
+  const { setTitle, selectedRemoteNode } = useContext(AppBarContext);
+  const remoteNode = selectedRemoteNode || 'local';
   const client = useClient();
-
+  const { ts } = useI18n();
   const [key, setKey] = useState('');
-  const [activating, setActivating] = useState(false);
-  const [deactivating, setDeactivating] = useState(false);
+  const [pendingAction, setPendingAction] = useState<
+    'activate' | 'deactivate' | null
+  >(null);
   const [showDeactivateConfirm, setShowDeactivateConfirm] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const connect = useLicenseConnect(remoteNode);
+  const granted = connect.status?.state === LicenseConnectStatusState.granted;
+  const { clear: clearConnect } = connect;
 
   useEffect(() => {
-    appBarContext.setTitle('License');
-  }, [appBarContext]);
+    setTitle(ts('Plan & features'));
+  }, [setTitle, ts]);
 
-  const remoteNode = appBarContext.selectedRemoteNode || 'local';
+  useEffect(() => {
+    if (!granted) return;
+    // Handle each approval once, even if this effect runs again later.
+    clearConnect();
+    setError(null);
+    void mutate().then((next) =>
+      setSuccessMessage(
+        next && hasActiveLicense(next)
+          ? ts('{plan} connected. Explore your included features below.', {
+              plan: licensePlanName(next),
+            })
+          : ts('License status updated.')
+      )
+    );
+  }, [granted, clearConnect, mutate, ts]);
 
-  async function refreshLicenseStatus() {
-    try {
-      const { data } = await client.GET('/license/status', {
-        params: { query: { remoteNode } },
-      });
-      if (data) {
-        updateConfig({ license: data });
-      }
-    } catch {
-      // Activation state is already applied; status revalidation is best-effort.
-    }
-  }
-
-  async function handleActivate(e?: React.FormEvent) {
-    if (e) e.preventDefault();
+  async function handleActivate(e: React.FormEvent) {
+    e.preventDefault();
     if (!key.trim()) return;
-    setActivating(true);
+    setPendingAction('activate');
     setError(null);
     setSuccessMessage(null);
     try {
-      const { data, error: apiError } = await client.POST('/license/activate', {
-        params: { query: { remoteNode } },
-        body: { key: key.trim() },
-      });
-      if (apiError) {
-        throw new Error(apiError.message || 'Activation failed');
-      }
-      const nextLicense: LicenseStatus = {
-        valid: true,
-        plan: data?.plan || 'pro',
-        features: data?.features || [],
-        expiry: data?.expiry || '',
-        gracePeriod: false,
-        graceEndsAt: '',
-        community: false,
-        source: 'file',
-        warningCode: '',
-        error: '',
-      };
-      updateConfig({ license: nextLicense });
-      void refreshLicenseStatus();
+      const next = await mutate(
+        async () => {
+          const { error: apiError } = await client.POST('/license/activate', {
+            params: { query: { remoteNode } },
+            body: { key: key.trim() },
+          });
+          if (apiError)
+            throw new Error(apiError.message || ts('Activation failed'));
+          const status = await client.GET('/license/status', {
+            params: { query: { remoteNode } },
+          });
+          if (!status.data) throw new Error(ts('License status unavailable'));
+          return status.data;
+        },
+        { revalidate: true }
+      );
       setKey('');
-      setSuccessMessage('License activated successfully.');
+      setSuccessMessage(
+        next && hasActiveLicense(next)
+          ? ts('{plan} activated. Explore your included features below.', {
+              plan: licensePlanName(next),
+            })
+          : ts('License status updated.')
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Activation failed');
+      setError(err instanceof Error ? err.message : ts('Activation failed'));
     } finally {
-      setActivating(false);
+      setPendingAction(null);
     }
   }
 
   async function handleDeactivate() {
     setShowDeactivateConfirm(false);
-    setDeactivating(true);
+    setPendingAction('deactivate');
     setError(null);
     setSuccessMessage(null);
+    const disconnecting = connectedToConsole;
+    let releaseFailed = false;
     try {
-      const { error: apiError } = await client.POST('/license/deactivate', {
-        params: { query: { remoteNode } },
-      });
-      if (apiError) {
-        throw new Error(apiError.message || 'Deactivation failed');
-      }
-      const nextLicense: LicenseStatus = {
-        valid: false,
-        plan: '',
-        features: [],
-        expiry: '',
-        gracePeriod: false,
-        graceEndsAt: '',
-        community: true,
-        source: '',
-        warningCode: '',
-        error: '',
-      };
-      updateConfig({ license: nextLicense });
-      void refreshLicenseStatus();
-      setSuccessMessage('License deactivated. Running in community mode.');
+      await mutate(
+        async () => {
+          const { data, error: apiError } = await client.POST(
+            '/license/deactivate',
+            { params: { query: { remoteNode } } }
+          );
+          if (apiError)
+            throw new Error(apiError.message || ts('Deactivation failed'));
+          releaseFailed = Boolean(data?.releaseFailed);
+          return {
+            valid: false,
+            plan: '',
+            features: [],
+            expiry: '',
+            gracePeriod: false,
+            graceEndsAt: '',
+            community: true,
+            source: '',
+            warningCode: '',
+            error: '',
+          } satisfies LicenseStatus;
+        },
+        { revalidate: true }
+      );
+      setSuccessMessage(
+        releaseFailed
+          ? ts(
+              'Disconnected here, but Dagu Console could not be reached. Disconnect this server in Dagu Console to free its slot.'
+            )
+          : ts(
+              disconnecting
+                ? 'Disconnected. Running in community mode.'
+                : 'License deactivated. Running in community mode.'
+            )
+      );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Deactivation failed');
+      setError(err instanceof Error ? err.message : ts('Deactivation failed'));
     } finally {
-      setDeactivating(false);
+      setPendingAction(null);
     }
   }
 
-  if (!license) return null;
-
+  const active = hasActiveLicense(license);
+  const connectedToConsole =
+    license.connectedVia === 'console' || license.connectedVia === 'key';
+  const known = !loading && !statusError;
   return (
-    <div className="flex flex-col gap-6 max-w-2xl">
+    <div className="flex flex-col gap-4 max-w-3xl">
       <div>
-        <h1 className="text-lg font-semibold">
-          <I18nText text={'License'} />
-        </h1>
+        <h1 className="text-lg font-semibold">{ts('Plan & features')}</h1>
         <p className="text-sm text-muted-foreground">
-          <I18nText
-            text={
-              'View license status and activate a Dagu license or trial key.'
-            }
-          />
+          {ts('Your plan, included features, and license settings.')}
         </p>
       </div>
-
-      {/* Current status */}
-      <div className="card-obsidian p-4 space-y-3">
-        <div className="flex items-center gap-2 text-sm font-medium">
-          <Shield className="h-4 w-4" />
-          <I18nText text={'Current License'} />
+      <section className="card-obsidian p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <LicenseStatusBadge />
+          <span className="text-xs text-muted-foreground break-all">
+            {ts('Server: {name}', { name: license.serverName || remoteNode })}
+          </span>
         </div>
-        <div className="grid grid-cols-[120px_1fr] gap-y-2 text-sm">
-          <span className="text-muted-foreground">
-            <I18nText text={'Status'} />
-          </span>
-          <span className="flex items-center gap-1.5">
-            {license.error ? (
-              <>
-                <XCircle className="h-3.5 w-3.5 text-red-500" />
-                <I18nText text={'License Error'} />
-              </>
-            ) : license.gracePeriod ? (
-              <>
-                <XCircle className="h-3.5 w-3.5 text-amber-500" />
-                <I18nText text={'Grace Period'} />
-              </>
-            ) : license.valid ? (
-              <>
-                <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
-                <I18nText text={'Active'} />
-              </>
-            ) : license.community ? (
-              <I18nText text={'Community Edition'} />
-            ) : (
-              <>
-                <XCircle className="h-3.5 w-3.5 text-red-500" />
-                <I18nText text={'Inactive'} />
-              </>
-            )}
-          </span>
-
-          <span className="text-muted-foreground">
-            <I18nText text={'Plan'} />
-          </span>
-          <span className="capitalize">
-            {license.plan || <I18nText text={'community'} />}
-          </span>
-
-          <span className="text-muted-foreground">
-            <I18nText text={'Features'} />
-          </span>
-          <span>
-            {license.features.length > 0 ? (
-              license.features.join(', ')
-            ) : (
-              <I18nText text={'None'} />
-            )}
-          </span>
-
-          {license.expiry && (
-            <>
-              <span className="text-muted-foreground">
-                <I18nText text={'Expires'} />
-              </span>
-              <span>{dayjs(license.expiry).format('YYYY-MM-DD')}</span>
-            </>
-          )}
-        </div>
-        {license.error && (
-          <div role="alert" className="text-sm text-red-600 dark:text-red-400">
-            {license.error}
-          </div>
+        {known && (
+          <p className="text-sm">
+            {active
+              ? ts('Your {plan} license is active.', {
+                  plan: licensePlanName(license),
+                })
+              : license.community && !license.error
+                ? ts(
+                    'Community includes workflow automation. Add team controls when you need them.'
+                  )
+                : ts('Review your license status to restore paid features.')}
+          </p>
         )}
-      </div>
-
-      {/* Deactivate license */}
-      {!license.community && (
-        <div className="card-obsidian p-4 space-y-3">
-          <div className="text-sm font-medium">
-            <I18nText text={'Deactivate License'} />
+        {known && license.expiry && dayjs(license.expiry).isValid() && (
+          <p className="text-xs text-muted-foreground">
+            {ts('Expires')}: {dayjs(license.expiry).format('YYYY-MM-DD')}
+          </p>
+        )}
+        {known && license.gracePeriod && (
+          <p className="text-sm text-warning">
+            {ts(
+              'Features remain available during the grace period. Renew to keep access.'
+            )}
+          </p>
+        )}
+        {license.error && (
+          <p role="alert" className="text-sm text-destructive">
+            {license.error}
+          </p>
+        )}
+        {statusError ? (
+          <div
+            role="status"
+            className="flex flex-wrap items-center gap-2 text-sm"
+          >
+            <span>{ts('License status unavailable')}</span>
+            <Button size="sm" variant="outline" onClick={() => void mutate()}>
+              {ts('Retry')}
+            </Button>
           </div>
-          {license.source === 'env' ? (
-            <div className="flex items-start gap-2 text-sm text-muted-foreground">
-              <Info className="h-4 w-4 mt-0.5 flex-shrink-0" />
-              <span>
-                <I18nText
-                  text={
-                    'This license is configured via an environment variable ('
-                  }
-                />
-                <code className="text-xs">DAGU_LICENSE</code>{' '}
-                <I18nText text={'or'} />{' '}
-                <code className="text-xs">DAGU_LICENSE_KEY</code>
-                <I18nText
-                  text={
-                    '). To deactivate, remove the environment variable and restart Dagu.'
-                  }
-                />
-              </span>
-            </div>
-          ) : (
-            <>
-              <p className="text-sm text-muted-foreground">
-                <I18nText
-                  text={
-                    'Remove the license from this machine and return to community mode.'
-                  }
-                />
-              </p>
-              <Button
-                variant="destructive"
-                size="sm"
-                className="h-8"
-                disabled={deactivating}
-                onClick={() => setShowDeactivateConfirm(true)}
+        ) : (
+          known &&
+          (active && license.plan !== 'trial' ? (
+            <Button asChild size="sm" variant="outline">
+              <a
+                href={licenseLink('manage', 'plan-page')}
+                target="_blank"
+                rel="noopener noreferrer"
               >
-                <AlertTriangle className="h-3.5 w-3.5" />
-                {deactivating ? (
-                  <I18nText text={'Deactivating...'} />
-                ) : (
-                  <I18nText text={'Deactivate License'} />
-                )}
-              </Button>
-            </>
-          )}
+                {ts('Manage license')}
+              </a>
+            </Button>
+          ) : (
+            <LicenseActions content="plan-page" activationLink={false} />
+          ))
+        )}
+      </section>
+      {successMessage && (
+        <div role="status" className="text-sm text-muted-foreground">
+          <p>{successMessage}</p>
         </div>
       )}
-
-      {/* Activation form */}
-      <div className="card-obsidian p-4 space-y-3">
-        <div className="text-sm font-medium">
-          <I18nText text={'Activate License Key'} />
-        </div>
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
+      {known && license.community && (
+        <ConnectSection
+          connect={connect}
+          managedByEnv={license.source === 'env'}
+          disabled={Boolean(pendingAction)}
+        />
+      )}
+      {known && !license.community && (
+        <ServerIdentity
+          license={license}
+          remoteNode={remoteNode}
+          busy={Boolean(pendingAction)}
+          disconnecting={pendingAction === 'deactivate'}
+          onDisconnect={() => setShowDeactivateConfirm(true)}
+        />
+      )}
+      {known && (
+        <section
+          id="features"
+          className="space-y-2 scroll-mt-4"
+          aria-label={ts('Features')}
+        >
+          <h2 className="text-sm font-semibold">{ts('Features')}</h2>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {licensedFeatures.map((feature) => {
+              const included = hasLicensedFeature(license, feature.id);
+              const setup =
+                feature.id === 'sso' ||
+                (feature.id === 'rbac' && config.authMode !== 'builtin');
+              const href =
+                feature.id === 'rbac' && setup
+                  ? 'https://docs.dagu.sh/server-admin/authentication/builtin'
+                  : feature.href;
+              return (
+                <article
+                  key={feature.id}
+                  className="card-obsidian p-3 flex flex-col items-start gap-2"
+                >
+                  <h3 className="text-sm font-medium">{ts(feature.title)}</h3>
+                  <p className="text-sm text-muted-foreground flex-1">
+                    {ts(feature.description)}
+                  </p>
+                  <div className="flex w-full flex-wrap items-center justify-between gap-2 text-xs">
+                    <span
+                      className={
+                        included
+                          ? 'text-success inline-flex items-center gap-1'
+                          : 'text-muted-foreground'
+                      }
+                    >
+                      {included && (
+                        <Check className="h-3 w-3" aria-hidden="true" />
+                      )}
+                      {ts(
+                        included
+                          ? 'Included'
+                          : 'Requires a license with this feature'
+                      )}
+                    </span>
+                    {included &&
+                      (setup ? (
+                        <a
+                          className="underline"
+                          href={href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {ts('Setup guide')}
+                        </a>
+                      ) : (
+                        <Link className="underline" to={href}>
+                          {ts('Open feature')}
+                        </Link>
+                      ))}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      )}
+      <section
+        id="activate"
+        className="card-obsidian p-4 space-y-3 scroll-mt-4"
+      >
+        <h2 className="text-sm font-medium">{ts('Activate License Key')}</h2>
         <form onSubmit={handleActivate} className="flex gap-2">
-          <I18nProps>
-            <Input
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              placeholder="DAGU-XXXX-XXXX-XXXX-XXXX"
-              className="font-mono text-sm h-8"
-              aria-label="License key"
-            />
-          </I18nProps>
+          <Input
+            type="password"
+            autoComplete="off"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            placeholder="DAGU-XXXX-XXXX-XXXX-XXXX"
+            className="font-mono text-sm h-8"
+            aria-label={ts('License key')}
+            disabled={Boolean(pendingAction)}
+          />
           <Button
             type="submit"
             size="sm"
-            className="h-8 flex-shrink-0"
-            disabled={activating || !key.trim()}
+            className="h-8 shrink-0"
+            disabled={Boolean(pendingAction) || !key.trim()}
           >
-            {activating ? (
-              <I18nText text={'Activating...'} />
-            ) : (
-              <I18nText text={'Activate'} />
-            )}
+            {ts(pendingAction === 'activate' ? 'Activating...' : 'Activate')}
           </Button>
         </form>
-        {error && (
-          <div role="alert" className="text-sm text-destructive">
-            {error}
-          </div>
-        )}
-        {successMessage && (
-          <div
-            role="status"
-            className="text-sm text-green-600 dark:text-green-400"
-          >
-            {successMessage}
-          </div>
-        )}
         <p className="text-xs text-muted-foreground">
-          <I18nTemplate
-            text="Enter your license or trial key to activate Dagu features. You can obtain a key from {console}."
-            values={{
-              console: (
-                <a
-                  href={LICENSE_CONSOLE_URL}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline hover:no-underline"
-                >
-                  console.dagu.sh
-                </a>
-              ),
-            }}
-          />
+          {ts('Enter a server key or license key from Dagu Console.')}
         </p>
-      </div>
-
-      <I18nProps>
-        <ConfirmModal
-          title="Deactivate License"
-          buttonText="Deactivate"
-          visible={showDeactivateConfirm}
-          dismissModal={() => setShowDeactivateConfirm(false)}
-          onSubmit={handleDeactivate}
-        >
-          <p className="text-sm">
-            <I18nText
-              text={
-                'This will deactivate the license on this machine and return to community mode. Licensed features (audit, RBAC, SSO) will be disabled immediately.'
-              }
-            />
-          </p>
-        </ConfirmModal>
-      </I18nProps>
+      </section>
+      <ConfirmModal
+        title={ts(
+          connectedToConsole ? 'Disconnect this server' : 'Deactivate License'
+        )}
+        buttonText={ts(connectedToConsole ? 'Disconnect' : 'Deactivate')}
+        visible={showDeactivateConfirm}
+        dismissModal={() => setShowDeactivateConfirm(false)}
+        onSubmit={handleDeactivate}
+      >
+        <p className="text-sm">
+          {ts(
+            connectedToConsole
+              ? 'Paid features become unavailable on this server and its slot in Dagu Console is freed for another server. Existing API keys remain active.'
+              : 'This will deactivate the license on this server. Paid features will become unavailable. Existing API keys remain active.'
+          )}
+        </p>
+      </ConfirmModal>
     </div>
   );
 }

@@ -243,11 +243,17 @@
       "enum": ["local", "distributed"],
       "default": "local"
     },
+    "signal_handling": {
+      "$ref": "#/definitions/SignalHandlingDef"
+    },
     "tunnel": {
       "$ref": "#/definitions/TunnelDef"
     },
     "license": {
       "$ref": "#/definitions/LicenseDef"
+    },
+    "cloud": {
+      "$ref": "#/definitions/CloudDef"
     }
   },
   "definitions": {
@@ -967,7 +973,7 @@
       "properties": {
         "log_encoding_charset": {
           "type": "string",
-          "description": "Character encoding for log display."
+          "description": "Character encoding for log lines that are not valid UTF-8."
         },
         "navbar_color": {
           "type": "string",
@@ -1159,6 +1165,10 @@
           "minimum": 0,
           "maximum": 65535
         },
+        "shutdown_timeout": {
+          "type": "string",
+          "description": "How long a worker stopping on SIGINT or SIGTERM drains running DAG runs before it cancels them. Default: '60s'. Set to '0' to wait without a bound. Set the supervisor's stop timeout at least 15s above this value (systemd TimeoutStopSec defaults to 90s, docker stop to 10s, Kubernetes terminationGracePeriodSeconds to 30s)."
+        },
         "labels": {
           "oneOf": [
             {
@@ -1277,6 +1287,18 @@
         "stale_threshold": {
           "type": "string",
           "description": "Duration after which a process heartbeat is considered stale. Default: '90s'."
+        }
+      }
+    },
+    "SignalHandlingDef": {
+      "type": "object",
+      "description": "Signal handling options for supervising processes (server, scheduler, start-all).",
+      "additionalProperties": false,
+      "properties": {
+        "enable_propagation": {
+          "type": "boolean",
+          "description": "Forward shutdown signals (SIGINT, SIGTERM) received by a supervising process to the process groups of running DAG-run subprocesses it launched. Default: false.",
+          "default": false
         }
       }
     },
@@ -1609,6 +1631,22 @@
         "cloud_url": {
           "type": "string",
           "description": "License service URL."
+        },
+        "server_name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name that identifies this server in Dagu Console. Default: the hostname."
+        }
+      }
+    },
+    "CloudDef": {
+      "type": "object",
+      "description": "What a server with an online license shares with Dagu Console.",
+      "additionalProperties": false,
+      "properties": {
+        "report": {
+          "type": "boolean",
+          "description": "Report this server's health to Dagu Console. Default: true."
         }
       }
     }
