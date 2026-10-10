@@ -5,6 +5,7 @@ package api
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/dagucloud/dagu/v2/internal/cmn/config"
 	"github.com/dagucloud/dagu/v2/internal/remotenode"
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -328,6 +330,50 @@ func TestRemoteLogDownloadAbort(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			require.PanicsWithValue(t, http.ErrAbortHandler, func() { handler.ServeHTTP(recorder, request) })
 			require.Equal(t, "partial", recorder.Body.String())
+		})
+	}
+}
+
+// Log download bodies are forwarded unchanged, so the remote may only pick an
+// encoding the client accepts.
+func TestRemoteLogDownloadEncoding(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		accept     string
+		wantAccept string
+	}{
+		{name: "gzip", accept: "gzip", wantAccept: "gzip"},
+		{name: "none", wantAccept: "identity"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			remote := httptest.NewServer(middleware.Compress(5)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, test.wantAccept, r.Header.Get("Accept-Encoding"))
+				w.Header().Set("Content-Type", "text/plain")
+				_, _ = w.Write([]byte("log body"))
+			})))
+			defer remote.Close()
+			resolver := remotenode.NewResolver([]config.RemoteNode{{Name: "edge", APIBaseURL: remote.URL + "/api/v1"}}, nil)
+			handler := WithRemoteNode(resolver, "/api/v1")(http.NotFoundHandler())
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/dag-runs/example/run/log/download?remoteNode=edge", nil)
+			if test.accept != "" {
+				request.Header.Set("Accept-Encoding", test.accept)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			body := io.Reader(recorder.Body)
+			if test.accept == "gzip" {
+				require.Equal(t, "gzip", recorder.Header().Get("Content-Encoding"))
+				require.Contains(t, recorder.Header().Values("Vary"), "Accept-Encoding")
+				reader, err := gzip.NewReader(body)
+				require.NoError(t, err)
+				body = reader
+			} else {
+				require.Empty(t, recorder.Header().Get("Content-Encoding"))
+			}
+			got, err := io.ReadAll(body)
+			require.NoError(t, err)
+			require.Equal(t, "log body", string(got))
 		})
 	}
 }

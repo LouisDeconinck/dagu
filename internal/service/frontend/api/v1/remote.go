@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -92,6 +93,7 @@ func WithRemoteNode(resolver *remotenode.Resolver, apiBasePath string) func(next
 				}
 				if encoding := resp.Header.Get("Content-Encoding"); encoding != "" {
 					w.Header().Set("Content-Encoding", encoding)
+					w.Header().Add("Vary", "Accept-Encoding")
 				}
 				w.WriteHeader(resp.StatusCode)
 				if _, err := io.Copy(flushWriter{w}, resp.Body); err != nil {
@@ -297,8 +299,13 @@ func (h *remoteNodeProxy) doRequest(body io.Reader, r *http.Request) (*http.Resp
 	}
 
 	if isLogDownload(r, h.apiBasePath) {
-		// Log download bodies are forwarded unchanged; avoid transfer encodings.
-		req.Header.Set("Accept-Encoding", "identity")
+		// Encoded bodies are forwarded unchanged, so the remote may only use
+		// encodings the client accepts.
+		if encodings := r.Header.Values("Accept-Encoding"); len(encodings) > 0 {
+			req.Header["Accept-Encoding"] = slices.Clone(encodings)
+		} else {
+			req.Header.Set("Accept-Encoding", "identity")
+		}
 		// Log downloads have no total duration limit; connection setup remains bounded.
 		client.Timeout = 0
 		transport.DialContext = (&net.Dialer{Timeout: remoteProxyTimeout}).DialContext
